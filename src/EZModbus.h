@@ -12,11 +12,15 @@
 
 // Drivers
 #include "drivers/ModbusHAL_UART.h"
-#include "drivers/ModbusHAL_TCP.h"
+#if defined(ARDUINO_ARCH_ESP32) || defined(ESP_PLATFORM) || defined(PICO_SDK)
+    #include "drivers/ModbusHAL_TCP.h" // TCP available on ESP32 and Pico (with CH9120)
+#endif
 
 // Interfaces
 #include "interfaces/ModbusRTU.h"
-#include "interfaces/ModbusTCP.h"
+#if defined(ARDUINO_ARCH_ESP32) || defined(ESP_PLATFORM) || defined(PICO_SDK)
+    #include "interfaces/ModbusTCP.h" // TCP available on ESP32 and Pico (with CH9120)
+#endif
 
 // Application components
 #include "apps/ModbusClient.h"

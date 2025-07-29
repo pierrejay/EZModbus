@@ -7,26 +7,14 @@
 
 #include "core/ModbusCore.h"
 #include "core/ModbusFrame.hpp"
+#include "utils/ModbusEventBus.hpp" // Moved here from ModbusCore.h to break circular dependency
 
-#ifndef EZMODBUS_MAX_DEBUG_MSG_SIZE // Maximum length for a formatted debug message (including null terminator)
+#ifndef EZMODBUS_MAX_DEBUG_MSG_SIZE // Maximum length for a formatted debug message (including \r\n\0 at the end)
     #define EZMODBUS_MAX_DEBUG_MSG_SIZE 256
 #endif
 
 namespace Modbus {
 namespace Debug {
-
-/* @brief Context structure to capture call location information
- */
-struct CallCtx {
-    const char* file;
-    const char* function;
-    int line;
-    
-    CallCtx(const char* f = __builtin_FILE(), 
-            const char* func = __builtin_FUNCTION(), 
-            int l = __builtin_LINE()) 
-        : file(f), function(func), line(l) {}
-};
 
 /* @brief Maximum size for a formatted debug message (including null terminator) */
 constexpr size_t MAX_DEBUG_MSG_SIZE = (size_t)EZMODBUS_MAX_DEBUG_MSG_SIZE;
@@ -41,22 +29,47 @@ constexpr size_t MAX_DEBUG_MSG_SIZE = (size_t)EZMODBUS_MAX_DEBUG_MSG_SIZE;
 namespace Modbus {
 namespace Debug {
 
-/* @brief Utility function to extract the filename from a full path
- * @param path The full path to extract the filename from
- * @return The filename
+/* @brief Copy the prefix into dst and return the number of characters written.
+ * @brief Reduces calls to snprintf in logs (heavy overhead on RP2040)
+ * @param dst Destination buffer
+ * @param dstSize Size of the destination buffer
+ * @param ctx Call context (file, function, line)
+ * @return Number of characters written
  */
-static const char* getBasename(const char* path) {
-    const char* basename = path;
-    
-    // Search for the last occurrence of '/' (Unix/Linux/macOS)
-    const char* lastSlash = strrchr(path, '/');
-    if (lastSlash) basename = lastSlash + 1;
-    
-    // Search for the last occurrence of '\' (Windows)
-    const char* lastBackslash = strrchr(path, '\\');
-    if (lastBackslash && lastBackslash > basename) basename = lastBackslash + 1;
-    
-    return basename;
+inline size_t buildPrefix(char* dst,
+                          size_t dstSize,
+                          const CallCtx& ctx)
+{
+    size_t i = 0;
+    auto put = [&](char c) {
+        if (i + 1 < dstSize) dst[i++] = c;   // +1 to leave space for '\0'
+    };
+
+    put('[');
+
+    // File name
+    for (const char* p = ModbusTypeDef::getBasename(ctx.file); *p; ++p) put(*p);
+
+    put(':'); put(':');
+
+    // Function name
+    for (const char* p = ctx.function; *p; ++p) put(*p);
+
+    put(':');
+
+    // Line number (minimal itoa)
+    char num[10];                       // max 4 294 967 295
+    int  len = 0, n = ctx.line;
+    do {
+        num[len++] = char('0' + (n % 10));
+        n /= 10;
+    } while (n && len < 10);
+    while (len) put(num[--len]);
+
+    put(']'); put(' ');
+
+    dst[i] = '\0';
+    return i;
 }
 
 /* @brief Log a simple debug message with context information
@@ -64,70 +77,78 @@ static const char* getBasename(const char* path) {
  * @param ctx Call context (file, function, line)
  */
 inline void LOG_MSG(const char* message = "", CallCtx ctx = CallCtx()) {
-    Modbus::Logger::logf("[%s::%s:%d] %s\n", getBasename(ctx.file), ctx.function, ctx.line, message);
+    Modbus::Logger::logf("[%s::%s:%d] %s\n", ModbusTypeDef::getBasename(ctx.file), ctx.function, ctx.line, message);
 }
 
 /* @brief Format and log a debug message with printf-style formatting
  * @param ctx Call context (file, function, line)
- * @param format Printf-style format string
+ * @param userFmt Printf-style format string
  * @param args Arguments for the format string
  */
 template<typename... Args>
-inline void LOG_MSGF_CTX(CallCtx ctx, const char* format, Args&&... args) {
-    // Format directly into a fixed-size stack buffer and truncate if necessary
-    char buffer[MAX_DEBUG_MSG_SIZE];
+inline void LOG_MSGF_CTX(CallCtx ctx,
+                         const char* userFmt,
+                         Args&&... args)
+{
+    // Format the prefix (call context info: file, function, line)
+    char fmtBuf[Modbus::Logger::MAX_MSG_SIZE];
+    size_t idx = buildPrefix(fmtBuf, sizeof(fmtBuf), ctx);
 
-    // snprintf guarantees null-termination if buffer size > 0
-    int written = snprintf(buffer, sizeof(buffer), format, std::forward<Args>(args)...);
-    if (written < 0) return; // snprintf error
+    // Concatenate userFmt respecting the max size
+    size_t copy = strnlen(userFmt, sizeof(fmtBuf) - idx - 1);
+    memcpy(fmtBuf + idx, userFmt, copy);
+    idx += copy;
+    fmtBuf[idx] = '\0';
 
-    // Determine suffix to indicate truncation if needed
-    const char* suffix = (written >= static_cast<int>(sizeof(buffer))) ? " ..." : "";
-
-    // Single logf call with context information
-    Modbus::Logger::logf("[%s::%s:%d] %s%s",
-                         getBasename(ctx.file), ctx.function, ctx.line,
-                         buffer, suffix);
+    // Send to logger with user args
+    Modbus::Logger::logf(fmtBuf, std::forward<Args>(args)...);
 }
 
 /* @brief Macro to automatically capture call context
  * @param format Printf-style format string
  * @param args Arguments for the format string
  */
-#define LOG_MSGF(format, ...) LOG_MSGF_CTX(Modbus::Debug::CallCtx(), format, ##__VA_ARGS__)
+#define LOG_MSGF(format, ...) LOG_MSGF_CTX(CallCtx(), format, ##__VA_ARGS__)
 
+/* @brief Log a hexdump of a byte buffer with context information
+ * @param bytes Byte buffer to log
+ * @param ctx Call context (file, function, line)
+ */
 inline void LOG_HEXDUMP(const ByteBuffer& bytes, CallCtx ctx = CallCtx()) {
+    char buf[MAX_DEBUG_MSG_SIZE];
+    size_t idx = buildPrefix(buf, sizeof(buf), ctx);
+
+    /* "Hexdump: " */
+    static constexpr char header[] = "Hexdump: ";
+    memcpy(buf + idx, header, sizeof(header) - 1);
+    idx += sizeof(header) - 1;
+
     if (bytes.empty()) {
-        Modbus::Logger::logf("[%s::%s:%d] Hexdump:<empty>\n", getBasename(ctx.file), ctx.function, ctx.line);
+        // Add "<empty>" then log if void buffer
+        memcpy(buf + idx, "<empty>", 7);
+        idx += 7;
+        buf[idx] = '\0';
+        Modbus::Logger::logln(buf);
         return;
     }
 
-    char buffer[MAX_DEBUG_MSG_SIZE];
-    size_t idx = 0;
+    static constexpr char LUT[] = "0123456789ABCDEF";
 
-    // Prefix
-    idx += snprintf(buffer + idx, sizeof(buffer) - idx, "Hexdump: ");
-
-    // Hex bytes
     for (uint8_t b : bytes) {
-        if (idx + 4 >= sizeof(buffer)) { // 3 chars for "..." + null terminator reserve
-            idx += snprintf(buffer + idx, sizeof(buffer) - idx, "...");
+        // 3 characters per byte ("XX ") + "...\r\n\0" = 6
+        if (idx + 6 > sizeof(buf) - 1) {
+            buf[idx++] = '.';
+            buf[idx++] = '.';
+            buf[idx++] = '.';
             break;
         }
-        idx += snprintf(buffer + idx, sizeof(buffer) - idx, "%02X ", b);
+        buf[idx++] = LUT[b >> 4];
+        buf[idx++] = LUT[b & 0x0F];
+        buf[idx++] = ' ';
     }
 
-    // Newline termination (ensure room for 1 char + null)
-    if (idx + 2 < sizeof(buffer)) {
-        buffer[idx++] = '\n';
-        buffer[idx] = '\0';
-    } else {
-        buffer[sizeof(buffer) - 2] = '\n';
-        buffer[sizeof(buffer) - 1] = '\0';
-    }
-
-    // Single logf call for everything
-    Modbus::Logger::logf("[%s::%s:%d] %s", getBasename(ctx.file), ctx.function, ctx.line, buffer);
+    buf[idx] = '\0'; // Logger will add "\r\n" automatically
+    Modbus::Logger::logln(buf);
 }
 
 /* @brief Log a Modbus frame with context information
@@ -137,7 +158,7 @@ inline void LOG_HEXDUMP(const ByteBuffer& bytes, CallCtx ctx = CallCtx()) {
  */
 inline void LOG_FRAME(const Modbus::Frame& frame, const char* desc = nullptr, CallCtx ctx = CallCtx()) {
     // Log header with file/function/line information
-    Modbus::Logger::logf("[%s::%s:%d] %s:\n", getBasename(ctx.file), ctx.function, ctx.line, desc);
+    Modbus::Logger::logf("[%s::%s:%d] %s:\n", ModbusTypeDef::getBasename(ctx.file), ctx.function, ctx.line, desc);
     
     // Body
     Modbus::Logger::logf("> Type           : %s\n", frame.type == Modbus::REQUEST ? "REQUEST" : "RESPONSE");
@@ -148,27 +169,52 @@ inline void LOG_FRAME(const Modbus::Frame& frame, const char* desc = nullptr, Ca
     
     // Frame data (only if not empty)
     if (frame.regCount > 0) {
+        // Pre-format data using manual concatenation (no snprintf in loop)
         constexpr size_t bufSize = MAX_DEBUG_MSG_SIZE;
         char dataStr[bufSize];
-        strcpy(dataStr, "> Data           : ");
+        size_t idx = 0;
+        
+        // Initial prefix
+        const char prefix[] = "> Data           : ";
+        memcpy(dataStr, prefix, sizeof(prefix) - 1);
+        idx = sizeof(prefix) - 1;
+        
+        // Hex conversion using lookup table
+        static constexpr char LUT[] = "0123456789ABCDEF";
         
         for (int i = 0; i < frame.regCount; i++) {
-            char buffer[10];
-            int written = snprintf(buffer, sizeof(buffer), "0x%04X ", frame.data[i]);
-
-            // Bytes still available in dataStr (leave 4 chars: "..." + null)
-            size_t remaining = bufSize - strlen(dataStr) - 1;
-
-            if (written >= 0 && static_cast<size_t>(written) < remaining) {
-                // Enough room → append normally
-                strncat(dataStr, buffer, remaining);
-            } else {
-                // Not enough room → append truncation suffix and stop
-                strncat(dataStr, "...", remaining);
+            // Check space for next "0xXXXX " (7 chars) + "..." (3 chars) + future "\r\n" from ModbusLogger (2 chars) + "\0" (1 char)
+            if (idx + 13 > bufSize) { // 7 + 3 + 2 + 1 = 13
+                // Not enough space for next register → add "..." and stop
+                idx = bufSize - 13;
+                dataStr[idx++] = '.';
+                dataStr[idx++] = '.';
+                dataStr[idx++] = '.';
                 break;
             }
+            
+            // Manual hex conversion: much faster than snprintf("0x%04X ", frame.data[i])
+            uint16_t reg = frame.data[i];
+            
+            // "0x" prefix
+            dataStr[idx++] = '0';
+            dataStr[idx++] = 'x';
+            
+            // Convert 16-bit value to 4 hex digits (big-endian: MSB first)
+            dataStr[idx++] = LUT[(reg >> 12) & 0x0F];  // Bits 15-12
+            dataStr[idx++] = LUT[(reg >> 8)  & 0x0F];  // Bits 11-8
+            dataStr[idx++] = LUT[(reg >> 4)  & 0x0F];  // Bits 7-4
+            dataStr[idx++] = LUT[(reg >> 0)  & 0x0F];  // Bits 3-0
+            
+            // Space separator
+            dataStr[idx++] = ' ';
         }
-        Modbus::Logger::logf("%s\n", dataStr);
+        
+        // Add null terminator
+        dataStr[idx] = '\0';
+        
+        // Single logln call (handles \r\n automatically + truncation)
+        Modbus::Logger::logln(dataStr);
     }
     
     // Exception code (if present)

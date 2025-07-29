@@ -10,6 +10,8 @@
 // keeps the same API while using the tested EZModbus codec to
 // encode/decode Modbus frames acting as a client.
 
+using ByteBuffer = ModbusCodec::ByteBuffer;
+
 class ModbusTestClient {
 public:
 

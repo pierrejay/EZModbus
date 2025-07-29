@@ -7,12 +7,6 @@
 #include <Arduino.h>
 #include "EZModbus.h"
 
-// Aliases for convenience
-using UART = ModbusHAL::UART;
-using UARTConfig = ModbusHAL::UART::Config;
-using ModbusRTU = ModbusInterface::RTU;
-using ModbusServer = Modbus::Server;
-
 // Server configuration
 #define DEMO_SLAVE_ID 1
 
@@ -36,15 +30,23 @@ namespace RegAddr {
     constexpr uint16_t ALARM_FLAGS = 500;     // Discrete input with direct pointer
 }
 
-// UART configuration & instance
+// Aliases for convenience
+using UART = ModbusHAL::UART;
+using UARTConfig = ModbusHAL::UART::Config;
+using ModbusRTU = ModbusInterface::RTU;
+using ModbusServer = Modbus::Server;
+
+// UART Configuration
 UARTConfig uartConfig = {
     .serial = Serial2,
     .baud = 9600,
     .config = SERIAL_8N1,
     .rxPin = 16,
     .txPin = 17,
-    .dePin = 5
+    .dePin = 5  // DE/RE pin for RS485 communication
 };
+
+// UART port for Modbus RTU
 UART uart(uartConfig);
 
 // Modbus RTU interface

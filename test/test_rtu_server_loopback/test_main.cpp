@@ -6,6 +6,10 @@
 #include "ModbusTestClient.h"
 #include <utils/ModbusLogger.hpp>
 
+// Aliases for convenience
+using UART = ModbusHAL::UART;
+using UARTConfig = ModbusHAL::UART::Config;
+
 // Pin definitions
 #define MBT_RX D7 // ModbusTest RX
 #define MBT_TX D8 // ModbusTest TX
@@ -26,14 +30,15 @@ ModbusTestClient testClient(agent);
 #define DISCRETE_INPUTS 1
 
 // EZModbus RTU server with StaticWordStore
-ModbusHAL::UART::IDFConfig ezm_cfg = {
-    .uartNum = UART_NUM_1,
+UARTConfig ezmConfig = {
+    .serial = Serial1,
     .baud = 9600,
-    .config = ModbusHAL::UART::CONFIG_8N1,
+    .config = SERIAL_8N1,
     .rxPin = EZM_RX,
-    .txPin = EZM_TX
+    .txPin = EZM_TX,
+    .dePin = -1
 };
-ModbusHAL::UART ezm_uart(ezm_cfg);
+UART ezm_uart(ezmConfig);
 ModbusInterface::RTU rtu(ezm_uart, Modbus::SLAVE);
 Modbus::StaticWordStore<150> staticStore;  // Stack-allocated store for test words
 Modbus::Server server(rtu, staticStore, 1, true);  // NEW: External WordStore
@@ -112,29 +117,6 @@ void test_add_multiple_registers() {
     do_test_add_registers(server, c.handle, true, "5 coil add failed");
     do_test_add_registers(server, d.handle, true, "5 discrete input add failed");
 }
-
-// void test_add_overflow_registers() {
-//     Modbus::Logger::logln("\nTEST_ADD_OVERFLOW_REGISTERS");
-//     // Define max number of registers per type
-//     DummyRegSuite<Modbus::HOLDING_REGISTER> h(1, Modbus::Server::MAX_REGISTERS);
-//     DummyRegSuite<Modbus::INPUT_REGISTER> i(1, Modbus::Server::MAX_REGISTERS);
-//     DummyRegSuite<Modbus::COIL> c(1, Modbus::Server::MAX_REGISTERS);
-//     DummyRegSuite<Modbus::DISCRETE_INPUT> d(1, Modbus::Server::MAX_REGISTERS);
-//     // Define one more register to overflow
-//     DummyRegister h2(Modbus::HOLDING_REGISTER, Modbus::Server::MAX_REGISTERS+1);
-//     DummyRegister c2(Modbus::INPUT_REGISTER, Modbus::Server::MAX_REGISTERS+1);
-//     DummyRegister i2(Modbus::COIL, Modbus::Server::MAX_REGISTERS+1);
-//     DummyRegister d2(Modbus::DISCRETE_INPUT, Modbus::Server::MAX_REGISTERS+1);
-//     // Add all of them, first add should succeed, second add should fail
-//     do_test_add_registers(server, h.handle, true, "fill with holding failed");
-//     do_test_add_registers(server, i.handle, true, "fill with holding failed");
-//     do_test_add_registers(server, c.handle, true, "fill with holding failed");
-//     do_test_add_registers(server, d.handle, true, "fill with holding add failed");
-//     do_test_add_register(server, h2.reg, false, "overflow holding add failed");
-//     do_test_add_register(server, i2.reg, false, "overflow holding add failed");
-//     do_test_add_register(server, c2.reg, false, "overflow holding add failed");
-//     do_test_add_register(server, d2.reg, false, "overflow holding add failed");
-// }
 
 void test_add_no_read_callback() {
     Modbus::Logger::logln("\nTEST_ADD_NO_READ_CALLBACK");
@@ -314,28 +296,6 @@ void test_get_register() {
     TEST_ASSERT_FALSE(server.getWord(Modbus::DISCRETE_INPUT, 2));
 }
 
-// void test_clear_registers() {
-//     Modbus::Logger::logln("\nTEST_CLEAR_REGISTERS");
-//     // Add registers
-//     DummyRegSuite<Modbus::HOLDING_REGISTER> h(10,5);
-//     DummyRegSuite<Modbus::INPUT_REGISTER> i(20,5);
-//     DummyRegSuite<Modbus::COIL> c(30,5);
-//     DummyRegSuite<Modbus::DISCRETE_INPUT> d(40,5);
-//     do_test_add_registers(server, h.handle, true, "5 holding add failed");
-//     do_test_add_registers(server, i.handle, true, "5 input add failed");
-//     do_test_add_registers(server, c.handle, true, "5 coil add failed");
-//     do_test_add_registers(server, d.handle, true, "5 discrete input add failed");
-//     // Clear registers and test if all of them are cleared
-//     server.clearRegisters(Modbus::HOLDING_REGISTER);
-//     server.clearRegisters(Modbus::INPUT_REGISTER);
-//     server.clearRegisters(Modbus::COIL);
-//     server.clearRegisters(Modbus::DISCRETE_INPUT);
-//     for (auto& reg : h.handle) TEST_ASSERT_FALSE(server.getRegister(reg.type, reg.address));
-//     for (auto& reg : i.handle) TEST_ASSERT_FALSE(server.getRegister(reg.type, reg.address));
-//     for (auto& reg : c.handle) TEST_ASSERT_FALSE(server.getRegister(reg.type, reg.address));
-//     for (auto& reg : d.handle) TEST_ASSERT_FALSE(server.getRegister(reg.type, reg.address));
-// }
-
 void test_clear_all_registers() {
     Modbus::Logger::logln("\nTEST_CLEAR_ALL_REGISTERS");
     // Add registers
@@ -438,59 +398,6 @@ void addRegisterTask(void* pvParameters) {
     xSemaphoreGive(doneSem);
     vTaskDelete(NULL);
 }
-
-/*void test_concurrent_add_registers() {
-    Modbus::Logger::logln("\nTEST_CONCURRENT_ADD_REGISTERS");
-
-    // 0) Suspend the server task to release the cores
-    vTaskSuspend(ezmTaskHandle);
-
-    // 1) (Re)create the semaphores
-    readySem = xSemaphoreCreateCounting(2, 0);
-    startSem = xSemaphoreCreateCounting(2, 0);
-    doneSem  = xSemaphoreCreateCounting(2, 0);
-    TEST_ASSERT_NOT_NULL(readySem);
-    TEST_ASSERT_NOT_NULL(startSem);
-    TEST_ASSERT_NOT_NULL(doneSem);
-
-    // 2) Launch 2 tasks, idx=0 ➞ core0, idx=1 ➞ core1, priority > poll()
-    const UBaseType_t prio = uxTaskPriorityGet(NULL) + 1; // just above the runner's priority
-    xTaskCreatePinnedToCore(addRegisterTask, "AddReg0", 4096, (void*)0, prio, NULL, 0);
-    xTaskCreatePinnedToCore(addRegisterTask, "AddReg1", 4096, (void*)1, prio, NULL, 1);
-
-    // 3) Wait for them to be ready
-    xSemaphoreTake(readySem, portMAX_DELAY);
-    xSemaphoreTake(readySem, portMAX_DELAY);
-
-    // 4) Start the tasks
-    xSemaphoreGive(startSem);
-    xSemaphoreGive(startSem);
-
-    // 5) Wait for them to finish addRegister()
-    xSemaphoreTake(doneSem, portMAX_DELAY);
-    xSemaphoreTake(doneSem, portMAX_DELAY);
-
-    // 6) Check that only one succeeded and the other is BUSY
-    bool s0 = (addResults[0] == Modbus::Server::SUCCESS);
-    bool s1 = (addResults[1] == Modbus::Server::SUCCESS);
-    TEST_ASSERT_START();
-    TEST_ASSERT_TRUE_MESSAGE(s0 ^ s1, "Only one of the two tasks must succeed");
-    if (s0)
-      TEST_ASSERT_EQUAL_MESSAGE(Modbus::Server::ERR_WORD_BUSY, addResults[1], "2nd task must return ERR_WORD_BUSY");
-    else
-      TEST_ASSERT_EQUAL_MESSAGE(Modbus::Server::ERR_WORD_BUSY, addResults[0], "1st task must return ERR_WORD_BUSY");
-
-    // 7) Check that only one register was added
-    auto r = server.getWord(Modbus::HOLDING_REGISTER, concurrentReg.word.startAddr);
-    TEST_ASSERT_TRUE(r);
-    TEST_ASSERT_EQUAL_MESSAGE(concurrentReg.reg.readCb(concurrentReg.reg), r.readCb(r), "readCb must be the same");
-    // 8) Cleanup
-    server.clearAllWords();
-    vSemaphoreDelete(readySem);
-    vSemaphoreDelete(startSem);
-    vSemaphoreDelete(doneSem);
-    vTaskResume(ezmTaskHandle);
-}*/
 
 // ===================================================================================
 // READ/WRITE REQUESTS TESTS
@@ -1091,61 +998,41 @@ void test_word_write_requests() {
 }
 
 void test_word_handler_failures() {
-    // TODO: Temporarily commented out - uses readHoldingRegisters, writeHoldingRegisters and lastErrorOccurred methods not implemented in ModbusTestClient
-    /*
     Modbus::Logger::logln("\nTEST_WORD_HANDLER_FAILURES");
     
     // Test 1 : Word avec handler de lecture qui échoue
     FailingReadWord failRead(Modbus::HOLDING_REGISTER, 700, 2);
     do_test_add_word(server, failRead.word, true, "failing read word add failed");
     
-    std::vector<uint16_t> readVals = testClient.readHoldingRegisters(1, 700, 2);
-    TEST_ASSERT_TRUE_MESSAGE(testClient.lastErrorOccurred(), "Failing read handler should cause error");
-    TEST_ASSERT_EQUAL_STRING_MESSAGE("SLAVE_DEVICE_FAILURE", testClient.lastError(), "Wrong error for read handler failure");
+    // Tentative de lecture - doit échouer avec SLAVE_DEVICE_FAILURE
+    int numRead = testClient.requestFrom(1, HOLDING_REGISTERS, 700, 2);
+    const char* errMsg = testClient.lastError();
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(0, numRead, "Failing read handler should cause error");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Slave device failure", errMsg, "Wrong error for read handler failure");
     
     // Test 2 : Word avec handler d'écriture qui échoue
     FailingWriteWord failWrite(800, 2, 5000);
     do_test_add_word(server, failWrite.word, true, "failing write word add failed");
     
-    std::vector<uint16_t> writeVals = {6000, 6001};
-    bool writeOk = testClient.writeHoldingRegisters(1, 800, writeVals);
-    TEST_ASSERT_FALSE_MESSAGE(writeOk, "Failing write handler should fail");
-    TEST_ASSERT_TRUE_MESSAGE(testClient.lastErrorOccurred(), "Failing write handler should cause error");
-    TEST_ASSERT_EQUAL_STRING_MESSAGE("SLAVE_DEVICE_FAILURE", testClient.lastError(), "Wrong error for write handler failure");
-    */
-}
-
-void test_word_register_priority() {
-    // TODO: Temporarily commented out - uses readHoldingRegisters and lastErrorOccurred methods not implemented in ModbusTestClient
-    /*
-    Modbus::Logger::logln("\nTEST_WORD_REGISTER_PRIORITY");
+    // D'abord vérifier qu'on peut lire les valeurs initiales
+    numRead = testClient.requestFrom(1, HOLDING_REGISTERS, 800, 2);
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(2, numRead, "Read before write should succeed");
+    TEST_ASSERT_EQUAL_MESSAGE(5000, testClient.read(), "Initial value 0 wrong");
+    TEST_ASSERT_EQUAL_MESSAGE(5001, testClient.read(), "Initial value 1 wrong");
     
-    // Test 1 : Ajouter d'abord un Register
-    DummyRegister reg(Modbus::HOLDING_REGISTER, 900);
-    do_test_add_register(server, reg.reg, true, "register add failed");
+    // Tentative d'écriture - doit échouer avec SLAVE_DEVICE_FAILURE
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(1, testClient.beginTransmission(1, HOLDING_REGISTERS, 800, 2),
+        "beginTransmission should succeed");
+    TEST_ASSERT_EQUAL_MESSAGE(1, testClient.write(6000), "write should succeed");
+    TEST_ASSERT_EQUAL_MESSAGE(1, testClient.write(6001), "write should succeed");
+    TEST_ASSERT_EQUAL_MESSAGE(0, testClient.endTransmission(),
+        "Failing write handler should fail at endTransmission");
     
-    // Vérifier que le register fonctionne
-    std::vector<uint16_t> readVals = testClient.readHoldingRegisters(1, 900, 1);
-    TEST_ASSERT_FALSE_MESSAGE(testClient.lastErrorOccurred(), "Register read should work");
-    TEST_ASSERT_EQUAL_MESSAGE(1, readVals.size(), "Register read size wrong");
-    TEST_ASSERT_EQUAL_MESSAGE(900, readVals[0], "Register value wrong");
-    
-    // Test 2 : Ajouter un Word sur la même adresse → Word doit être prioritaire
-    DummyWord word(Modbus::HOLDING_REGISTER, 900, 2, 9999);
-    do_test_add_word(server, word.word, true, "word over register failed");
-    
-    // Test 3 : Maintenant la lecture d'un seul registre doit échouer (Word prioritaire)
-    readVals = testClient.readHoldingRegisters(1, 900, 1);
-    TEST_ASSERT_TRUE_MESSAGE(testClient.lastErrorOccurred(), "Single register read should fail when word exists");
-    TEST_ASSERT_EQUAL_STRING_MESSAGE("ILLEGAL_DATA_ADDRESS", testClient.lastError(), "Wrong error for partial word access");
-    
-    // Test 4 : Mais la lecture complète du Word doit marcher
-    readVals = testClient.readHoldingRegisters(1, 900, 2);
-    TEST_ASSERT_FALSE_MESSAGE(testClient.lastErrorOccurred(), "Full word read should work");
-    TEST_ASSERT_EQUAL_MESSAGE(2, readVals.size(), "Word read size wrong");
-    TEST_ASSERT_EQUAL_MESSAGE(9999, readVals[0], "Word value 0 wrong");
-    TEST_ASSERT_EQUAL_MESSAGE(10000, readVals[1], "Word value 1 wrong");
-    */
+    errMsg = testClient.lastError();
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Slave device failure", errMsg, "Wrong error for write handler failure");
 }
 
 void test_float_conversion_utils() {
@@ -1175,28 +1062,28 @@ void test_float_conversion_utils() {
 }
 
 void test_float_word_integration() {
-    // TODO: Temporarily commented out - uses readHoldingRegisters, writeHoldingRegisters and lastErrorOccurred methods not implemented in ModbusTestClient
-    /*
     Modbus::Logger::logln("\nTEST_FLOAT_WORD_INTEGRATION");
     
     // Setup : Variable float et Word associé
-    float temperature = 25.5f;
+    static float temperature = 25.5f;
     
     Modbus::Word floatWord;
     floatWord.type = Modbus::HOLDING_REGISTER;
     floatWord.startAddr = 1000;
     floatWord.nbRegs = 2;
     
-    floatWord.readHandler = [](const auto& word, uint16_t* outVals, void* userCtx) -> bool {
-        if (word.nbRegs != 2) return false;
-        ModbusCodec::floatToRegisters(temperature, outVals);
-        return true;
+    floatWord.readHandler = [](const ServerWord& word, uint16_t* outVals, void* userCtx) -> Modbus::ExceptionCode {
+        if (word.nbRegs != 2) return Modbus::ILLEGAL_DATA_VALUE;
+        float* temp = (float*)userCtx;
+        ModbusCodec::floatToRegisters(*temp, outVals);
+        return Modbus::NULL_EXCEPTION;
     };
     
-    floatWord.writeHandler = [](const uint16_t* writeVals, const auto& word, void* userCtx) -> bool {
-        if (word.nbRegs != 2) return false;
-        temperature = ModbusCodec::registersToFloat(writeVals);
-        return true;
+    floatWord.writeHandler = [](const uint16_t* writeVals, const ServerWord& word, void* userCtx) -> Modbus::ExceptionCode {
+        if (word.nbRegs != 2) return Modbus::ILLEGAL_DATA_VALUE;
+        float* temp = (float*)userCtx;
+        *temp = ModbusCodec::registersToFloat(writeVals);
+        return Modbus::NULL_EXCEPTION;
     };
 
     floatWord.userCtx = (void*)&temperature;
@@ -1204,36 +1091,49 @@ void test_float_word_integration() {
     do_test_add_word(server, floatWord, true, "float word add failed");
     
     // Test 1 : Lecture du float via Modbus
-    std::vector<uint16_t> readVals = testClient.readHoldingRegisters(1, 1000, 2);
-    TEST_ASSERT_FALSE_MESSAGE(testClient.lastErrorOccurred(), "Float word read should succeed");
-    TEST_ASSERT_EQUAL_MESSAGE(2, readVals.size(), "Float read size should be 2");
+    int numRead = testClient.requestFrom(1, HOLDING_REGISTERS, 1000, 2);
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(2, numRead, "Float word read should succeed");
+    
+    // Lire les deux registres et reconvertir en float
+    uint16_t readRegs[2];
+    readRegs[0] = testClient.read();
+    readRegs[1] = testClient.read();
     
     // Vérifier que la conversion est correcte
     uint16_t expectedRegs[2];
     ModbusCodec::floatToRegisters(25.5f, expectedRegs);
-    TEST_ASSERT_EQUAL_MESSAGE(expectedRegs[0], readVals[0], "Float upper register wrong");
-    TEST_ASSERT_EQUAL_MESSAGE(expectedRegs[1], readVals[1], "Float lower register wrong");
+    TEST_ASSERT_EQUAL_MESSAGE(expectedRegs[0], readRegs[0], "Float upper register wrong");
+    TEST_ASSERT_EQUAL_MESSAGE(expectedRegs[1], readRegs[1], "Float lower register wrong");
+    
+    float readBackValue = ModbusCodec::registersToFloat(readRegs);
+    TEST_ASSERT_EQUAL_FLOAT_MESSAGE(25.5f, readBackValue, "Read float value mismatch");
     
     // Test 2 : Écriture d'un nouveau float via Modbus
     float newValue = -123.789f;
     uint16_t writeRegs[2];
     ModbusCodec::floatToRegisters(newValue, writeRegs);
     
-    std::vector<uint16_t> writeVals = {writeRegs[0], writeRegs[1]};
-    bool writeOk = testClient.writeHoldingRegisters(1, 1000, writeVals);
-    TEST_ASSERT_TRUE_MESSAGE(writeOk, "Float word write should succeed");
-    TEST_ASSERT_FALSE_MESSAGE(testClient.lastErrorOccurred(), "Float word write should not error");
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(1, testClient.beginTransmission(1, HOLDING_REGISTERS, 1000, 2),
+        "beginTransmission should succeed");
+    TEST_ASSERT_EQUAL_MESSAGE(1, testClient.write(writeRegs[0]), "write reg[0] should succeed");
+    TEST_ASSERT_EQUAL_MESSAGE(1, testClient.write(writeRegs[1]), "write reg[1] should succeed");
+    TEST_ASSERT_EQUAL_MESSAGE(1, testClient.endTransmission(),
+        "Float word write should succeed at endTransmission");
     
     // Vérifier que la variable a été mise à jour
     TEST_ASSERT_EQUAL_FLOAT_MESSAGE(newValue, temperature, "Temperature variable not updated correctly");
     
     // Test 3 : Relire pour vérifier la persistance
-    readVals = testClient.readHoldingRegisters(1, 1000, 2);
-    TEST_ASSERT_FALSE_MESSAGE(testClient.lastErrorOccurred(), "Float word re-read should succeed");
+    numRead = testClient.requestFrom(1, HOLDING_REGISTERS, 1000, 2);
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(2, numRead, "Float word re-read should succeed");
     
-    float readBackValue = ModbusCodec::registersToFloat(readVals.data());
+    readRegs[0] = testClient.read();
+    readRegs[1] = testClient.read();
+    readBackValue = ModbusCodec::registersToFloat(readRegs);
     TEST_ASSERT_EQUAL_FLOAT_MESSAGE(newValue, readBackValue, "Read-back value mismatch");
-    */
 }
 
 void test_unified_word_validation() {
@@ -1269,107 +1169,76 @@ void test_unified_word_validation() {
     TEST_ASSERT_EQUAL_MESSAGE(3, retrievedMulti.nbRegs, "Wrong multi-holding word nbRegs");
 }
 
-/*void test_register_to_word_migration() {
-    Modbus::Logger::logln("\nTEST_REGISTER_TO_WORD_MIGRATION");
-    
-    // Démonstration : migration de l'API Register vers l'API Word
-    
-    // ANCIEN STYLE (Register API - deprecated mais toujours fonctionnel)
-    DummyRegister oldStyleReg(Modbus::HOLDING_REGISTER, 2000);
-    do_test_add_register(server, oldStyleReg.reg, true, "old style register should still work");
-    
-    // NOUVEAU STYLE (Word API - recommandé)
-    // Un registre unique = Word avec nbRegs = 1
-    Modbus::Word newStyleWord;
-    newStyleWord.type = Modbus::HOLDING_REGISTER;
-    newStyleWord.startAddr = 2001;
-    newStyleWord.nbRegs = 1;  // Single register as Word
-    
-    // Handler unifié (même signature que pour multi-registres)
-    uint16_t singleValue = 42;
-    newStyleWord.readHandler = [&singleValue](const auto& word, uint16_t* outVals) -> Modbus::ExceptionCode {
-        outVals[0] = singleValue;  // nbRegs = 1, donc un seul élément
-        return Modbus::NULL_EXCEPTION;
-    };
-    
-    newStyleWord.writeHandler = [&singleValue](const uint16_t* writeVals, const auto& word) -> Modbus::ExceptionCode {
-        singleValue = writeVals[0];  // nbRegs = 1, donc un seul élément
-        return Modbus::NULL_EXCEPTION;
-    };
-    
-    do_test_add_word(server, newStyleWord, true, "new style single word should work");
-    
-    // Test : vérifier que les deux approches fonctionnent
-    int oldRead = testClient.holdingRegisterRead(1, 2000);
-    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, oldRead, "Old style register read should work");
-    TEST_ASSERT_EQUAL_MESSAGE(2000, oldRead, "Old style register value wrong");
-    
-    int newRead = testClient.holdingRegisterRead(1, 2001);
-    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, newRead, "New style word read should work");
-    TEST_ASSERT_EQUAL_MESSAGE(42, newRead, "New style word value wrong");
-    
-    // Test écriture dans le nouveau style
-    int writeOk = testClient.holdingRegisterWrite(1, 2001, 99);
-    TEST_ASSERT_EQUAL_MESSAGE(1, writeOk, "New style word write should work");
-    TEST_ASSERT_EQUAL_MESSAGE(99, singleValue, "Variable not updated by word write");
-}*/
-
-/*void test_second_server_on_same_interface() {
+void test_second_server_on_same_interface() {
     Modbus::Logger::logln("\nTEST_SECOND_SERVER_ON_SAME_INTERFACE");
 
     static Modbus::StaticWordStore<50> staticStore2;
-    static Modbus::Server server2(rtu, staticStore2, 2, 2);
+    static Modbus::Server server2(rtu, staticStore2, 3, true); // Slave ID 2 is already used by gap handling test
     TaskHandle_t ezmTaskHandle2 = NULL;
     xTaskCreatePinnedToCore(EZModbusServerTask, "EZModbusServerTask2", 16384, &server2, 5, &ezmTaskHandle2, 0);
 
     Modbus::Logger::logln("[test_second_server] Waiting for Server 2 to initialize...");
     vTaskDelay(pdMS_TO_TICKS(200));
 
-    // Register 1 holding register on each server
-    DummyRegister h1(Modbus::HOLDING_REGISTER, 1);
-    DummyRegister h2(Modbus::HOLDING_REGISTER, 1);
-    do_test_add_register(server, h1.reg, true, "add holding register failed");
-    do_test_add_register(server2, h2.reg, true, "add holding register failed");
-
-    // Write the register on each server with different values
-    uint16_t valSrv1 = 3;
-    uint16_t valSrv2 = 4;
-
-    // Write to server 1
-    auto ret = testClient.holdingRegisterWrite(1, h1.reg.address, valSrv1);
-    TEST_ASSERT_START();
-    TEST_ASSERT_EQUAL(1, ret); // Check that the write succeeded
-    TEST_ASSERT_EQUAL(valSrv1, (int)h1.reg.readCb(h1.reg));
-
-    // Write to server 2
-    ret = testClient.holdingRegisterWrite(2, h2.reg.address, valSrv2);
-    TEST_ASSERT_START();
-    TEST_ASSERT_EQUAL(1, ret); // Check that the write succeeded
-    TEST_ASSERT_EQUAL(valSrv2, (int)h2.reg.readCb(h2.reg));
-
-    // Write to both servers in broadcast mode
-    uint16_t valBroadcast = 5;
-    ret = testClient.holdingRegisterWrite(0, h1.reg.address, valBroadcast); // SlaveID 0 for broadcast
-
-    // Process for one second to see if we get responses
-    uint32_t processTime = 1000;
-    while (processTime > 0) {
-        agent.poll();
-        vTaskDelay(pdMS_TO_TICKS(1));
-        processTime--;
-    }
-
-    // Check the writes succeeded & we have not received any answer
-    TEST_ASSERT_START();
-    TEST_ASSERT_EQUAL(valBroadcast, (int)h1.reg.readCb(h1.reg));
-    TEST_ASSERT_EQUAL(valBroadcast, (int)h2.reg.readCb(h2.reg));
-    TEST_ASSERT_EQUAL(false, agent.hasData());
+    // Créer 1 Word holding sur chaque serveur
+    DummyWord1Reg h1(Modbus::HOLDING_REGISTER, 1);
+    DummyWord1Reg h2(Modbus::HOLDING_REGISTER, 1);
     
+    // Vérifier les valeurs initiales
+    TEST_ASSERT_EQUAL_MESSAGE(1, h1.value, "h1 initial value should be 1");
+    TEST_ASSERT_EQUAL_MESSAGE(1, h2.value, "h2 initial value should be 1");
+    
+    do_test_add_word(server, h1.word, true, "add holding word to server1 failed");
+    do_test_add_word(server2, h2.word, true, "add holding word to server2 failed");
+
+    // Écrire sur le serveur 1 (slave ID 1)
+    uint16_t valSrv1 = 3;
+    auto ret = testClient.holdingRegisterWrite(1, 1, valSrv1);
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(1, ret); // Check that the write succeeded
+    
+    // Vérifier la valeur via lecture
+    int readVal1 = testClient.holdingRegisterRead(1, 1);
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, readVal1, "Read from server1 should succeed");
+    TEST_ASSERT_EQUAL_MESSAGE(valSrv1, readVal1, "Server1 value wrong");
+
+    // Écrire sur le serveur 2 (slave ID 3) 
+    uint16_t valSrv2 = 4;
+    ret = testClient.holdingRegisterWrite(3, 1, valSrv2);
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(1, ret); // Check that the write succeeded
+    
+    // Vérifier que h2.value a été modifié
+    TEST_ASSERT_EQUAL_MESSAGE(valSrv2, h2.value, "h2.value should be updated after write");
+    
+    // Vérifier la valeur via lecture
+    int readVal2 = testClient.holdingRegisterRead(3, 1);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, readVal2, "Read from server2 should succeed");
+    TEST_ASSERT_EQUAL_MESSAGE(valSrv2, readVal2, "Server2 value wrong");
+
+    // Test broadcast (slave ID 0) - pas de réponse attendue
+    uint16_t valBroadcast = 5;
+    ret = testClient.holdingRegisterWrite(0, 1, valBroadcast);
+
+    // Attendre un peu pour que les serveurs traitent le broadcast
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Vérifier que les deux serveurs ont reçu la valeur broadcast
+    int readBcast1 = testClient.holdingRegisterRead(1, 1);
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, readBcast1, "Read from server1 after broadcast should succeed");
+    TEST_ASSERT_EQUAL_MESSAGE(valBroadcast, readBcast1, "Server1 broadcast value wrong");
+    
+    int readBcast2 = testClient.holdingRegisterRead(3, 1);
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, readBcast2, "Read from server2 after broadcast should succeed");
+    TEST_ASSERT_EQUAL_MESSAGE(valBroadcast, readBcast2, "Server2 broadcast value wrong");
+    
+    // Cleanup
     if(ezmTaskHandle2) {
         vTaskDelete(ezmTaskHandle2);
     }
     vTaskDelay(pdMS_TO_TICKS(50));
-}*/
+}
 
 // ===================================================================================
 // CRITICAL MISSING TESTS - COMPREHENSIVE COVERAGE
@@ -1895,7 +1764,7 @@ void setup() {
     // Run tests
     UNITY_BEGIN();
  
-    // Word API tests (NEW)
+    // Word API tests
     RUN_TEST(test_direct_pointer_vs_handlers);
     RUN_TEST(test_multi_register_word_validation);
     RUN_TEST(test_word_atomicity);
@@ -1904,14 +1773,10 @@ void setup() {
     RUN_TEST(test_add_write_without_write_callback);
     RUN_TEST(test_register_bad_type);
     RUN_TEST(test_get_register);
-    
-    // Legacy compatibility tests (migrated to Word API)
     RUN_TEST(test_add_single_registers);
     RUN_TEST(test_add_multiple_registers);  
     RUN_TEST(test_clear_all_registers);
     RUN_TEST(test_add_registers_atomicity);
-    // RUN_TEST(test_register_overwrite); // TODO: fix test - needs callback signature repair
-    // RUN_TEST(test_concurrent_add_registers); // TODO: fix test - needs callback signature repair
 
     // Read/write requests tests - Server side uses Word API, client side uses ModbusTestClient
     RUN_TEST(test_single_read_request);
@@ -1929,17 +1794,13 @@ void setup() {
     RUN_TEST(test_add_single_words);
     RUN_TEST(test_word_address_conflicts);
     RUN_TEST(test_word_validation);
-    // TODO: Fix tests that use readHoldingRegisters API
-    // RUN_TEST(test_word_read_requests);
-    // RUN_TEST(test_word_write_requests);
-    // RUN_TEST(test_word_handler_failures);
-    // RUN_TEST(test_word_register_priority);
+    RUN_TEST(test_word_handler_failures);
     
     // Float utility tests
     RUN_TEST(test_float_conversion_utils);
-    // RUN_TEST(test_float_word_integration);
+    RUN_TEST(test_float_word_integration);
     
-    // Critical missing tests
+    // Edge case tests
     RUN_TEST(test_partial_multi_register_word_access);
     RUN_TEST(test_mixed_single_multi_word_scenarios);
     RUN_TEST(test_address_boundary_conditions);
@@ -1952,11 +1813,9 @@ void setup() {
     
     // Gap handling tests (rejectUndefined = false)
     RUN_TEST(test_gap_handling_comprehensive);
-    
-    // Migration test - COMMENTED OUT (Register API removed)
-    // RUN_TEST(test_register_to_word_migration);
 
-    // RUN_TEST(test_second_server_on_same_interface); // TODO: fix - uses Register API (.reg references)
+    // Multiple servers test
+    RUN_TEST(test_second_server_on_same_interface);
 
     UNITY_END();
 }

@@ -10,9 +10,6 @@
 #include "interfaces/ModbusInterface.hpp"
 #include "utils/ModbusDebug.hpp"
 #include "drivers/ModbusHAL_TCP.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
 
 #ifndef EZMODBUS_TCP_TXN_SAFETY_TIMEOUT // TCP transaction safety timeout (ms)
     #define EZMODBUS_TCP_TXN_SAFETY_TIMEOUT 5000
@@ -20,9 +17,9 @@
 
 #ifndef EZMODBUS_TCP_RXTX_TASK_STACK_SIZE // TCP RX/TX task stack size (bytes)
     #ifdef EZMODBUS_DEBUG
-        #define EZMODBUS_TCP_RXTX_TASK_STACK_SIZE 6144
+        #define EZMODBUS_TCP_RXTX_TASK_STACK_SIZE BYTES_TO_STACK_SIZE(6144)
     #else
-        #define EZMODBUS_TCP_RXTX_TASK_STACK_SIZE 4096
+        #define EZMODBUS_TCP_RXTX_TASK_STACK_SIZE BYTES_TO_STACK_SIZE(4096)
     #endif
 #endif
 

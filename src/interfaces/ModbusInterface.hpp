@@ -54,64 +54,30 @@ namespace ModbusInterface {
         };
         static constexpr const char* toString(Result result) {
             switch (result) {
-                case SUCCESS: return "success";
-                case NODATA: return "no data to process";
-                case ERR_INIT_FAILED: return "init failed";
-                case ERR_INVALID_FRAME: return "invalid frame";
-                case ERR_BUSY: return "busy";
+                case SUCCESS: return "Success";
+                case NODATA: return "No data to process";
+                case ERR_INIT_FAILED: return "Init failed";
+                case ERR_INVALID_FRAME: return "Invalid frame";
+                case ERR_BUSY: return "Busy";
                 case ERR_RX_FAILED: return "RX error";
-                case ERR_SEND_FAILED: return "send failed";
-                case ERR_INVALID_MSG_TYPE: return "invalid message type";
-                case ERR_INVALID_TRANSACTION_ID: return "transaction id mismatch";
-                case ERR_TIMEOUT: return "timeout";
-                case ERR_INVALID_ROLE: return "invalid role";
-                case ERR_ADD_CALLBACK_BUSY: return "callback store is busy";
-                case ERR_TOO_MANY_CALLBACKS: return "too many callbacks stored";
-                case ERR_NO_CALLBACKS: return "no callbacks stored";
-                case ERR_NOT_INITIALIZED: return "interface not initialized";
-                case ERR_CONNECTION_FAILED: return "connection failed";
-                case ERR_CONFIG_FAILED: return "configuration failed";
-                default: return "unknown error";
+                case ERR_SEND_FAILED: return "Send failed";
+                case ERR_INVALID_MSG_TYPE: return "Invalid message type";
+                case ERR_INVALID_TRANSACTION_ID: return "Transaction ID mismatch";
+                case ERR_TIMEOUT: return "Timeout";
+                case ERR_INVALID_ROLE: return "Invalid role";
+                case ERR_ADD_CALLBACK_BUSY: return "Callback store is busy";
+                case ERR_TOO_MANY_CALLBACKS: return "Too many callbacks stored";
+                case ERR_NO_CALLBACKS: return "No callbacks stored";
+                case ERR_NOT_INITIALIZED: return "Interface not initialized";
+                case ERR_CONNECTION_FAILED: return "Connection failed";
+                case ERR_CONFIG_FAILED: return "Configuration failed";
+                default: return "Unknown error";
             }
         }
 
-        // Helper to cast an error
-        // - Returns a Result
-        // - Captures point of call context & prints a log message when debug 
-        // is enabled. No overhead when debug is disabled (except for
-        // the desc string, if any)
-        static inline Result Error(Result res, const char* desc = nullptr
-                            #ifdef EZMODBUS_DEBUG
-                            , Modbus::Debug::CallCtx ctx = Modbus::Debug::CallCtx()
-                            #endif
-                            ) {
-            #ifdef EZMODBUS_DEBUG
-                if (desc && *desc != '\0') {
-                    Modbus::Debug::LOG_MSGF_CTX(ctx, "Error: %s (%s)", toString(res), desc);
-                } else {
-                    Modbus::Debug::LOG_MSGF_CTX(ctx, "Error: %s", toString(res));
-                }
-            #endif
-            return res;
-        }
-
-        // Helper to cast a success
-        // - Returns Result::SUCCESS
-        // - Captures point of call context & prints a log message when debug 
-        // is enabled. No overhead when debug is disabled (except for
-        // the desc string, if any)
-        static inline Result Success(const char* desc = nullptr
-                              #ifdef EZMODBUS_DEBUG
-                              , Modbus::Debug::CallCtx ctx = Modbus::Debug::CallCtx()
-                              #endif
-                              ) {
-            #ifdef EZMODBUS_DEBUG
-                if (desc && *desc != '\0') {
-                    Modbus::Debug::LOG_MSGF_CTX(ctx, "Success: %s", desc);
-                }
-            #endif
-            return SUCCESS;
-        }
+        // Include Error() and Success() definitions
+        // (helpers to cast a Result)
+        #include "core/ModbusResultHelpers.inl"
 
         /* @brief TX result callback type
          * @param result The result of the TX operation

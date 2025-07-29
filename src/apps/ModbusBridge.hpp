@@ -13,6 +13,7 @@ namespace Modbus {
 
 class Bridge {
 public:
+
 // ===================================================================================
 // RESULT TYPES
 // ===================================================================================
@@ -23,49 +24,15 @@ public:
     };
     static constexpr const char* toString(Result result) {
         switch (result) {
-            case SUCCESS: return "success";
-            case ERR_INIT_FAILED: return "init failed";
-            default: return "unknown";
+            case SUCCESS: return "Success";
+            case ERR_INIT_FAILED: return "Init failed";
+            default: return "Unknown";
         }
     }
 
-    // Helper to cast an error
-    // - Returns a Result
-    // - Captures point of call context & prints a log message when debug 
-    // is enabled. No overhead when debug is disabled (except for
-    // the desc string, if any)
-    static inline Result Error(Result res, const char* desc = nullptr
-                        #ifdef EZMODBUS_DEBUG
-                        , Modbus::Debug::CallCtx ctx = Modbus::Debug::CallCtx()
-                        #endif
-                        ) {
-        #ifdef EZMODBUS_DEBUG
-            if (desc && *desc != '\0') {
-                Modbus::Debug::LOG_MSGF_CTX(ctx, "Error: %s (%s)", toString(res), desc);
-            } else {
-                Modbus::Debug::LOG_MSGF_CTX(ctx, "Error: %s", toString(res));
-            }
-        #endif
-        return res;
-    }
-
-    // Helper to cast a success
-    // - Returns Result::SUCCESS
-    // - Captures point of call context & prints a log message when debug 
-    // is enabled. No overhead when debug is disabled (except for
-    // the desc string, if any)
-    static inline Result Success(const char* desc = nullptr
-                          #ifdef EZMODBUS_DEBUG
-                          , Modbus::Debug::CallCtx ctx = Modbus::Debug::CallCtx()
-                          #endif
-                          ) {
-        #ifdef EZMODBUS_DEBUG
-            if (desc && *desc != '\0') {
-                Modbus::Debug::LOG_MSGF_CTX(ctx, "Success: %s", desc);
-            }
-        #endif
-        return SUCCESS;
-    }
+    // Include Error() and Success() definitions
+    // (helpers to cast a Result)
+    #include "core/ModbusResultHelpers.inl"
 
 // ===================================================================================
 // CONSTRUCTOR & PUBLIC METHODS

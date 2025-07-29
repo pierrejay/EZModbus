@@ -53,66 +53,32 @@ public:
     };
     static const char* toString(const Result res) {
         switch (res) {
-            case SUCCESS: return "success";
-            case NODATA: return "no data";
-            case ERR_WORD_BUSY: return "busy word store";
-            case ERR_WORD_OVERFLOW: return "stored too many words";
-            case ERR_WORD_INVALID: return "invalid word";
-            case ERR_WORD_DIRECT_PTR: return "forbidden direct pointer";
-            case ERR_WORD_HANDLER: return "malformed handlers";
-            case ERR_WORD_OVERLAP: return "word overlaps with existing word";
-            case ERR_RCV_UNKNOWN_WORD: return "unknown word";
-            case ERR_RCV_BUSY: return "incoming request: busy";
-            case ERR_RCV_INVALID_TYPE: return "received invalid request";
-            case ERR_RCV_WRONG_SLAVE_ID: return "wrong slave ID in rcvd frame";
-            case ERR_RCV_ILLEGAL_FUNCTION: return "illegal function in rcvd frame";
-            case ERR_RCV_ILLEGAL_DATA_ADDRESS: return "illegal data address in rcvd frame";
-            case ERR_RCV_ILLEGAL_DATA_VALUE: return "illegal data value in rcvd frame";
-            case ERR_RCV_SLAVE_DEVICE_FAILURE: return "slave device failure on rcvd frame";
-            case ERR_RSP_TX_FAILED: return "transmit response failed";
-            case ERR_NOT_INITIALIZED: return "server not initialized";
-            case ERR_INIT_FAILED: return "init failed";
-            default: return "unknown error";
+            case SUCCESS: return "Success";
+            case NODATA: return "No data";
+            case ERR_WORD_BUSY: return "Word store busy";
+            case ERR_WORD_OVERFLOW: return "Stored too many words";
+            case ERR_WORD_INVALID: return "Invalid word";
+            case ERR_WORD_DIRECT_PTR: return "Forbidden direct pointer";
+            case ERR_WORD_HANDLER: return "Malformed handlers";
+            case ERR_WORD_OVERLAP: return "Word overlaps with existing word";
+            case ERR_RCV_UNKNOWN_WORD: return "Unknown word";
+            case ERR_RCV_BUSY: return "Incoming request while busy";
+            case ERR_RCV_INVALID_TYPE: return "Received invalid request";
+            case ERR_RCV_WRONG_SLAVE_ID: return "Wrong slave ID in received frame";
+            case ERR_RCV_ILLEGAL_FUNCTION: return "Illegal function in received frame";
+            case ERR_RCV_ILLEGAL_DATA_ADDRESS: return "Illegal data address in received frame";
+            case ERR_RCV_ILLEGAL_DATA_VALUE: return "Illegal data value in received frame";
+            case ERR_RCV_SLAVE_DEVICE_FAILURE: return "Slave device failure on received frame";
+            case ERR_RSP_TX_FAILED: return "Transmit response failed";
+            case ERR_NOT_INITIALIZED: return "Server not initialized";
+            case ERR_INIT_FAILED: return "Init failed";
+            default: return "Unknown error";
         }
     }
 
-    // Helper to cast an error
-    // - Returns a Result
-    // - Captures point of call context & prints a log message when debug 
-    // is enabled. No overhead when debug is disabled (except for
-    // the desc string, if any)
-    static inline Result Error(Result res, const char* desc = nullptr
-                        #ifdef EZMODBUS_DEBUG
-                        , Modbus::Debug::CallCtx ctx = Modbus::Debug::CallCtx()
-                        #endif
-                        ) {
-        #ifdef EZMODBUS_DEBUG
-            if (desc && *desc != '\0') {
-                Modbus::Debug::LOG_MSGF_CTX(ctx, "Error: %s (%s)", toString(res), desc);
-            } else {
-                Modbus::Debug::LOG_MSGF_CTX(ctx, "Error: %s", toString(res));
-            }
-        #endif
-        return res;
-    }
-
-    // Helper to cast a success
-    // - Returns Result::SUCCESS
-    // - Captures point of call context & prints a log message when debug 
-    // is enabled. No overhead when debug is disabled (except for
-    // the desc string, if any)
-    static inline Result Success(const char* desc = nullptr
-                          #ifdef EZMODBUS_DEBUG
-                          , Modbus::Debug::CallCtx ctx = Modbus::Debug::CallCtx()
-                          #endif
-                          ) {
-        #ifdef EZMODBUS_DEBUG
-            if (desc && *desc != '\0') {
-                Modbus::Debug::LOG_MSGF_CTX(ctx, "Success: %s", desc);
-            }
-        #endif
-        return SUCCESS;
-    }
+    // Include Error() and Success() definitions
+    // (helpers to cast a Result)
+    #include "core/ModbusResultHelpers.inl"
 
     // ===================================================================================
     // CONSTRUCTOR & PUBLIC METHODS

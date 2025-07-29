@@ -268,7 +268,7 @@ void test_read_##Name##_async() { \
     } \
     TEST_ASSERT_START(); \
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result_case1); \
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tracker_case1); \
+    TEST_ASSERT_EQUAL(result_case1, tracker_case1); \
     TEST_ASSERT_EQUAL(Modbus::NULL_EXCEPTION, response_case1.exceptionCode); \
     TEST_ASSERT_EQUAL(FC, response_case1.fc); \
     TEST_ASSERT_EQUAL(Expect(Addr), response_case1.data[0]); \
@@ -294,7 +294,7 @@ void test_read_##Name##_async() { \
     \
     TEST_ASSERT_START(); \
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result); \
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tracker); \
+    TEST_ASSERT_EQUAL(result, tracker); \
     TEST_ASSERT_EQUAL(FC, response.fc); \
     TEST_ASSERT_EQUAL(TEST_SLAVE_ID, response.slaveId); \
     TEST_ASSERT_EQUAL(Expect(Addr), response.data[0]); \
@@ -386,7 +386,7 @@ void test_read_multiple_##Name##_async() { \
     } \
     TEST_ASSERT_START(); \
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result_case1); \
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tracker_case1); \
+    TEST_ASSERT_EQUAL(result_case1, tracker_case1); \
     TEST_ASSERT_EQUAL(Modbus::NULL_EXCEPTION, response_case1.exceptionCode); \
     TEST_ASSERT_EQUAL(FC, response_case1.fc); \
     TEST_ASSERT_EQUAL(MULTI_COUNT, response_case1.regCount); \
@@ -424,7 +424,7 @@ void test_read_multiple_##Name##_async() { \
     \
     TEST_ASSERT_START(); \
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result); \
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tracker); \
+    TEST_ASSERT_EQUAL(result, tracker); \
     TEST_ASSERT_EQUAL(FC, response.fc); \
     TEST_ASSERT_EQUAL(TEST_SLAVE_ID, response.slaveId); \
     TEST_ASSERT_EQUAL(MULTI_COUNT, response.regCount); \
@@ -506,11 +506,11 @@ void test_write_##Name##_sync() { \
     auto result_case1 = client.sendRequest(request_case1, response_case1, nullptr); \
     TEST_ASSERT_START(); \
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result_case1); \
-    if (result_case1 == Modbus::Client::SUCCESS && response_case1.exceptionCode == Modbus::NULL_EXCEPTION) { \
+    if (result_case1 == Modbus::Client::SUCCESS) { \
         writeResult_case1 = 1; \
         TEST_ASSERT_EQUAL(SingleFC, response_case1.fc); \
         TEST_ASSERT_EQUAL(Addr, response_case1.regAddress); \
-    } else if (response_case1.exceptionCode != Modbus::NULL_EXCEPTION) { \
+    } else if (result_case1 == Modbus::Client::ERR_EXCEPTION_RESPONSE) { \
         writeResult_case1 = -response_case1.exceptionCode; \
     } else { \
         writeResult_case1 = 0; \
@@ -567,12 +567,12 @@ void test_write_##Name##_sync() { \
         Modbus::Frame readReq = {.type = Modbus::REQUEST, .fc = Modbus::READ_COILS, .slaveId = TEST_SLAVE_ID, .regAddress = Addr, .regCount = 1}; \
         Modbus::Frame readResp; \
         result = client.sendRequest(readReq, readResp, nullptr); \
-        if (result == Modbus::Client::SUCCESS && readResp.exceptionCode == Modbus::NULL_EXCEPTION) readValue = readResp.data[0]; \
+        if (result == Modbus::Client::SUCCESS) readValue = readResp.data[0]; \
     } else { \
         Modbus::Frame readReq = {.type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID, .regAddress = Addr, .regCount = 1}; \
         Modbus::Frame readResp; \
         result = client.sendRequest(readReq, readResp, nullptr); \
-        if (result == Modbus::Client::SUCCESS && readResp.exceptionCode == Modbus::NULL_EXCEPTION) readValue = readResp.data[0]; \
+        if (result == Modbus::Client::SUCCESS) readValue = readResp.data[0]; \
     } \
     TEST_ASSERT_START(); \
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result); \
@@ -603,12 +603,12 @@ void test_write_##Name##_async() { \
     } \
     TEST_ASSERT_START(); \
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result_case1); \
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tracker_case1); \
-    if (result_case1 == Modbus::Client::SUCCESS && response_case1.exceptionCode == Modbus::NULL_EXCEPTION) { \
+    TEST_ASSERT_EQUAL(result_case1, tracker_case1); \
+    if (result_case1 == Modbus::Client::SUCCESS) { \
         writeResult_case1 = 1; \
         TEST_ASSERT_EQUAL(SingleFC, response_case1.fc); \
         TEST_ASSERT_EQUAL(Addr, response_case1.regAddress); \
-    } else if (response_case1.exceptionCode != Modbus::NULL_EXCEPTION) { \
+    } else if (result_case1 == Modbus::Client::ERR_EXCEPTION_RESPONSE) { \
         writeResult_case1 = -response_case1.exceptionCode; \
     } else { \
         writeResult_case1 = 0; \
@@ -663,7 +663,7 @@ void test_write_##Name##_async() { \
     \
     TEST_ASSERT_START(); \
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result); \
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tracker); \
+    TEST_ASSERT_EQUAL(result, tracker); \
     TEST_ASSERT_EQUAL(SingleFC, response.fc); \
     TEST_ASSERT_EQUAL(TEST_SLAVE_ID, response.slaveId); \
     TEST_ASSERT_EQUAL(Addr, response.regAddress); \
@@ -673,7 +673,7 @@ void test_write_##Name##_async() { \
         Modbus::Frame readReq = {.type = Modbus::REQUEST, .fc = Modbus::READ_COILS, .slaveId = TEST_SLAVE_ID, .regAddress = Addr, .regCount = 1}; \
         Modbus::Frame readResp; \
         result = client.sendRequest(readReq, readResp, nullptr); \
-        if (result == Modbus::Client::SUCCESS && readResp.exceptionCode == Modbus::NULL_EXCEPTION) { \
+        if (result == Modbus::Client::SUCCESS) { \
             auto coilValues = readResp.getCoils(); \
             TEST_ASSERT_EQUAL(1, coilValues.size()); \
             readValue = coilValues[0]; \
@@ -684,7 +684,7 @@ void test_write_##Name##_async() { \
         Modbus::Frame readReq = {.type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID, .regAddress = Addr, .regCount = 1}; \
         Modbus::Frame readResp; \
         result = client.sendRequest(readReq, readResp, nullptr); \
-        if (result == Modbus::Client::SUCCESS && readResp.exceptionCode == Modbus::NULL_EXCEPTION) { \
+        if (result == Modbus::Client::SUCCESS) { \
             TEST_ASSERT_EQUAL(1, readResp.regCount); \
             readValue = readResp.data[0]; \
         } \
@@ -715,12 +715,12 @@ void test_write_multiple_##Name() { \
     auto result_case1 = client.sendRequest(request_case1, response_case1, nullptr); \
     TEST_ASSERT_START(); \
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result_case1); \
-    if (result_case1 == Modbus::Client::SUCCESS && response_case1.exceptionCode == Modbus::NULL_EXCEPTION) { \
+    if (result_case1 == Modbus::Client::SUCCESS) { \
         writeResult_case1 = 1; \
         TEST_ASSERT_EQUAL(MultiFC, response_case1.fc); \
         TEST_ASSERT_EQUAL(MULTI_START_ADDR, response_case1.regAddress); \
         TEST_ASSERT_EQUAL(MULTI_COUNT, response_case1.regCount); \
-    } else if (response_case1.exceptionCode != Modbus::NULL_EXCEPTION) { \
+    } else if (result_case1 == Modbus::Client::ERR_EXCEPTION_RESPONSE) { \
         writeResult_case1 = -response_case1.exceptionCode; \
     } else { \
         writeResult_case1 = 0; \
@@ -780,7 +780,7 @@ void test_write_multiple_##Name() { \
         Modbus::Frame readReq = {.type = Modbus::REQUEST, .fc = Modbus::READ_COILS, .slaveId = TEST_SLAVE_ID, .regAddress = MULTI_START_ADDR, .regCount = MULTI_COUNT}; \
         Modbus::Frame readResp; \
         result = client.sendRequest(readReq, readResp, nullptr); \
-        if (result == Modbus::Client::SUCCESS && readResp.exceptionCode == Modbus::NULL_EXCEPTION) { \
+        if (result == Modbus::Client::SUCCESS) { \
             auto coilValues = readResp.getCoils(); \
             TEST_ASSERT_EQUAL(MULTI_COUNT, coilValues.size()); \
             readValues.resize(coilValues.size()); \
@@ -795,7 +795,7 @@ void test_write_multiple_##Name() { \
         Modbus::Frame readReq = {.type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID, .regAddress = MULTI_START_ADDR, .regCount = MULTI_COUNT}; \
         Modbus::Frame readResp; \
         result = client.sendRequest(readReq, readResp, nullptr); \
-        if (result == Modbus::Client::SUCCESS && readResp.exceptionCode == Modbus::NULL_EXCEPTION) { \
+        if (result == Modbus::Client::SUCCESS) { \
             TEST_ASSERT_EQUAL(MULTI_COUNT, readResp.regCount); \
             readValues.resize(readResp.regCount); \
             for(size_t i=0; i<readResp.regCount; ++i) readValues[i] = readResp.data[i]; \
@@ -835,13 +835,13 @@ void test_write_multiple_##Name##_async() { \
     } \
     TEST_ASSERT_START(); \
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result_case1); \
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tracker_case1); \
-    if (result_case1 == Modbus::Client::SUCCESS && response_case1.exceptionCode == Modbus::NULL_EXCEPTION) { \
+    TEST_ASSERT_EQUAL(result_case1, tracker_case1); \
+    if (result_case1 == Modbus::Client::SUCCESS) { \
         writeResult_case1 = 1; \
         TEST_ASSERT_EQUAL(MultiFC, response_case1.fc); \
         TEST_ASSERT_EQUAL(MULTI_START_ADDR, response_case1.regAddress); \
         TEST_ASSERT_EQUAL(MULTI_COUNT, response_case1.regCount); \
-    } else if (response_case1.exceptionCode != Modbus::NULL_EXCEPTION) { \
+    } else if (result_case1 == Modbus::Client::ERR_EXCEPTION_RESPONSE) { \
         writeResult_case1 = -response_case1.exceptionCode; \
     } else { \
         writeResult_case1 = 0; \
@@ -898,7 +898,7 @@ void test_write_multiple_##Name##_async() { \
     \
     TEST_ASSERT_START(); \
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result); \
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tracker); \
+    TEST_ASSERT_EQUAL(result, tracker); \
     TEST_ASSERT_EQUAL(MultiFC, response.fc); \
     TEST_ASSERT_EQUAL(TEST_SLAVE_ID, response.slaveId); \
     TEST_ASSERT_EQUAL(MULTI_START_ADDR, response.regAddress); \
@@ -909,7 +909,7 @@ void test_write_multiple_##Name##_async() { \
         Modbus::Frame readReq = {.type = Modbus::REQUEST, .fc = Modbus::READ_COILS, .slaveId = TEST_SLAVE_ID, .regAddress = MULTI_START_ADDR, .regCount = MULTI_COUNT}; \
         Modbus::Frame readResp; \
         result = client.sendRequest(readReq, readResp, nullptr); \
-        if (result == Modbus::Client::SUCCESS && readResp.exceptionCode == Modbus::NULL_EXCEPTION) { \
+        if (result == Modbus::Client::SUCCESS) { \
             auto coilValues = readResp.getCoils(); \
             TEST_ASSERT_EQUAL(MULTI_COUNT, coilValues.size()); \
             readValues.resize(coilValues.size()); \
@@ -924,7 +924,7 @@ void test_write_multiple_##Name##_async() { \
         Modbus::Frame readReq = {.type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID, .regAddress = MULTI_START_ADDR, .regCount = MULTI_COUNT}; \
         Modbus::Frame readResp; \
         result = client.sendRequest(readReq, readResp, nullptr); \
-        if (result == Modbus::Client::SUCCESS && readResp.exceptionCode == Modbus::NULL_EXCEPTION) { \
+        if (result == Modbus::Client::SUCCESS) { \
             TEST_ASSERT_EQUAL(MULTI_COUNT, readResp.regCount); \
             readValues.resize(readResp.regCount); \
             for(size_t i=0; i<readResp.regCount; ++i) readValues[i] = readResp.data[i]; \
@@ -969,12 +969,12 @@ void test_write_max_##Name() { \
     auto result_case1 = client.sendRequest(request_case1, response_case1, nullptr); \
     TEST_ASSERT_START(); \
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result_case1); \
-    if (result_case1 == Modbus::Client::SUCCESS && response_case1.exceptionCode == Modbus::NULL_EXCEPTION) { \
+    if (result_case1 == Modbus::Client::SUCCESS) { \
         writeResult_case1 = 1; \
         TEST_ASSERT_EQUAL(MultiFC, response_case1.fc); \
         TEST_ASSERT_EQUAL(MULTI_START_ADDR, response_case1.regAddress); \
         TEST_ASSERT_EQUAL(maxCount, response_case1.regCount); \
-    } else if (response_case1.exceptionCode != Modbus::NULL_EXCEPTION) { \
+    } else if (result_case1 == Modbus::Client::ERR_EXCEPTION_RESPONSE) { \
         writeResult_case1 = -response_case1.exceptionCode; \
     } else { \
         writeResult_case1 = 0; \
@@ -1123,7 +1123,7 @@ void test_modbus_exceptions() {
     auto result = client.sendRequest(readRequest, readResponse, nullptr);
     
     TEST_ASSERT_START();
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result); // Communication success
+    TEST_ASSERT_EQUAL(Modbus::Client::ERR_EXCEPTION_RESPONSE, result); // Exception response
     TEST_ASSERT_EQUAL(Modbus::READ_HOLDING_REGISTERS, readResponse.fc); // FC should indicate exception
     TEST_ASSERT_EQUAL(Modbus::ILLEGAL_DATA_ADDRESS, readResponse.exceptionCode);
     
@@ -1144,7 +1144,7 @@ void test_modbus_exceptions() {
     result = client.sendRequest(writeRequest, writeResponse, nullptr);
     
     TEST_ASSERT_START();
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result); // Communication success
+    TEST_ASSERT_EQUAL(Modbus::Client::ERR_EXCEPTION_RESPONSE, result); // Exception response
     TEST_ASSERT_EQUAL(Modbus::WRITE_REGISTER, writeResponse.fc); // FC should indicate exception
     TEST_ASSERT_EQUAL(Modbus::ILLEGAL_DATA_ADDRESS, writeResponse.exceptionCode);
 }
@@ -1332,7 +1332,7 @@ void test_broadcast() {
     
     TEST_ASSERT_START();
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result);
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tracker);  // Must be DONE quickly
+    TEST_ASSERT_EQUAL(result, tracker);  // Must be DONE quickly
 
     while (!client.isReady()) {
         vTaskDelay(pdMS_TO_TICKS(1));
@@ -1367,7 +1367,7 @@ void test_broadcast() {
     
     TEST_ASSERT_START();
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result);
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tracker);  // Must be DONE immediately
+    TEST_ASSERT_EQUAL(result, tracker);  // Must be DONE immediately
 
     while (!client.isReady()) {
         vTaskDelay(pdMS_TO_TICKS(1));
@@ -1526,7 +1526,7 @@ void test_server_busy_exception() {
     Modbus::Frame busyResp;
     res = tempClient.sendRequest(req, busyResp, nullptr); // sync
     TEST_ASSERT_START();
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, res);
+    TEST_ASSERT_EQUAL(Modbus::Client::ERR_EXCEPTION_RESPONSE, res);
     TEST_ASSERT_EQUAL(Modbus::SLAVE_DEVICE_BUSY, busyResp.exceptionCode);
 
     // 3) Attendre fin de la première transaction

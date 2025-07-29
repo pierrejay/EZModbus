@@ -1,0 +1,63 @@
+/* Change scroll bar color (forced) */
+:root {
+    --md-accent-fg-color: #666666 !important;
+    --md-accent-fg-color--transparent: rgba(102, 102, 102, 0.1) !important;
+    --md-accent-bg-color: #666666 !important;
+    --md-accent-bg-color--light: #666666 !important;
+    --md-primary-fg-color: #666666 !important;
+    --md-primary-fg-color--light: #666666 !important;
+    --md-primary-fg-color--dark: #666666 !important;
+}
+
+/* Same on body */
+body {
+    --md-accent-fg-color: #666666 !important;
+}
+
+/* Center images & captions */
+img + em {
+    display: block;
+    text-align: center;
+    margin-top: 0;
+    font-style: italic;
+    color: #888;
+}
+
+/* Reduce content font size */
+.md-content {
+    font-size: 0.9rem !important;
+}
+.md-content h1 { font-size: 1.8rem !important; }
+.md-content h2 { font-size: 1.5rem !important; }
+.md-content h3 { font-size: 1.2rem !important; }
+.md-content h4 { font-size: 1.1rem !important; }
+
+/* Centrage vertical pour les tableaux */
+.md-typeset table:not([class]) td,
+.md-typeset table:not([class]) th {
+    vertical-align: middle;
+}
+
+/* Pour les cellules avec plusieurs lignes */
+.md-typeset table:not([class]) td {
+    padding: 12px 16px;
+    line-height: 1.4;
+}
+
+/* Centrage des emojis et icônes */
+.md-typeset table:not([class]) td .twemoji,
+.md-typeset table:not([class]) td .emoji {
+    vertical-align: middle;
+    margin: 0 2px;
+}
+
+/* Alternative avec une classe spécifique */
+.centered-table td,
+.centered-table th {
+    vertical-align: middle !important;
+    text-align: center;
+}
+
+.centered-table td .twemoji {
+    vertical-align: middle;
+}

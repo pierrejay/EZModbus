@@ -12,6 +12,7 @@
 // to the test serial port.
 
 using Bytes = std::vector<uint8_t>;
+using namespace ModbusTypeDef;
 
 class ModbusTestAgent {
 public:

@@ -9,15 +9,12 @@
 #include "interfaces/ModbusInterface.hpp"
 #include "utils/ModbusDebug.hpp"
 #include "drivers/ModbusHAL_UART.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/queue.h"
 
 #ifndef EZMODBUS_RTU_TASK_STACK_SIZE // RTU RX/TX task stack size (bytes)
     #ifdef EZMODBUS_DEBUG
-        #define EZMODBUS_RTU_TASK_STACK_SIZE 4096
+        #define EZMODBUS_RTU_TASK_STACK_SIZE BYTES_TO_STACK_SIZE(4096)
     #else
-        #define EZMODBUS_RTU_TASK_STACK_SIZE 2048
+        #define EZMODBUS_RTU_TASK_STACK_SIZE BYTES_TO_STACK_SIZE(2048)
     #endif
 #endif
 
@@ -133,7 +130,7 @@ private:
     inline void notifyTxResult(ModbusInterface::IInterface::Result res);
 
     // Utility methods for rxTxTask
-    Result handleUartEvent(const uart_event_t& event);
+    Result handleUartEvent(const ModbusHAL::UART::Event& event);
     Result handleTxRequest();
 
     // ===================================================================================
@@ -148,21 +145,6 @@ private:
     // ===================================================================================
     // HELPER METHODS
     // ===================================================================================
-
-    // Conversion of UART event types to strings
-    static constexpr const char* toString(uart_event_type_t event_type) {
-        switch (event_type) {
-            case UART_DATA: return "data received";
-            case UART_BREAK: return "break detected";
-            case UART_BUFFER_FULL: return "buffer full";
-            case UART_FIFO_OVF: return "FIFO overflow";
-            case UART_FRAME_ERR: return "frame error";
-            case UART_PARITY_ERR: return "parity error";
-            case UART_DATA_BREAK: return "data and break";
-            case UART_PATTERN_DET: return "pattern detected";
-            default: return "unknown event type";
-        }
-    }
 };
 
 } // namespace ModbusInterface

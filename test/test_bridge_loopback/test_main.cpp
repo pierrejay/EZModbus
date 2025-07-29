@@ -5,6 +5,8 @@
 #include "dummy_interface.h"
 #include <WiFi.h>
 #include <utils/ModbusLogger.hpp>
+
+using ByteBuffer = ModbusCodec::ByteBuffer;
 // Give some time for the application logs to be printed before asserting
 
 #ifdef EZMODBUS_DEBUG
@@ -23,14 +25,35 @@ static constexpr uint16_t  MODBUS_PORT  = 502;
 static constexpr char LOOPBACK_IP_STR[] = "127.0.0.1";
 static IPAddress LOOPBACK_IP = IPAddress(127, 0, 0, 1);
 
+// Aliases for convenience
+using UART = ModbusHAL::UART;
+using UARTConfig = ModbusHAL::UART::Config;
+
 // Pin definitions
 #define MBT_RX D7
 #define MBT_TX D8
 #define EZM_RX D5
 #define EZM_TX D6
 
-ModbusHAL::UART ezmUart(UART_NUM_1, 9600, ModbusHAL::UART::CONFIG_8N1, EZM_RX, EZM_TX);
-ModbusHAL::UART mbtUart(UART_NUM_2, 9600, ModbusHAL::UART::CONFIG_8N1, MBT_RX, MBT_TX);
+UARTConfig ezmConfig = {
+    .serial = Serial1,
+    .baud = 9600,
+    .config = SERIAL_8N1,
+    .rxPin = EZM_RX,
+    .txPin = EZM_TX,
+    .dePin = -1
+};
+UART ezmUart(ezmConfig);
+
+UARTConfig mbtConfig = {
+    .serial = Serial2,
+    .baud = 9600,
+    .config = SERIAL_8N1,
+    .rxPin = MBT_RX,
+    .txPin = MBT_TX,
+    .dePin = -1
+};
+UART mbtUart(mbtConfig);
 ModbusHAL::TCP tcpServer(MODBUS_PORT); // Server for the bridge
 WiFiClient tcpClient;             // Client for injecting requests in the bridge
 

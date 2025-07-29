@@ -225,6 +225,64 @@ struct DummyWordSuite1Reg {
     }
 };
 
+// Word avec handler de lecture qui échoue
+struct FailingReadWord {
+    Modbus::Word word;
+    
+    FailingReadWord(Modbus::RegisterType type, uint16_t addr, uint16_t nbRegs) {
+        word.type = type;
+        word.startAddr = addr;
+        word.nbRegs = nbRegs;
+        word.userCtx = nullptr;
+        
+        // Handler qui retourne toujours SLAVE_DEVICE_FAILURE
+        word.readHandler = [](const ServerWord& w, uint16_t* outVals, void* userCtx) -> Modbus::ExceptionCode {
+            return Modbus::SLAVE_DEVICE_FAILURE;
+        };
+        
+        // Si ce n'est pas un type read-only, il faut un write handler
+        if (type == Modbus::HOLDING_REGISTER || type == Modbus::COIL) {
+            word.writeHandler = [](const uint16_t* writeVals, const ServerWord& w, void* userCtx) -> Modbus::ExceptionCode {
+                return Modbus::NULL_EXCEPTION;  // Write accepté mais ne fait rien
+            };
+        } else {
+            word.writeHandler = nullptr;
+        }
+    }
+};
+
+// Word avec handler d'écriture qui échoue
+struct FailingWriteWord {
+    Modbus::Word word;
+    uint16_t values[10];
+    
+    FailingWriteWord(uint16_t addr, uint16_t nbRegs, uint16_t startVal) {
+        word.type = Modbus::HOLDING_REGISTER;
+        word.startAddr = addr;
+        word.nbRegs = nbRegs;
+        word.userCtx = values;
+        
+        // Init values
+        for (uint16_t i = 0; i < nbRegs; i++) {
+            values[i] = startVal + i;
+        }
+        
+        // Handler de lecture normal
+        word.readHandler = [](const ServerWord& w, uint16_t* outVals, void* userCtx) -> Modbus::ExceptionCode {
+            uint16_t* vals = (uint16_t*)userCtx;
+            for (uint16_t i = 0; i < w.nbRegs; i++) {
+                outVals[i] = vals[i];
+            }
+            return Modbus::NULL_EXCEPTION;
+        };
+        
+        // Handler d'écriture qui échoue toujours
+        word.writeHandler = [](const uint16_t* writeVals, const ServerWord& w, void* userCtx) -> Modbus::ExceptionCode {
+            return Modbus::SLAVE_DEVICE_FAILURE;
+        };
+    }
+};
+
 // Helper functions for Word API
 inline void do_test_add_word(Modbus::Server& server,
                             const ServerWord& word,

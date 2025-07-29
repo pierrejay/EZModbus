@@ -191,16 +191,13 @@ void clientTask(void* pvParameters) {
         ESP_LOGI(TAG_CLIENT_TASK, "Sending READ request for register %u...", TARGET_REGISTER);
         ModbusClient::Result readResult = modbusClient.sendRequest(readRequest, readResponse);
 
-        // Error sending request: abort
-        if (readResult != ModbusClient::SUCCESS) { 
-            ESP_LOGE(TAG_CLIENT_TASK, "Error on sendRequest (READ): %s", ModbusClient::toString(readResult));
-            continue;
-        }
-
-        // Response received with Modbus exception: abort
-        if (readResponse.exceptionCode != Modbus::NULL_EXCEPTION) { 
+        // Check result: success, exception, or error
+        if (readResult == ModbusClient::ERR_EXCEPTION_RESPONSE) {
             ESP_LOGE(TAG_CLIENT_TASK, "Modbus Exception on READ: %s (0x%02X)",
                      Modbus::toString(readResponse.exceptionCode), readResponse.exceptionCode);
+            continue;
+        } else if (readResult != ModbusClient::SUCCESS) { 
+            ESP_LOGE(TAG_CLIENT_TASK, "Error on sendRequest (READ): %s", ModbusClient::toString(readResult));
             continue;
         }
 
@@ -224,16 +221,13 @@ void clientTask(void* pvParameters) {
         ESP_LOGI(TAG_CLIENT_TASK, "Sending WRITE request for register %u with value %u...", TARGET_REGISTER, valueToWrite);
         ModbusClient::Result writeResult = modbusClient.sendRequest(writeRequest, writeResponse);
 
-        // Error sending request: abort
-        if (writeResult != ModbusClient::SUCCESS) {
-            ESP_LOGE(TAG_CLIENT_TASK, "Error on sendRequest (WRITE): %s", ModbusClient::toString(writeResult));
-            continue;
-        }
-
-        // Response received with Modbus exception: abort
-        if (writeResponse.exceptionCode != Modbus::NULL_EXCEPTION) {
+        // Check result: success, exception, or error
+        if (writeResult == ModbusClient::ERR_EXCEPTION_RESPONSE) {
             ESP_LOGE(TAG_CLIENT_TASK, "Modbus Exception on WRITE: %s (0x%02X)",
                      Modbus::toString(writeResponse.exceptionCode), writeResponse.exceptionCode);
+            continue;
+        } else if (writeResult != ModbusClient::SUCCESS) {
+            ESP_LOGE(TAG_CLIENT_TASK, "Error on sendRequest (WRITE): %s", ModbusClient::toString(writeResult));
             continue;
         }
 

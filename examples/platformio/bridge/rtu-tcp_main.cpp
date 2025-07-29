@@ -21,15 +21,17 @@ using ModbusRTU = ModbusInterface::RTU;
 using ModbusTCP = ModbusInterface::TCP;
 using ModbusBridge = Modbus::Bridge;
 
-// UART configuration & instance + TCP server instance
+// UART Configuration
 UARTConfig uartConfig = {
     .serial = Serial2,
     .baud = 9600,
     .config = SERIAL_8N1,
     .rxPin = 16,
     .txPin = 17,
-    .dePin = 5
+    .dePin = 5  // DE/RE pin for RS485 communication
 };
+
+// UART port for Modbus RTU & TCP server for Modbus TCP
 UART uart(uartConfig);
 TCP tcpServer(MODBUS_TCP_PORT);
 

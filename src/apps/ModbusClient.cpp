@@ -36,10 +36,7 @@ bool Client::PendingRequest::set(const Modbus::Frame& request, Modbus::Frame* re
                                  Result* tracker, uint32_t timeoutMs) {
     if (isActive()) return false; // The pending request must be cleared first
     Lock guard(_mutex);
-    _reqMetadata.fc = request.fc;
-    _reqMetadata.slaveId = request.slaveId;
-    _reqMetadata.regAddress = request.regAddress;
-    _reqMetadata.regCount = request.regCount;
+    _reqMetadata = Modbus::FrameMeta(request);
     _pResponse = response;
     _tracker = tracker;
     _cb = nullptr; 
@@ -81,10 +78,7 @@ bool Client::PendingRequest::set(const Modbus::Frame& request, Client::ResponseC
                                  void* userCtx, uint32_t timeoutMs) {
     if (isActive()) return false;
     Lock guard(_mutex);
-    _reqMetadata.fc = request.fc;
-    _reqMetadata.slaveId = request.slaveId;
-    _reqMetadata.regAddress = request.regAddress;
-    _reqMetadata.regCount = request.regCount;
+    _reqMetadata = Modbus::FrameMeta(request);
     _pResponse = nullptr;     // No external response storage in callback mode
     _tracker   = nullptr;     // Not used in callback mode
     _cb        = cb;
@@ -148,7 +142,7 @@ uint32_t Client::PendingRequest::getTimestampMs() const { return _timestampMs; }
 /* @brief Get the pending request
  * @return Copy of the pending request
  */
-const Modbus::Frame& Client::PendingRequest::getRequestMetadata() const { return _reqMetadata; }
+const Modbus::FrameMeta& Client::PendingRequest::getRequestMetadata() const { return _reqMetadata; }
 
 /* @brief Update the pending request result tracker
  * @param result The result to set
@@ -183,11 +177,14 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
     Client::ResponseCallback cbSnapshot = nullptr;
     void* ctxSnapshot = nullptr;
 
+    // Determine result based on exception code
+    Result result = (response.exceptionCode != Modbus::NULL_EXCEPTION) ? ERR_EXCEPTION_RESPONSE : SUCCESS;
+
     // Handle response & tracker under critical section
     {
         Lock guard(_mutex);
         if (_pResponse) *_pResponse = response;
-        if (_tracker) *_tracker = SUCCESS;
+        if (_tracker) *_tracker = result;
         cbSnapshot = _cb;
         ctxSnapshot = _cbCtx;
         if (finalize) {
@@ -197,8 +194,9 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
     }
 
     // Invoke callback outside of critical section
+    // (safe: see comments in handleResponse() & staticHandleTxResult())
     if (cbSnapshot) {
-        cbSnapshot(SUCCESS, &response, ctxSnapshot);
+        cbSnapshot(result, &response, ctxSnapshot);
     }
 }
 
@@ -470,11 +468,14 @@ Client::Result Client::handleResponse(const Modbus::Frame& response)
     // Copy the response and re-inject the original metadata
     _responseBuffer.clear();
     _responseBuffer = response;
-    const Modbus::Frame& req = _pendingRequest.getRequestMetadata();
+    const Modbus::FrameMeta& req = _pendingRequest.getRequestMetadata();
     _responseBuffer.regAddress = req.regAddress;   // <- original address
     _responseBuffer.regCount   = req.regCount;     // <- actual number of registers / coils
 
     // Propagate the response to the user and clean up the state
+    // As long as this function call hasn't returned, no other request can be sent in parallel
+    // (interface context is locked) which means the _responseBuffer is safe to be accessed
+    // for the duration of user callback execution.
     _pendingRequest.setResponse(_responseBuffer, true);
 
     return Success();
@@ -509,16 +510,278 @@ void Client::staticHandleTxResult(ModbusInterface::IInterface::Result result, vo
     if (Modbus::isBroadcastId(client->_pendingRequest.getRequestMetadata().slaveId)) {
         // Use the shared response buffer rather than a local stack frame
         // (safe thanks to timing + safety checks in handleResponse())
+        const Modbus::FrameMeta& reqMeta = client->_pendingRequest.getRequestMetadata();
         client->_responseBuffer.clear();
-        client->_responseBuffer = client->_pendingRequest.getRequestMetadata();
         client->_responseBuffer.type = Modbus::RESPONSE;
+        client->_responseBuffer.fc = reqMeta.fc;
+        client->_responseBuffer.slaveId = reqMeta.slaveId;
+        client->_responseBuffer.regAddress = reqMeta.regAddress;
+        client->_responseBuffer.regCount = reqMeta.regCount;
         client->_responseBuffer.exceptionCode = Modbus::NULL_EXCEPTION;
-        client->_responseBuffer.clearData();
+        // As long as this function call hasn't returned, no other request can be sent in parallel
+        // (interface context is locked) which means the _responseBuffer is safe to be accessed
+        // for the duration of user callback execution.
         client->_pendingRequest.setResponse(client->_responseBuffer, true);
         return;
     }
     
     // For non-broadcast successful TX, we just wait for the response in handleResponse()
+}
+
+// ===================================================================================
+// HELPER METHODS IMPLEMENTATION
+// ===================================================================================
+
+/* @brief Read registers/coils with uint16_t buffer
+ * @param slaveId Target slave ID
+ * @param regType Register type (COIL, DISCRETE_INPUT, HOLDING_REGISTER, INPUT_REGISTER)
+ * @param startAddr Starting address
+ * @param qty Number of registers/coils to read
+ * @param toBuf Buffer to store the read values
+ * @param rspExcep Optional pointer to store exception code from response
+ * @return Result code
+ */
+Client::Result Client::read(uint8_t slaveId, RegisterType regType, uint16_t startAddr, 
+                            uint16_t qty, uint16_t* toBuf, ExceptionCode* rspExcep) {
+    // Validate parameters
+    if (!toBuf || qty == 0) {
+        return Error(ERR_INVALID_FRAME, "invalid buffer or quantity");
+    }
+    
+    // Thread-safe access to helper buffer
+    Lock guard(_helperMutex);
+    
+    // Build request in helper buffer
+    _helperBuffer.clear();
+    _helperBuffer.type = Modbus::REQUEST;
+    _helperBuffer.slaveId = slaveId;
+    _helperBuffer.regAddress = startAddr;
+    _helperBuffer.regCount = qty;
+    
+    // Set function code based on register type
+    switch (regType) {
+        case COIL:
+            _helperBuffer.fc = READ_COILS;
+            break;
+        case DISCRETE_INPUT:
+            _helperBuffer.fc = READ_DISCRETE_INPUTS;
+            break;
+        case HOLDING_REGISTER:
+            _helperBuffer.fc = READ_HOLDING_REGISTERS;
+            break;
+        case INPUT_REGISTER:
+            _helperBuffer.fc = READ_INPUT_REGISTERS;
+            break;
+        default:
+            return Error(ERR_INVALID_FRAME, "invalid register type");
+    }
+    
+    // Send request synchronously - THE TRICK: reuse same buffer for response!
+    Result res = sendRequest(_helperBuffer, _helperBuffer);
+    
+    // Handle response
+    if (res == SUCCESS) {
+        // Valid response with data
+        if (regType == COIL || regType == DISCRETE_INPUT) {
+            // For coils in uint16_t buffer, each coil takes one uint16_t (0 or 1)
+            _helperBuffer.getCoils(toBuf, qty);
+        } else {
+            // For registers, direct copy
+            _helperBuffer.getRegisters(toBuf, qty);
+        }
+        
+        if (rspExcep) *rspExcep = NULL_EXCEPTION;
+        return Success();
+    } else if (res == ERR_EXCEPTION_RESPONSE) {
+        // Exception response - extract exception code but no data
+        if (rspExcep) *rspExcep = _helperBuffer.exceptionCode;
+        return Error(ERR_EXCEPTION_RESPONSE, "Modbus exception received");
+    } else {
+        // Transmission or other error
+        return Error(res, "Request failed");
+    }
+}
+
+/* @brief Write registers/coils with uint16_t buffer
+ * @param slaveId Target slave ID
+ * @param regType Register type (COIL or HOLDING_REGISTER only)
+ * @param startAddr Starting address
+ * @param qty Number of registers/coils to write
+ * @param fromBuf Buffer containing values to write
+ * @param rspExcep Optional pointer to store exception code from response
+ * @return Result code
+ */
+Client::Result Client::write(uint8_t slaveId, RegisterType regType, uint16_t startAddr, 
+                             uint16_t qty, const uint16_t* fromBuf, ExceptionCode* rspExcep) {
+    // Validate parameters
+    if (!fromBuf || qty == 0) {
+        return Error(ERR_INVALID_FRAME, "invalid buffer or quantity");
+    }
+    
+    // Only COIL and HOLDING_REGISTER can be written
+    if (regType != COIL && regType != HOLDING_REGISTER) {
+        return Error(ERR_INVALID_FRAME, "register type not writable");
+    }
+    
+    // Thread-safe access to helper buffer
+    Lock guard(_helperMutex);
+    
+    // Build request in helper buffer
+    _helperBuffer.clear();
+    _helperBuffer.type = Modbus::REQUEST;
+    _helperBuffer.slaveId = slaveId;
+    _helperBuffer.regAddress = startAddr;
+    _helperBuffer.regCount = qty;
+    
+    // Set function code and data based on quantity and type
+    if (regType == COIL) {
+        if (qty == 1) {
+            _helperBuffer.fc = WRITE_COIL;
+        } else {
+            _helperBuffer.fc = WRITE_MULTIPLE_COILS;
+        }
+        if (!_helperBuffer.setCoils(fromBuf, qty)) {
+            return Error(ERR_INVALID_FRAME, "failed to pack coils");
+        }
+    } else { // HOLDING_REGISTER
+        if (qty == 1) {
+            _helperBuffer.fc = WRITE_REGISTER;
+        } else {
+            _helperBuffer.fc = WRITE_MULTIPLE_REGISTERS;
+        }
+        if (!_helperBuffer.setRegisters(fromBuf, qty)) {
+            return Error(ERR_INVALID_FRAME, "failed to set registers");
+        }
+    }
+    
+    // Send request synchronously - THE TRICK: reuse same buffer for response!
+    Result res = sendRequest(_helperBuffer, _helperBuffer);
+    
+    // Handle response
+    if (res == SUCCESS) {
+        // Write successful
+        if (rspExcep) *rspExcep = NULL_EXCEPTION;
+        return Success();
+    } else if (res == ERR_EXCEPTION_RESPONSE) {
+        // Exception response - extract exception code
+        if (rspExcep) *rspExcep = _helperBuffer.exceptionCode;
+        return Error(ERR_EXCEPTION_RESPONSE, "Modbus exception received");
+    } else {
+        // Transmission or other error
+        return Error(res, "Request failed");
+    }
+}
+
+/* @brief Read coils/discrete inputs with bool buffer
+ * @param slaveId Target slave ID
+ * @param regType Register type (COIL or DISCRETE_INPUT only)
+ * @param startAddr Starting address
+ * @param qty Number of coils to read
+ * @param toBuf Buffer to store the read values
+ * @param rspExcep Optional pointer to store exception code from response
+ * @return Result code
+ */
+Client::Result Client::read(uint8_t slaveId, RegisterType regType, uint16_t startAddr, 
+                            uint16_t qty, bool* toBuf, ExceptionCode* rspExcep) {
+    // Validate parameters
+    if (!toBuf || qty == 0) {
+        return Error(ERR_INVALID_FRAME, "invalid buffer or quantity");
+    }
+    
+    // Only COIL and DISCRETE_INPUT can use bool buffer
+    if (regType != COIL && regType != DISCRETE_INPUT) {
+        return Error(ERR_INVALID_FRAME, "bool buffer requires COIL or DISCRETE_INPUT");
+    }
+    
+    // Thread-safe access to helper buffer
+    Lock guard(_helperMutex);
+    
+    // Build request in helper buffer
+    _helperBuffer.clear();
+    _helperBuffer.type = Modbus::REQUEST;
+    _helperBuffer.slaveId = slaveId;
+    _helperBuffer.regAddress = startAddr;
+    _helperBuffer.regCount = qty;
+    _helperBuffer.fc = (regType == COIL) ? READ_COILS : READ_DISCRETE_INPUTS;
+    
+    // Send request synchronously - THE TRICK: reuse same buffer for response!
+    Result res = sendRequest(_helperBuffer, _helperBuffer);
+    
+    // Handle response
+    if (res == SUCCESS) {
+        // Valid response with data
+        _helperBuffer.getCoils(toBuf, qty);
+        
+        if (rspExcep) *rspExcep = NULL_EXCEPTION;
+        return Success();
+    } else if (res == ERR_EXCEPTION_RESPONSE) {
+        // Exception response - extract exception code but no data
+        if (rspExcep) *rspExcep = _helperBuffer.exceptionCode;
+        return Error(ERR_EXCEPTION_RESPONSE, "Modbus exception received");
+    } else {
+        // Transmission or other error
+        return Error(res, "Request failed");
+    }
+}
+
+/* @brief Write coils with bool buffer
+ * @param slaveId Target slave ID
+ * @param regType Register type (COIL only)
+ * @param startAddr Starting address
+ * @param qty Number of coils to write
+ * @param fromBuf Buffer containing values to write
+ * @param rspExcep Optional pointer to store exception code from response
+ * @return Result code
+ */
+Client::Result Client::write(uint8_t slaveId, RegisterType regType, uint16_t startAddr, 
+                             uint16_t qty, const bool* fromBuf, ExceptionCode* rspExcep) {
+    // Validate parameters
+    if (!fromBuf || qty == 0) {
+        return Error(ERR_INVALID_FRAME, "invalid buffer or quantity");
+    }
+    
+    // Only COIL can be written with bool buffer
+    if (regType != COIL) {
+        return Error(ERR_INVALID_FRAME, "bool buffer requires COIL type");
+    }
+    
+    // Thread-safe access to helper buffer
+    Lock guard(_helperMutex);
+    
+    // Build request in helper buffer
+    _helperBuffer.clear();
+    _helperBuffer.type = Modbus::REQUEST;
+    _helperBuffer.slaveId = slaveId;
+    _helperBuffer.regAddress = startAddr;
+    _helperBuffer.regCount = qty;
+    
+    // Set function code and data based on quantity
+    if (qty == 1) {
+        _helperBuffer.fc = WRITE_COIL;
+        _helperBuffer.data[0] = fromBuf[0] ? 0xFF00 : 0x0000;
+    } else {
+        _helperBuffer.fc = WRITE_MULTIPLE_COILS;
+        if (!_helperBuffer.setCoils(fromBuf, qty)) {
+            return Error(ERR_INVALID_FRAME, "failed to pack coils");
+        }
+    }
+    
+    // Send request synchronously - THE TRICK: reuse same buffer for response!
+    Result res = sendRequest(_helperBuffer, _helperBuffer);
+    
+    // Handle response
+    if (res == SUCCESS) {
+        // Write successful
+        if (rspExcep) *rspExcep = NULL_EXCEPTION;
+        return Success();
+    } else if (res == ERR_EXCEPTION_RESPONSE) {
+        // Exception response - extract exception code
+        if (rspExcep) *rspExcep = _helperBuffer.exceptionCode;
+        return Error(ERR_EXCEPTION_RESPONSE, "Modbus exception received");
+    } else {
+        // Transmission or other error
+        return Error(res, "Request failed");
+    }
 }
 
 

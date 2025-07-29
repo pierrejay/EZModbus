@@ -485,6 +485,11 @@ TCP::Result TCP::handleTxRequest() {
     } // Mutex released here (end of RAII scope)
 
     if (!sendMsgRes) {
+        // For server role, we must end the transaction even if send fails
+        // to avoid getting stuck in "busy" state
+        if (_role == Modbus::SERVER) {
+            endTransaction();
+        }
         if (txCallback) txCallback(ERR_SEND_FAILED, ctx);
         return Error(ERR_SEND_FAILED, "HAL returned failure to send message");
     }

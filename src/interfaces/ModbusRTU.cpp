@@ -64,7 +64,7 @@ RTU::Result RTU::begin() {
 
     // Flush rxEventQueue prior to adding it to the set
     // This is necessary so parasitic events that occur before RTU initialization do not prevent the QueueSet from being created
-    uart_event_t dump;
+    ModbusHAL::UART::Event dump;
     while (xQueueReceive(_rxEventQueue, &dump, 0) == pdTRUE) { }
 
     // Add queues to QueueSet
@@ -242,6 +242,7 @@ RTU::Result RTU::sendFrame(const Modbus::Frame& frame, TxResultCallback txCallba
         return Error(ERR_SEND_FAILED, "failed to put encoded frame into TX queue");
     }
     
+    Modbus::Debug::LOG_MSG("Frame queued for TX");
     return Success(); 
 }
 
@@ -293,8 +294,8 @@ void RTU::beginCleanup() {
 void RTU::killRxTxTask() {
     if (_rxTxTaskHandle && _rxEventQueue) {
         // Send a dummy event to wake up the rxTxTask
-        uart_event_t dummy_evt = {
-            .type = UART_EVENT_MAX,
+        ModbusHAL::UART::Event dummy_evt = {
+            .type = ModbusHAL::UART::EventType::UART_EVENT_MAX,
             .size = 0,
             .timeout_flag = false }; 
         xQueueSend(_rxEventQueue, &dummy_evt, 0); 
@@ -358,9 +359,9 @@ RTU::Result RTU::updateUartIdleDetection() {
         return Error(ERR_CONFIG_FAILED, "UART not ready, cannot update idle detection timeout");
     }
 
-    esp_err_t err = _uartHAL.setTimeoutMicroseconds(_silenceTimeUs);
-    if (err != ESP_OK) {
-        return Error(ERR_CONFIG_FAILED, esp_err_to_name(err));
+    auto err = _uartHAL.setTimeoutMicroseconds(_silenceTimeUs);
+    if (err != ModbusHAL::UART::SUCCESS) {
+        return Error(ERR_CONFIG_FAILED, ModbusHAL::UART::toString(err));
     }
 
     Modbus::Debug::LOG_MSGF("UART idle detection time set to: %u us", (uint32_t)_silenceTimeUs);
@@ -382,9 +383,12 @@ inline void RTU::notifyTxResult(Result res) {
  * @return SUCCESS if no critical error occured (buffer filled or event skipped)
  * @note This method is called by the rxTxTask exclusively
  */
-RTU::Result RTU::handleUartEvent(const uart_event_t& event) {
+RTU::Result RTU::handleUartEvent(const ModbusHAL::UART::Event& event) {
+#ifdef EZMODBUS_DEBUG
+    Modbus::Debug::LOG_MSGF("UART event received - type: %s, size: %dB, timeout: %d", ModbusHAL::UART::toString(event.type), (int)event.size, event.timeout_flag);
+#endif
     switch (event.type) {
-        case UART_DATA: {
+        case ModbusHAL::UART::EventType::UART_DATA: {
             // Read data from UART driver if event.size > 0
             if (event.size > 0) {
                 if (_rxBuffer.free_space() == 0) {
@@ -436,17 +440,17 @@ RTU::Result RTU::handleUartEvent(const uart_event_t& event) {
             }
             break;
         }
-        case UART_FIFO_OVF:
-        case UART_BUFFER_FULL: 
+        case ModbusHAL::UART::EventType::UART_FIFO_OVF:
+        case ModbusHAL::UART::EventType::UART_BUFFER_FULL: 
             // HW buffer full (Modbus peer is probably flooding us), we flush everything
             _rxBuffer.clear();
             _uartHAL.flush_input(); 
             return Error(ERR_RX_FAILED, "UART overflow/full, flushing RX & UART buffers");
-        case UART_FRAME_ERR:
-        case UART_PARITY_ERR:
+        case ModbusHAL::UART::EventType::UART_FRAME_ERR:
+        case ModbusHAL::UART::EventType::UART_PARITY_ERR:
             // HW error, we skip the event
             return Error(ERR_RX_FAILED, "UART frame or parity error");
-        case UART_EVENT_MAX: 
+        case ModbusHAL::UART::EventType::UART_EVENT_MAX: 
             // This case should never happen, we just print a log and skip the event
             // We use UART_EVENT_MAX to send a dummy event when we want to wake up the
             // loop to kill the rxTxTask.
@@ -522,9 +526,14 @@ void RTU::rxTxTask(void* rtu) {
 
         // If we received data from UART, push it to the rxBuffer
         if (active_member == self->_rxEventQueue) {
-            uart_event_t event;
-            if (xQueueReceive(self->_rxEventQueue, &event, 0) == pdTRUE) {
-                self->handleUartEvent(event); 
+            // Light Translation Layer: safe conversion from native events to EZModbus events
+            ModbusHAL::UART::NativeEvent nativeEvent;
+            ModbusHAL::UART::Event event;
+            if (xQueueReceive(self->_rxEventQueue, &nativeEvent, 0) == pdTRUE) {
+                if (self->_uartHAL.translateEvent(nativeEvent, event)) {
+                    self->handleUartEvent(event);
+                }
+                // Événements non traduits = ignorés silencieusement
             }
         } 
         // If we have a pending frame in the TX buffer, send it

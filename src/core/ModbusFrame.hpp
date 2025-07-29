@@ -37,6 +37,7 @@ struct Frame {
     bool getCoil(size_t index) const;
     std::vector<bool> getCoils() const;
     size_t getCoils(bool* dst, size_t dstSize) const;
+    size_t getCoils(uint16_t* dst, size_t dstSize) const;
 
     // Setter functions for frame data
     bool setRegisters(const std::vector<uint16_t>& src);
@@ -67,6 +68,44 @@ inline void Frame::clear() {
     data.fill(0);
     exceptionCode = NULL_EXCEPTION;
 }
+
+
+// ===================================================================================
+// FRAME METADATA STRUCTURE
+// ===================================================================================
+
+/* @brief Lightweight structure containing only frame metadata without data payload
+ * Used to store request/response information without the 250-byte data array
+ */
+struct FrameMeta {
+    MsgType type = NULL_MSG;
+    FunctionCode fc = NULL_FC;
+    uint8_t slaveId = 0;
+    uint16_t regAddress = 0;
+    uint16_t regCount = 0;
+    
+    // Default constructor
+    FrameMeta() = default;
+    
+    // Constructor from Frame
+    explicit FrameMeta(const Frame& frame) 
+        : type(frame.type), fc(frame.fc), slaveId(frame.slaveId), 
+          regAddress(frame.regAddress), regCount(frame.regCount) {}
+    
+    // Constructor with all fields
+    FrameMeta(MsgType msgType, FunctionCode funcCode, uint8_t slave, uint16_t addr, uint16_t count)
+        : type(msgType), fc(funcCode), slaveId(slave), regAddress(addr), regCount(count) {}
+    
+    // Clear function (same as Frame::clear but without data)
+    void clear() {
+        type = NULL_MSG;
+        fc = NULL_FC;
+        slaveId = 0;
+        regAddress = 0;
+        regCount = 0;
+    }
+};
+
 
 // ===================================================================================
 // INLINE FUNCTIONS - IN-PLACE DATA PACKING/UNPACKING IN MODBUS::FRAME
@@ -335,6 +374,25 @@ inline std::vector<bool> Modbus::Frame::getCoils() const {
     * @return The number of coils copied to the destination array.
     */
 inline size_t Modbus::Frame::getCoils(bool* dst, size_t dstLen) const {
+    if (regCount == 0 || dst == nullptr || dstLen == 0) return 0;
+    
+    size_t count = std::min(regCount, (uint16_t)(dstLen));
+    count = std::min(count, (size_t)(FRAME_DATASIZE * 16));
+    
+    for (size_t i = 0; i < count; i++) {
+        size_t wordIdx = i / 16;
+        size_t bitIdx = i % 16;
+        dst[i] = (data[wordIdx] >> bitIdx) & 1;
+    }
+    return count;
+}
+
+/* @brief Get coil values into a uint16_t buffer (each coil as 0 or 1).
+ * @param dst The destination buffer for coil values.
+ * @param dstLen The maximum size of the destination buffer.
+ * @return The number of coils copied.
+ */
+inline size_t Modbus::Frame::getCoils(uint16_t* dst, size_t dstLen) const {
     if (regCount == 0 || dst == nullptr || dstLen == 0) return 0;
     
     size_t count = std::min(regCount, (uint16_t)(dstLen));

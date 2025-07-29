@@ -6,6 +6,8 @@
 #pragma once
 
 #include "core/ModbusTypes.hpp"
+// EventBus moved to ModbusDebug.hpp to break circular dependency
+
 
 namespace Modbus {
 
@@ -40,11 +42,11 @@ namespace Modbus {
     };
     static constexpr const char* toString(const RegisterType type) {
         switch (type) {
-            case DISCRETE_INPUT: return "discrete input";
-            case COIL: return "coil";
-            case HOLDING_REGISTER: return "holding register";
-            case INPUT_REGISTER: return "input register";
-            default: return "invalid register type";
+            case DISCRETE_INPUT: return "Discrete Input";
+            case COIL: return "Coil";
+            case HOLDING_REGISTER: return "Holding Register";
+            case INPUT_REGISTER: return "Input Register";
+            default: return "Invalid register type";
         }
     }
     static constexpr bool isValid(const RegisterType type) {
@@ -72,16 +74,16 @@ namespace Modbus {
     };
     static constexpr const char* toString(FunctionCode fc) {
         switch (fc) {
-            case NULL_FC: return "null function code";
-            case READ_COILS: return "read coils";
-            case READ_DISCRETE_INPUTS: return "read discrete inputs";
-            case READ_HOLDING_REGISTERS: return "read holding registers";
-            case READ_INPUT_REGISTERS: return "read input registers";
-            case WRITE_COIL: return "write single coil";
-            case WRITE_REGISTER: return "write single register";
-            case WRITE_MULTIPLE_COILS: return "write multiple coils";
-            case WRITE_MULTIPLE_REGISTERS: return "write multiple registers";
-            default: return "invalid function code";
+            case NULL_FC: return "Null function code";
+            case READ_COILS: return "Read coils";
+            case READ_DISCRETE_INPUTS: return "Read discrete inputs";
+            case READ_HOLDING_REGISTERS: return "Read holding registers";
+            case READ_INPUT_REGISTERS: return "Read input registers";
+            case WRITE_COIL: return "Write single coil";
+            case WRITE_REGISTER: return "Write single register";
+            case WRITE_MULTIPLE_COILS: return "Write multiple coils";
+            case WRITE_MULTIPLE_REGISTERS: return "Write multiple registers";
+            default: return "Invalid function code";
         }
     }
     static constexpr bool isValid(const FunctionCode fc) {
@@ -132,16 +134,16 @@ namespace Modbus {
     };
     static constexpr const char* toString(ExceptionCode ec) {
         switch (ec) {
-            case NULL_EXCEPTION: return "no exception";
-            case ILLEGAL_FUNCTION: return "illegal function";
-            case ILLEGAL_DATA_ADDRESS: return "illegal data address";
-            case ILLEGAL_DATA_VALUE: return "illegal data value";
-            case SLAVE_DEVICE_FAILURE: return "slave device failure";
-            case ACKNOWLEDGE: return "acknowledge";
-            case SLAVE_DEVICE_BUSY: return "slave device busy";
-            case NEGATIVE_ACKNOWLEDGE: return "negative acknowledge";
-            case MEMORY_PARITY_ERROR: return "memory parity error";
-            default: return "invalid exception code";
+            case NULL_EXCEPTION: return "No exception";
+            case ILLEGAL_FUNCTION: return "Illegal function";
+            case ILLEGAL_DATA_ADDRESS: return "Illegal data address";
+            case ILLEGAL_DATA_VALUE: return "Illegal data value";
+            case SLAVE_DEVICE_FAILURE: return "Slave device failure";
+            case ACKNOWLEDGE: return "Acknowledge";
+            case SLAVE_DEVICE_BUSY: return "Slave device busy";
+            case NEGATIVE_ACKNOWLEDGE: return "Negative acknowledge";
+            case MEMORY_PARITY_ERROR: return "Memory parity error";
+            default: return "Invalid exception code";
         }
     }
     static constexpr bool isValid(const ExceptionCode ec) {
@@ -162,10 +164,10 @@ namespace Modbus {
     };
     static constexpr const char* toString(MsgType type) {
         switch (type) {
-            case NULL_MSG: return "undefined message type";
-            case REQUEST: return "request";
-            case RESPONSE: return "response";
-            default: return "invalid message type";
+            case NULL_MSG: return "Undefined message type";
+            case REQUEST: return "Request";
+            case RESPONSE: return "Response";
+            default: return "Invalid message type";
         }
     }
     static constexpr bool isValid(const MsgType type) {

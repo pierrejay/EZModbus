@@ -1,6 +1,6 @@
 /**
- * @file ModbusTypes.hpp
- * @brief Header includes & general-purpose types used across EZModbus library
+ * @file ModbusTypes.h
+ * @brief General-purpose types used across EZModbus library
  */
 
 #pragma once
@@ -9,29 +9,127 @@
 #include <string>
 #include <cstdint>
 #include <cstddef>
+#include <stdarg.h>
+#include <stdio.h>
 #include <array>
 #include <vector>
 #include <functional>
 #include <algorithm>
 
-// Do not include timing macros & FreeRTOS types if NATIVE_TEST is defined
-#ifndef NATIVE_TEST
+// Include platform-specific headers
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
-#include "freertos/timers.h"
-#include "freertos/portmacro.h"
-#include "freertos/event_groups.h"
-#include "esp_timer.h"
+// ESP32 specific headers
+#if defined(ARDUINO_ARCH_ESP32) || defined(ESP_PLATFORM)
+    #include "esp_timer.h"
+    #include "driver/uart.h"
+    #include "driver/gpio.h"
+#endif
+
+// Arduino specific headers
+#if defined(ARDUINO_ARCH_ESP32)
+    #include <Arduino.h>
+    #include <HardwareSerial.h>
+#endif
+
+// STM32 specific headers (includes HAL & everything else)
+// assuming the project was created using STM32CubeMX
+#if defined(STM32_HAL)
+    #include "main.h"
+#endif
+
+// RP2040 specific headers
+#if defined(PICO_SDK)
+    #include "pico/stdlib.h"
+    #include "hardware/uart.h"
+    #include "hardware/gpio.h"
+    #include "hardware/timer.h"
+    #include "hardware/dma.h"
+    #include "hardware/irq.h"
+    #include "pico/time.h"
+#endif
+
+// FreeRTOS port & primitives
+#if defined(ARDUINO_ARCH_ESP32) || defined(ESP_PLATFORM)
+    #include "freertos/FreeRTOS.h"
+    #include "freertos/semphr.h"
+    #include "freertos/timers.h"
+    #include "freertos/portmacro.h"
+    #include "freertos/task.h"
+    #include "freertos/queue.h"
+    #include "freertos/event_groups.h"
+#elif defined(STM32_HAL)
+    #include "FreeRTOS.h"
+    #include "semphr.h"
+    #include "timers.h"
+    #include "portmacro.h"
+    #include "task.h"
+    #include "queue.h"
+    #include "event_groups.h"
+#elif defined(PICO_SDK)
+    #include "FreeRTOS.h"
+    #include "semphr.h"
+    #include "timers.h"
+    #include "portmacro.h"
+    #include "task.h"
+    #include "queue.h"
+    #include "event_groups.h"
+#endif
+
+// ===================================================================================
+// FREERTOS TASK STACK SIZE CONVERSION MACRO
+// ===================================================================================
+
+// - On ESP32 FreeRTOS port, stack size should be defined in bytes.
+// - On "vanilla" FreeRTOS port, stack size should be defined in words (4 bytes each).
+// - Stack sizes are defined in bytes in the library.
+//
+// This macro allows to convert stack size to the right value at compile time 
+// depending on the target platform (valid for both xTaskCreate & xTaskCreateStatic).
+
+#if defined(ARDUINO_ARCH_ESP32) || defined(ESP_PLATFORM)
+    constexpr uint32_t BYTES_TO_STACK_SIZE(const uint32_t stackSizeBytes) {
+        return stackSizeBytes; // ESP32 FreeRTOS uses bytes directly
+    }
+#elif defined(PICO_SDK) && defined(EZMODBUS_DEBUG)
+    constexpr uint32_t BYTES_TO_STACK_SIZE(const uint32_t stackSizeBytes) {
+        return (stackSizeBytes + 256) / 4; // Add 256 bytes due to snprintf overhead on RP2040
+    }
+#else
+    constexpr uint32_t BYTES_TO_STACK_SIZE(const uint32_t stackSizeBytes) {
+        return stackSizeBytes / 4; // Vanilla FreeRTOS uses words (4 bytes each)
+    }
+#endif
 
 // ===================================================================================
 // TIMING MACROS
 // ===================================================================================
 
-inline uint32_t TIME_MS()           { return (xTaskGetTickCount() * portTICK_PERIOD_MS); }
-inline uint64_t TIME_US()           { return esp_timer_get_time(); }
-inline void WAIT_MS(uint32_t ms)    { vTaskDelay(pdMS_TO_TICKS(ms)); }
-inline void WAIT_US(uint32_t us)    { esp_rom_delay_us(us); }
+#if defined(ARDUINO_ARCH_ESP32) || defined(ESP_PLATFORM)
+    inline uint32_t TIME_MS()           { return (xTaskGetTickCount() * portTICK_PERIOD_MS); }
+    inline uint64_t TIME_US()           { return esp_timer_get_time(); }
+    inline void WAIT_MS(uint32_t ms)    { vTaskDelay(pdMS_TO_TICKS(ms)); }
+    inline void WAIT_US(uint32_t us)    { esp_rom_delay_us(us); }
+#elif defined(STM32_HAL)
+    inline uint32_t TIME_MS()           { return HAL_GetTick(); }
+    inline uint64_t TIME_US()           { return HAL_GetTick() * 1000; }
+    inline void WAIT_MS(uint32_t ms)    { vTaskDelay(pdMS_TO_TICKS(ms)); }
+    inline void WAIT_US(uint32_t us)    { HAL_Delay(us / 1000); }
+#elif defined(PICO_SDK)
+    inline uint32_t TIME_MS()           { return (xTaskGetTickCount() * portTICK_PERIOD_MS); }
+    inline uint64_t TIME_US()           { return time_us_64(); }
+    inline void WAIT_MS(uint32_t ms)    { vTaskDelay(pdMS_TO_TICKS(ms)); }
+    inline void WAIT_US(uint32_t us)    { sleep_us(us); }
+#endif
+
+// Mock timing functions for native tests
+#ifdef NATIVE_TEST
+    inline uint32_t TIME_MS() { return 0; }
+    inline uint64_t TIME_US() { return 0; }
+    inline void WAIT_MS(uint32_t ms) { (void)ms; }
+    inline void WAIT_US(uint32_t us) { (void)us; }
+#endif
+
+namespace ModbusTypeDef {
 
 // ===================================================================================
 // FREERTOS SYNCHRONIZATION
@@ -40,6 +138,8 @@ inline void WAIT_US(uint32_t us)    { esp_rom_delay_us(us); }
 /* @brief RAII wrapper for a FreeRTOS mutex
 * @note Offers a try-lock mechanism
 */
+
+#ifndef NATIVE_TEST
 class Mutex {
 public:
     Mutex() {
@@ -99,7 +199,31 @@ private:
     volatile bool _locked;
 };
 
+#else // NATIVE_TEST - mock FreeRTOS classes
+
+class Mutex {
+public:
+    Mutex() = default;
+    ~Mutex() = default;
+    Mutex(const Mutex&) = delete;
+    Mutex& operator=(const Mutex&) = delete;
+    
+    bool tryLock() { return true; }
+    bool lock(int wait = 0) { (void)wait; return true; }
+    void unlock() {}
+};
+
+class Lock {
+public:
+    explicit Lock(Mutex& m, int wait = 0) : _locked(true) { (void)m; (void)wait; }
+    ~Lock() {}
+    bool isLocked() const { return _locked; }
+private:
+    bool _locked;
+};
+
 #endif // NATIVE_TEST
+
 
 
 // ===================================================================================
@@ -247,3 +371,75 @@ private:
     size_t   _cap;
 };
 
+
+// ===================================================================================
+// CALL CONTEXT (used in Modbus::Debug & Modbus::EventBus)
+// ===================================================================================
+
+/* @brief Context structure to capture call location information
+ */
+struct CallCtx {
+    const char* file;
+    const char* function;
+    int line;
+    
+    CallCtx(const char* f = __builtin_FILE(), 
+            const char* func = __builtin_FUNCTION(), 
+            int l = __builtin_LINE()) 
+        : file(f), function(func), line(l) {}
+};
+
+/* @brief Utility function to extract the filename from a full path
+ * @param path The full path to extract the filename from
+ * @return The filename
+ */
+static constexpr const char* getBasename(const char* path) {
+    const char* basename = path;
+    
+    // Search for the last occurrence of '/' (Unix/Linux/macOS)
+    const char* lastSlash = strrchr(path, '/');
+    if (lastSlash) basename = lastSlash + 1;
+    
+    // Search for the last occurrence of '\' (Windows)
+    const char* lastBackslash = strrchr(path, '\\');
+    if (lastBackslash && lastBackslash > basename) basename = lastBackslash + 1;
+    
+    return basename;
+}
+
+} // namespace ModbusTypeDef
+
+
+// ===================================================================================
+// ModbusTypeDef ALIASING IN ALL NAMESPACES
+// ===================================================================================
+
+// Note: getBasename is a function, imported via ModbusTypeDef:: qualification
+
+namespace Modbus {
+    using CallCtx = ModbusTypeDef::CallCtx;
+    using Mutex = ModbusTypeDef::Mutex;
+    using Lock = ModbusTypeDef::Lock;
+    using ByteBuffer = ModbusTypeDef::ByteBuffer;
+}
+
+namespace ModbusHAL {
+    using CallCtx = ModbusTypeDef::CallCtx;
+    using Mutex = ModbusTypeDef::Mutex;
+    using Lock = ModbusTypeDef::Lock;
+    using ByteBuffer = ModbusTypeDef::ByteBuffer;
+}
+
+namespace ModbusInterface {
+    using CallCtx = ModbusTypeDef::CallCtx;
+    using Mutex = ModbusTypeDef::Mutex;
+    using Lock = ModbusTypeDef::Lock;
+    using ByteBuffer = ModbusTypeDef::ByteBuffer;
+}
+
+namespace ModbusCodec {
+    using CallCtx = ModbusTypeDef::CallCtx;
+    using Mutex = ModbusTypeDef::Mutex;
+    using Lock = ModbusTypeDef::Lock;
+    using ByteBuffer = ModbusTypeDef::ByteBuffer;
+}

@@ -36,61 +36,29 @@ namespace ModbusCodec {
     };
     static constexpr const char* toString(const Result result) {
         switch (result) {
-            case SUCCESS: return "success";
-            case ERR_INVALID_TYPE: return "invalid message type";
-            case ERR_INVALID_LEN: return "invalid length";
-            case ERR_BUFFER_OVERFLOW: return "buffer overflow";
-            case ERR_INVALID_FC: return "invalid function code";
-            case ERR_INVALID_REG_ADDR: return "invalid register address";
-            case ERR_INVALID_REG_COUNT: return "invalid register count";
-            case ERR_INVALID_BYTE_COUNT: return "invalid byte count";
-            case ERR_INVALID_DATA: return "invalid data";
-            case ERR_INVALID_EXCEPTION: return "invalid exception";
-            case ERR_INVALID_SLAVEID: return "invalid slave ID";
-            case ERR_INVALID_CRC: return "invalid CRC";
-            case ERR_INVALID_MBAP_LEN: return "invalid MBAP length";
-            case ERR_INVALID_MBAP_PROTOCOL_ID: return "invalid MBAP protocol ID";
-            default: return "unknown error";
+            case SUCCESS: return "Success";
+            case ERR_INVALID_TYPE: return "Invalid message type";
+            case ERR_INVALID_LEN: return "Invalid length";
+            case ERR_BUFFER_OVERFLOW: return "Buffer overflow";
+            case ERR_INVALID_FC: return "Invalid function code";
+            case ERR_INVALID_REG_ADDR: return "Invalid register address";
+            case ERR_INVALID_REG_COUNT: return "Invalid register count";
+            case ERR_INVALID_BYTE_COUNT: return "Invalid byte count";
+            case ERR_INVALID_DATA: return "Invalid data";
+            case ERR_INVALID_EXCEPTION: return "Invalid exception";
+            case ERR_INVALID_SLAVEID: return "Invalid slave ID";
+            case ERR_INVALID_CRC: return "Invalid CRC";
+            case ERR_INVALID_MBAP_LEN: return "Invalid MBAP length";
+            case ERR_INVALID_MBAP_PROTOCOL_ID: return "Invalid MBAP protocol ID";
+            default: return "Unknown error";
         }
     }
     
-    // Helper to cast an error
-    // - Returns a Result
-    // - Captures point of call context & prints a log message when debug 
-    // is enabled. No overhead when debug is disabled (except for
-    // the desc string, if any)
-    static inline Result Error(Result res, const char* desc = nullptr
-                        #ifdef EZMODBUS_DEBUG
-                        , Modbus::Debug::CallCtx ctx = Modbus::Debug::CallCtx()
-                        #endif
-                        ) {
-        #ifdef EZMODBUS_DEBUG
-            if (desc && *desc != '\0') {
-                Modbus::Debug::LOG_MSGF_CTX(ctx, "Error: %s (%s)", toString(res), desc);
-            } else {
-                Modbus::Debug::LOG_MSGF_CTX(ctx, "Error: %s", toString(res));
-            }
-        #endif
-        return res;
-    }
-
-    // Helper to cast a success
-    // - Returns Result::SUCCESS
-    // - Captures point of call context & prints a log message when debug 
-    // is enabled. No overhead when debug is disabled (except for
-    // the desc string, if any)
-    static inline Result Success(const char* desc = nullptr
-                          #ifdef EZMODBUS_DEBUG
-                          , Modbus::Debug::CallCtx ctx = Modbus::Debug::CallCtx()
-                          #endif
-                          ) {
-        #ifdef EZMODBUS_DEBUG
-            if (desc && *desc != '\0') {
-                Modbus::Debug::LOG_MSGF_CTX(ctx, "Success: %s", desc);
-            }
-        #endif
-        return SUCCESS;
-    }
+    // Include Error() and Success() definitions
+    // (helpers to cast a Result)
+    #define EZMODBUS_USE_STATIC_RESULT_HELPERS
+    #include "core/ModbusResultHelpers.inl"
+    #undef EZMODBUS_USE_STATIC_RESULT_HELPERS
 
 
     // "Raw" validation methods - work both for encoding and decoding using 
@@ -260,7 +228,7 @@ class PDU {
             uint8_t ec = bytes.data()[1];
             if (!isValidExceptionCode(ec, type)) return HandleError(pdu, ERR_INVALID_EXCEPTION);
             pdu.exceptionCode = (Modbus::ExceptionCode)ec;
-            return SUCCESS;
+            return Success();
         }
 
         // Validate data structure depending on the function code
@@ -615,12 +583,12 @@ class PDU {
     // Template function to clear an object + cast an error (for appendToBytes & setFromBytes)
     template<typename T>
     static Result HandleError(T& objectToClear, Result errorCode, const char* desc = nullptr
-                    #ifdef EZMODBUS_DEBUG
-                    , Modbus::Debug::CallCtx ctx = Modbus::Debug::CallCtx()
+                    #if defined(EZMODBUS_DEBUG) || defined(EZMODBUS_EVENTBUS)
+                    , CallCtx ctx = CallCtx()
                     #endif
                     ) {
         objectToClear.clear();
-        #ifdef EZMODBUS_DEBUG
+        #if defined(EZMODBUS_DEBUG) || defined(EZMODBUS_EVENTBUS)
             return Error(errorCode, desc, ctx);
         #else
             return Error(errorCode, desc);
@@ -710,7 +678,7 @@ public:
         }
 
         // Validate CRC
-        if (!validateCRC(bytes)) return ERR_INVALID_CRC;
+        if (!validateCRC(bytes)) return Error(ERR_INVALID_CRC);
 
         // Validate frame size
         if (bytes.size() < MIN_FRAME_SIZE || bytes.size() > MAX_FRAME_SIZE) {

@@ -20,21 +20,20 @@
 #define THERMOSTAT_SLAVE_ID 1
 
 // Register map for our example thermostat
-namespace RegAddr {
-    // Coils (read/write)
-    constexpr uint16_t REG_TEMP_REGULATION_ENABLE = 100;      // Temperature regulation enable
+// Coils (read/write)
+#define REG_TEMP_REGULATION_ENABLE 100      // Temperature regulation enable
+#define REG_HUMIDITY_REGULATION_ENABLE 101  // Humidity regulation enable
     
-    // Discrete Inputs (read only)
-    constexpr uint16_t REG_ALARM_START = 200;                 // 10 discrete inputs for alarms (200-209)
+// Discrete Inputs (read only)
+#define REG_ALARM_START 200                 // 10 discrete inputs for alarms (200-209)
     
-    // Input Registers (read only)
-    constexpr uint16_t REG_CURRENT_TEMPERATURE = 300;         // Current temperature (°C × 10)
-    constexpr uint16_t REG_CURRENT_HUMIDITY = 301;            // Current humidity (% × 10)
+// Input Registers (read only)
+#define REG_CURRENT_TEMPERATURE 300         // Current temperature (°C × 10)
+#define REG_CURRENT_HUMIDITY 301            // Current humidity (% × 10)
     
-    // Holding Registers (read/write)
-    constexpr uint16_t REG_TEMPERATURE_SETPOINT = 400;        // Temperature setpoint (°C × 10)
-    constexpr uint16_t REG_HUMIDITY_SETPOINT = 401;           // Humidity setpoint (% × 10)
-}
+// Holding Registers (read/write)
+#define REG_TEMPERATURE_SETPOINT 400        // Temperature setpoint (°C × 10)
+#define REG_HUMIDITY_SETPOINT 401           // Humidity setpoint (% × 10)
 
 // Aliases for convenience
 using TCP = ModbusHAL::TCP;
@@ -131,41 +130,24 @@ void loop() {
 // ===================================================================================
 
 /**
- * Example 1: Synchronous read of current temperature and humidity
+ * Example 1: Synchronous read of current temperature using HELPER API
  */
 void readTemperature_Sync() {
-    Serial.println("Reading current temperature and humidity...");
+    Serial.println("Reading current temperature (using helper API)...");
     
-    // Create frame to read temperature (input register)
-    Modbus::Frame tempRequest = {
-        .type = Modbus::REQUEST,
-        .fc = Modbus::READ_INPUT_REGISTERS,
-        .slaveId = THERMOSTAT_SLAVE_ID,
-        .regAddress = RegAddr::REG_CURRENT_TEMPERATURE,
-        .regCount = 1,
-        .data = {}
-    };
-    
-    // Send request and wait for response
-    // (tracker not provided -> waits until response received or timeout)
-    Modbus::Frame tempResponse;
-    auto result = client.sendRequest(tempRequest, tempResponse);
-    
-    // Check if the request was successful
-    if (result != ModbusClient::SUCCESS) {
+    uint16_t tempRaw;
+    Modbus::ExceptionCode excep;
+    auto result = client.read(THERMOSTAT_SLAVE_ID, Modbus::INPUT_REGISTER, 
+                             REG_CURRENT_TEMPERATURE, 1, &tempRaw, &excep);
+
+    if (result == ModbusClient::SUCCESS) {
+        float tempValue = tempRaw / 10.0f;
+        Serial.printf("Temperature: %.1f°C\n", tempValue);
+    } else if (result == ModbusClient::ERR_EXCEPTION_RESPONSE) {
+        Serial.printf("Modbus exception reading temperature: %s\n", Modbus::toString(excep));
+    } else {
         Serial.printf("Failed to read temperature: %s\n", ModbusClient::toString(result));
-        return;
     }
-
-    // Check if the response has an exception
-    if (tempResponse.exceptionCode != Modbus::NULL_EXCEPTION) {
-        Serial.printf("Modbus exception reading temperature: %s\n", Modbus::toString(tempResponse.exceptionCode));
-        return;
-    }
-
-    // Get the temperature value from the response
-    float tempValue = tempResponse.getRegister(0) / 10.0f;
-    Serial.printf("Temperature: %.1f°C\n", tempValue);
 }
 
 /**
@@ -179,7 +161,7 @@ void readAlarms_Async() {
         .type = Modbus::REQUEST,
         .fc = Modbus::READ_DISCRETE_INPUTS,
         .slaveId = THERMOSTAT_SLAVE_ID,
-        .regAddress = RegAddr::REG_ALARM_START,
+        .regAddress = REG_ALARM_START,
         .regCount = 10,  // Read 10 alarms
         .data = {}
     };
@@ -211,15 +193,12 @@ void readAlarms_Async() {
         delay(1);
     }
     
-    // Check if the request was successful
-    if (tracker != ModbusClient::SUCCESS) {
-        Serial.printf("Alarm read failed with status: %s\n", ModbusClient::toString(tracker));
-        return;
-    }
-
-    // Check if the response has an exception
-    if (response.exceptionCode != Modbus::NULL_EXCEPTION) {
+    // Check result: success, exception, or error
+    if (tracker == ModbusClient::ERR_EXCEPTION_RESPONSE) {
         Serial.printf("Modbus exception reading alarms: %s\n", Modbus::toString(response.exceptionCode));
+        return;
+    } else if (tracker != ModbusClient::SUCCESS) {
+        Serial.printf("Alarm read failed with status: %s\n", ModbusClient::toString(tracker));
         return;
     }
 
@@ -241,7 +220,7 @@ void readSetpoints_Sync() {
         .type = Modbus::REQUEST,
         .fc = Modbus::READ_HOLDING_REGISTERS,
         .slaveId = THERMOSTAT_SLAVE_ID,
-        .regAddress = RegAddr::REG_TEMPERATURE_SETPOINT,
+        .regAddress = REG_TEMPERATURE_SETPOINT,
         .regCount = 2,  // Read both temperature and humidity setpoints
         .data = {}
     };
@@ -251,15 +230,12 @@ void readSetpoints_Sync() {
     Modbus::Frame response;
     auto result = client.sendRequest(request, response);
     
-    // Check if the request was successful
-    if (result != ModbusClient::SUCCESS) {
-        Serial.printf("Failed to read setpoints: %s\n", ModbusClient::toString(result));
-        return;
-    }
-
-    // Check if the response has an exception
-    if (response.exceptionCode != Modbus::NULL_EXCEPTION) {
+    // Check result: success, exception, or error
+    if (result == ModbusClient::ERR_EXCEPTION_RESPONSE) {
         Serial.printf("Modbus exception reading setpoints: %s\n", Modbus::toString(response.exceptionCode));
+        return;
+    } else if (result != ModbusClient::SUCCESS) {
+        Serial.printf("Failed to read setpoints: %s\n", ModbusClient::toString(result));
         return;
     }
 
@@ -293,7 +269,7 @@ void writeSetpoints_Async() {
         .type       = Modbus::REQUEST,
         .fc         = Modbus::WRITE_MULTIPLE_REGISTERS,
         .slaveId    = THERMOSTAT_SLAVE_ID,
-        .regAddress = RegAddr::REG_TEMPERATURE_SETPOINT,
+        .regAddress = REG_TEMPERATURE_SETPOINT,
         .regCount   = 2,
         .data       = Modbus::packRegisters({225, 450})
     };
@@ -308,8 +284,10 @@ void writeSetpoints_Async() {
     static auto cb = [](ModbusClient::Result res, const Modbus::Frame* resp, void* ctx) {
         auto* c = static_cast<CbCtx*>(ctx);
 
-        if (res == ModbusClient::SUCCESS && resp && resp->exceptionCode == Modbus::NULL_EXCEPTION) {
+        if (res == ModbusClient::SUCCESS) {
             Serial.println("Callback: write SUCCESS!");
+        } else if (res == ModbusClient::ERR_EXCEPTION_RESPONSE && resp) {
+            Serial.printf("Callback: Modbus exception %s\n", Modbus::toString(resp->exceptionCode));
         } else {
             Serial.printf("Callback: write FAILED (%s)\n", ModbusClient::toString(res));
         }

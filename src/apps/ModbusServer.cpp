@@ -4,6 +4,9 @@
  */
 
 #include "ModbusServer.h"
+#ifdef EZMODBUS_EVENTBUS
+#include "utils/ModbusEventBus.hpp"
+#endif
 
 namespace Modbus {
 
@@ -98,7 +101,7 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
     bool dropResponse = false;
 
     // Process request and send response atomically (request + response buffer + WordStore protected)
-    Lock guard(_serverMutex);
+    Lock guard(_serverMutex, 0);
     if (!guard.isLocked()) {
         // A request is already being processed, ignore this one
         return Error(Server::ERR_RCV_BUSY);
@@ -138,6 +141,7 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
     _responseBuffer.exceptionCode = Modbus::NULL_EXCEPTION;
 
     // Check that the function code is valid, return an exception if not
+    // should not happen as FC errors are handled by the codec (defensive)
     if (!ModbusCodec::isValidFunctionCode(static_cast<uint8_t>(request.fc))) {
         _responseBuffer.exceptionCode = Modbus::ILLEGAL_FUNCTION;
         if (!dropResponse) _interface.sendFrame(_responseBuffer, nullptr, nullptr);
@@ -156,6 +160,11 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
         Server::Result res = sendResponse(_responseBuffer);
         if (res != Server::SUCCESS) return res;
     }
+
+    // Log successful request processing (optimized POD approach)
+    #ifdef EZMODBUS_EVENTBUS
+    EventBus::pushRequest(request, this);
+    #endif
 
     return Success();
 }
@@ -399,7 +408,7 @@ Server::Result Server::handleWrite(const Modbus::Frame& request, Modbus::Frame& 
         // Prepare write data buffer for this specific Word
         memset(_wordBuffer, 0, sizeof(_wordBuffer));
         
-        // Extract write data based on function code (NO dynamic allocation)
+        // Extract write data based on function code
         if (request.fc == Modbus::WRITE_REGISTER || request.fc == Modbus::WRITE_MULTIPLE_REGISTERS) {
             // Direct register write: copy from request data
             for (uint16_t i = 0; i < wordEntry->nbRegs && (requestOffset + i) < Modbus::FRAME_DATASIZE; ++i) {
@@ -407,7 +416,7 @@ Server::Result Server::handleWrite(const Modbus::Frame& request, Modbus::Frame& 
             }
         }
         else if (request.fc == Modbus::WRITE_COIL || request.fc == Modbus::WRITE_MULTIPLE_COILS) {
-            // Coil write: extract bits directly from request data (NO vector allocation)
+            // Coil write: extract bits directly from request data
             for (uint16_t i = 0; i < wordEntry->nbRegs && (requestOffset + i) < request.regCount; ++i) {
                 // Extract coil bit directly from packed data using getCoil()
                 bool coilValue = request.getCoil(requestOffset + i);

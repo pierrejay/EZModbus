@@ -170,32 +170,24 @@ static void clientTask(void* arg)
     }
 }
 
-// Read temperature (synchronous)
+// Read temperature (synchronous) - Using HELPER API
 static void read_temperature_sync(ModbusClient& client)
 {
-    ESP_LOGI(TAG_TASK, "Reading current temperature...");
+    ESP_LOGI(TAG_TASK, "Reading current temperature (using helper API)...");
 
-    ModbusFrame req = {
-        .type       = Modbus::REQUEST,
-        .fc         = Modbus::READ_INPUT_REGISTERS,
-        .slaveId    = THERMOSTAT_SLAVE_ID,
-        .regAddress = RegAddr::REG_CURRENT_TEMPERATURE,
-        .regCount   = 1
-    };
-
-    ModbusFrame resp;
-    auto result = client.sendRequest(req, resp);
-    if (result != ModbusClient::SUCCESS) {
+    uint16_t tempRaw;
+    Modbus::ExceptionCode excep;
+    auto result = client.read(THERMOSTAT_SLAVE_ID, Modbus::INPUT_REGISTER, 
+                             RegAddr::REG_CURRENT_TEMPERATURE, 1, &tempRaw, &excep);
+    
+    if (result == ModbusClient::SUCCESS) {
+        float temp = tempRaw / 10.0f;
+        ESP_LOGI(TAG_TASK, "Temperature: %.1f°C", temp);
+    } else if (result == ModbusClient::ERR_EXCEPTION_RESPONSE) {
+        ESP_LOGE(TAG_TASK, "Modbus exception: %s", Modbus::toString(excep));
+    } else {
         ESP_LOGE(TAG_TASK, "Failed to read temperature: %s", ModbusClient::toString(result));
-        return;
     }
-    if (resp.exceptionCode != Modbus::NULL_EXCEPTION) {
-        ESP_LOGE(TAG_TASK, "Modbus exception: %s", Modbus::toString(resp.exceptionCode));
-        return;
-    }
-
-    float temp = resp.getRegister(0) / 10.0f;
-    ESP_LOGI(TAG_TASK, "Temperature: %.1f°C", temp);
 }
 
 // Read alarms (asynchronous using tracker)
@@ -228,12 +220,11 @@ static void read_alarms_async(ModbusClient& client)
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 
-    if (tracker != ModbusClient::SUCCESS) {
-        ESP_LOGE(TAG_TASK, "Alarm read failed: %s", ModbusClient::toString(tracker));
-        return;
-    }
-    if (resp.exceptionCode != Modbus::NULL_EXCEPTION) {
+    if (tracker == ModbusClient::ERR_EXCEPTION_RESPONSE) {
         ESP_LOGE(TAG_TASK, "Modbus exception: %s", Modbus::toString(resp.exceptionCode));
+        return;
+    } else if (tracker != ModbusClient::SUCCESS) {
+        ESP_LOGE(TAG_TASK, "Alarm read failed: %s", ModbusClient::toString(tracker));
         return;
     }
 
@@ -257,12 +248,11 @@ static void read_setpoints_sync(ModbusClient& client)
 
     ModbusFrame resp;
     auto result = client.sendRequest(req, resp);
-    if (result != ModbusClient::SUCCESS) {
-        ESP_LOGE(TAG_TASK, "Failed to read setpoints: %s", ModbusClient::toString(result));
-        return;
-    }
-    if (resp.exceptionCode != Modbus::NULL_EXCEPTION) {
+    if (result == ModbusClient::ERR_EXCEPTION_RESPONSE) {
         ESP_LOGE(TAG_TASK, "Modbus exception: %s", Modbus::toString(resp.exceptionCode));
+        return;
+    } else if (result != ModbusClient::SUCCESS) {
+        ESP_LOGE(TAG_TASK, "Failed to read setpoints: %s", ModbusClient::toString(result));
         return;
     }
     if (resp.regCount < 2) {
@@ -291,8 +281,10 @@ static void write_setpoints_async(ModbusClient& client)
 
     static uint32_t updates = 0;
     static auto cb = [](ModbusClient::Result res, const ModbusFrame *resp, void *ctx) {
-        if (res == ModbusClient::SUCCESS && resp && resp->exceptionCode == Modbus::NULL_EXCEPTION) {
+        if (res == ModbusClient::SUCCESS) {
             ESP_LOGI(TAG_TASK, "Callback: write SUCCESS!");
+        } else if (res == ModbusClient::ERR_EXCEPTION_RESPONSE && resp) {
+            ESP_LOGE(TAG_TASK, "Callback: Modbus exception %s", Modbus::toString(resp->exceptionCode));
         } else {
             ESP_LOGE(TAG_TASK, "Callback: write FAILED (%s)", ModbusClient::toString(res));
         }
