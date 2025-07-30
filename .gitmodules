@@ -1,0 +1,6 @@
+[submodule "external/pico-freertos-UartDmaDriver"]
+	path = external/pico-freertos-UartDmaDriver
+	url = https://github.com/pierrejay/pico-freertos-UartDmaDriver.git
+[submodule "external/pico-freertos-CH9120Driver"]
+	path = external/pico-freertos-CH9120Driver
+	url = https://github.com/pierrejay/pico-freertos-CH9120Driver.git
