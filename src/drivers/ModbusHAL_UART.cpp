@@ -77,9 +77,7 @@ UART::UART(const ArduinoConfig& cfg)
 #endif // ARDUINO_ARCH_ESP32
 
 UART::~UART() {
-    if (_is_driver_installed) {
-        end();
-    }
+    end();
 }
 
 /* @brief Initialize the UART driver
@@ -121,8 +119,6 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
          return ESP_FAIL; 
     }
 
-    _is_driver_installed = true;
-
     // Configure RS485 mode if RTS/DE pin is specified
     if (_pin_rts_de != GPIO_NUM_NC) {
         err = setRS485Mode(true);
@@ -135,6 +131,8 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
         }
         Modbus::Debug::LOG_MSGF("Port %d configured for RS485 Half-Duplex with DE on pin %d", _uart_num, (int)_pin_rts_de);
     }
+
+    _is_driver_installed = true;
     
     Modbus::Debug::LOG_MSGF("Port %d initialized. Baud: %d, Config: 0x%X, TX:%d, RX:%d, DE:%d", _uart_num, (int)_baud_rate, (unsigned int)_config_flags, _pin_tx, _pin_rx, (int)_pin_rts_de);
     return ESP_OK;
@@ -143,15 +141,13 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
 /* @brief Deinitialize the UART driver
  */
 void UART::end() {
-    if (_is_driver_installed) {
-        esp_err_t err = uart_driver_delete(_uart_num);
-        if (err != ESP_OK) {
-            Modbus::Debug::LOG_MSGF("Error: uart_driver_delete failed for port %d: %s", _uart_num, esp_err_to_name(err));
-        }
-        _is_driver_installed = false;
-        _internal_event_queue_handle = nullptr; 
-        Modbus::Debug::LOG_MSGF("Port %d de-initialized.", _uart_num);
+    esp_err_t err = uart_driver_delete(_uart_num);
+    if (err != ESP_OK) {
+        Modbus::Debug::LOG_MSGF("Error: uart_driver_delete failed for port %d: %s", _uart_num, esp_err_to_name(err));
     }
+    _is_driver_installed = false;
+    _internal_event_queue_handle = nullptr; 
+    Modbus::Debug::LOG_MSGF("Port %d de-initialized.", _uart_num);
 }
 
 /* @brief Read data from the UART driver
@@ -253,9 +249,9 @@ esp_err_t UART::waitTxComplete(TickType_t timeout_ticks) const {
  * @param enable: True to enable RS485 mode, false to disable
  * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is not installed
  * @note If the DE/RTS pin is not available, the driver will fall back to UART mode
+ * @note This function should only be called after the IDF driver has been installed
  */
 esp_err_t UART::setRS485Mode(bool enable) {
-    if (!_is_driver_installed) return ESP_ERR_INVALID_STATE;
     if (_pin_rts_de == GPIO_NUM_NC && enable) {
         return ESP_ERR_INVALID_ARG; // Impossible to enable RS485 mode without DE/RTS pin
     }
