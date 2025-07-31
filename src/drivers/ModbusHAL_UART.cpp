@@ -121,6 +121,8 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
          return ESP_FAIL; 
     }
 
+    _is_driver_installed = true;
+
     // Configure RS485 mode if RTS/DE pin is specified
     if (_pin_rts_de != GPIO_NUM_NC) {
         err = setRS485Mode(true);
@@ -134,7 +136,6 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
         Modbus::Debug::LOG_MSGF("Port %d configured for RS485 Half-Duplex with DE on pin %d", _uart_num, (int)_pin_rts_de);
     }
     
-    _is_driver_installed = true;
     Modbus::Debug::LOG_MSGF("Port %d initialized. Baud: %d, Config: 0x%X, TX:%d, RX:%d, DE:%d", _uart_num, (int)_baud_rate, (unsigned int)_config_flags, _pin_tx, _pin_rx, (int)_pin_rts_de);
     return ESP_OK;
 }
