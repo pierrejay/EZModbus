@@ -101,11 +101,13 @@ static void unregisterInstance(UART* instance) {
 UART::UART(UART_HandleTypeDef* huart, 
            uint32_t baud_rate,
            uint32_t config_flags,
-           int pin_rts_de)
+           int dePin,
+           GPIO_TypeDef* dePinPort)
     : _baud_rate(baud_rate),
       _config_flags(config_flags),
       _huart(huart),
-      _pin_rts_de(pin_rts_de),
+      _pin_rts_de(dePin),
+      _pin_rts_de_port(dePinPort),
       _is_driver_started(false),
       _silence_timer(nullptr),
       _silence_timeout_us(calculateModbusSilenceTimeout(baud_rate)), // Auto-calculate from baud rate
@@ -123,7 +125,8 @@ UART::UART(const STM32Config& config)
     : UART(config.huart,
            config.baud,
            config.config,
-           config.dePin) {}
+           config.dePin,
+           config.dePinPort) {}
 
 UART::~UART() {
     if (_is_driver_started) {
@@ -585,15 +588,10 @@ void UART::silenceTimerCallback(TimerHandle_t xTimer) {
 void UART::setRS485TxMode(bool transmit_mode) {
     if (_pin_rts_de == -1) return;
     
-    // Note: User must configure the GPIO port in STM32CubeMX
-    // This is a simplified implementation - user should adapt based on their GPIO configuration
-    
-    // For now, assume the pin is on the same port as other configured pins
-    // User should modify this based on their specific GPIO configuration
-    GPIO_TypeDef* gpio_port = GPIOA; // Default - user should modify
+    // Use the configured GPIO port for DE/RE pin
     uint16_t gpio_pin = (1 << _pin_rts_de);
     
-    HAL_GPIO_WritePin(gpio_port, gpio_pin, transmit_mode ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(_pin_rts_de_port, gpio_pin, transmit_mode ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
 // Calculate default Modbus silence timeout based on baud rate

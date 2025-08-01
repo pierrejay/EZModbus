@@ -73,7 +73,7 @@ Normally, any IDE supporting CMake should work (except for Arduino). For the 3 c
 * Include the component in your project's root `CMakeLists.txt`:
 
     ```cmake
-    idf_component_register(SRCS "main.cpp" PRIV_REQUIRES EZModbus ... # <- add here INCLUDE_DIRS "")
+    idf_component_register(SRCS "main.cpp" PRIV_REQUIRES ezmodbus ... # <- add here INCLUDE_DIRS "")
     ```
 
 * Include in your code:
@@ -236,6 +236,22 @@ enable_language(C ASM)
     * On H5: set `extern "C" MX_FREERTOS_Init();`  (or comment out the call if you're doing everything in `main.cpp`)
     * Remove calls to default CMSIS primitives (`defaultTaskHandle` & `defaultTaskHandle_attributes` declarations, `osThreadNew()` call), they are useless and will cause warnings due to improper initialization order in the default generated code.
     * Basically, try and build the baseline `main.cpp` until you have solved all compiler errors, it shouldn't take too many steps.
+
+### Check FreeRTOS configuration
+
+In `Inc/FreeRTOSConfig.h`, check/set the following settings:
+
+```c
+// Default settings
+#define configSUPPORT_STATIC_ALLOCATION    1               // <- should be 1
+#define configTOTAL_HEAP_SIZE              ((size_t)8192)  // <- should be enough for your own tasks (here 8k words = 32KB)
+#define configTIMER_TASK_STACK_DEPTH       512             // <- increase to >=512 words if enabling Debug mode
+
+// Add in "USER CODE" section (if absent)
+#define configUSE_QUEUE_SETS               1               // <- enable queue sets (required for EZModbus)
+```
+
+Reminder: EZModbus uses statically-allocated FreeRTOS objects, so you don't need to account for its tasks to calculate the required total heap size.
 
 ### Implement EZModbus
 

@@ -117,11 +117,15 @@ auto result = uart.begin(); // Handles all UART and RS-485 configuration (return
 #### Pico UART/RS485 - EZModbus init
 
 ```cpp
+// Raw constructor
+ModbusHAL::UART UART(uart_inst_t* uart, uint32_t baudRate, uint32_t config,
+                     uint8_t rxPin, uint8_t txPin, int8_t dePin);
+
 // Type aliases for convenience
 using UART = ModbusHAL::UART;
 using UARTConfig = ModbusHAL::UART::Config;  // Alias to PicoConfig
 
-// Configuration structure
+// Recommended: use UART configuration structure
 UARTConfig uartConfig = {
     .uart    = uart0,             // Hardware UART instance (uart0/uart1)
     .baud    = 921600,            // Baud rate
@@ -142,12 +146,17 @@ auto result = uart.begin();
     UART must be configured in STM32CubeMX with DMA for RX/TX prior to usage in code. See the [Installation](../10-getting-started/101-installation.md#stm32-installation) section for detailed CubeMX setup.
 
 ```cpp
-// Configuration structure
+// Raw constructor
+ModbusHAL::UART UART(UART_HandleTypeDef* huart, uint32_t baudRate, uint32_t config,
+                     int dePin, GPIO_TypeDef* dePinPort = GPIOA);
+
+// Recommended: use UART configuration structure
 ModbusHAL::UART::Config uartConfig = {
-    .huart  = &huart1,            // UART handle from ST HAL
-    .baud   = 9600,               // Informational only (set in CubeMX)
-    .config = UART::CONFIG_8N1,   // Informational only (set in CubeMX)
-    .dePin  = GPIO_PIN_8          // DE/RE pin (or -1 if not used)
+    .huart     = &huart1,         // UART handle from ST HAL
+    .baud      = 9600,            // Informational only (set in CubeMX)
+    .config    = UART::CONFIG_8N1,// Informational only (set in CubeMX)
+    .dePin     = 8,               // DE/RE pin number (or -1 if not used)
+    .dePinPort = GPIOB            // DE/RE GPIO port (defaults to GPIOA if not specified)
 };
 
 // Create and initialize
@@ -223,6 +232,9 @@ This separation allows the same hardware setup to be used in different network c
 In doubt, check the [CH9120Driver documentation](https://github.com/pierrejay/pico-freertos-CH9120Driver) for more details.
 
 ```cpp
+// Raw constructor
+ModbusHAL::TCP TCP(const HardwareConfig& hwConfig, const NetworkConfig& netConfig);
+
 // Type alias
 using TCP = ModbusHAL::TCP;
 

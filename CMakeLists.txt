@@ -21,14 +21,20 @@ endif()
 # ---------------------------------------------------------------------------
 # 2. Sources & includes communs
 # ---------------------------------------------------------------------------
-set(EZMODBUS_SRCS
+set(EZMODBUS_SRCS_BASE
     ${CMAKE_CURRENT_LIST_DIR}/src/apps/ModbusClient.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/apps/ModbusServer.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/drivers/ModbusHAL_UART.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/src/drivers/ModbusHAL_TCP.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/interfaces/ModbusRTU.cpp
+)
+
+set(EZMODBUS_SRCS_TCP
+    ${CMAKE_CURRENT_LIST_DIR}/src/drivers/ModbusHAL_TCP.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/interfaces/ModbusTCP.cpp
 )
+
+# Default: include all sources
+set(EZMODBUS_SRCS ${EZMODBUS_SRCS_BASE} ${EZMODBUS_SRCS_TCP})
 
 set(EZMODBUS_INC
     ${CMAKE_CURRENT_LIST_DIR}/src
@@ -146,8 +152,8 @@ elseif(TARGET pico_stdlib OR DEFINED PICO_BOARD)     # -------- Pico SDK -----
 else()                                               # -------- STM32 -------
     message(STATUS "EZModbus : STM32")
 
-    # 0) Target
-    add_library(EZModbus STATIC ${EZMODBUS_SRCS})
+    # 0) Target - STM32 uses only base sources (no TCP support)
+    add_library(EZModbus STATIC ${EZMODBUS_SRCS_BASE})
     target_include_directories(EZModbus PUBLIC ${EZMODBUS_INC})
 
     # 1) CPU detection via startup_*.s

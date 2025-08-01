@@ -306,6 +306,7 @@ public:
         uint32_t            baud          = 115200;
         uint32_t            config        = CONFIG_8N1;  // Informational only
         int                 dePin         = -1;          // DE/RE pin for RS485
+        GPIO_TypeDef*       dePinPort     = GPIOA;      // DE/RE GPIO port (defaults to GPIOA)
     };
     using Config = STM32Config;
 
@@ -313,7 +314,8 @@ public:
     UART(UART_HandleTypeDef* huart, 
          uint32_t baud_rate,
          uint32_t config_flags = CONFIG_8N1,
-         int pin_rts_de = -1);                            // Simple constructor, FreeRTOS timer used internally
+         int dePin = -1,
+         GPIO_TypeDef* dePinPort = GPIOA);               // Simple constructor, FreeRTOS timer used internally
 
     explicit UART(const STM32Config& cfg);
 
@@ -338,6 +340,7 @@ private:
     // STM32 HAL configuration variables
     UART_HandleTypeDef* _huart;
     int _pin_rts_de;
+    GPIO_TypeDef* _pin_rts_de_port;
     bool _is_driver_started = false;
     
     // DMA buffer configuration (static allocation)

@@ -76,9 +76,7 @@ UART::UART(const ArduinoConfig& config)
 #endif // ARDUINO_ARCH_ESP32
 
 UART::~UART() {
-    if (_is_driver_installed) {
-        end();
-    }
+    end();
 }
 
 /* @brief Initialize the UART driver
@@ -140,15 +138,13 @@ ModbusHAL::UART::Result UART::begin(QueueHandle_t* out_event_queue, int intr_all
 /* @brief Deinitialize the UART driver
  */
 void UART::end() {
-    if (_is_driver_installed) {
-        esp_err_t err = uart_driver_delete(_uart_num);
-        if (err != ESP_OK) {
-            Modbus::Debug::LOG_MSGF("Error: uart_driver_delete failed for port %d: %s", _uart_num, esp_err_to_name(err));
-        }
-        _is_driver_installed = false;
-        _internal_event_queue_handle = nullptr; 
-        Modbus::Debug::LOG_MSGF("Port %d de-initialized.", _uart_num);
+    esp_err_t err = uart_driver_delete(_uart_num);
+    if (err != ESP_OK) {
+        Modbus::Debug::LOG_MSGF("Error: uart_driver_delete failed for port %d: %s", _uart_num, esp_err_to_name(err));
     }
+    _is_driver_installed = false;
+    _internal_event_queue_handle = nullptr; 
+    Modbus::Debug::LOG_MSGF("Port %d de-initialized.", _uart_num);
 }
 
 /* @brief Read data from the UART driver
@@ -254,9 +250,9 @@ ModbusHAL::UART::Result UART::waitTxComplete(TickType_t timeout_ticks) const {
  * @param enable: True to enable RS485 mode, false to disable
  * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is not installed
  * @note If the DE/RTS pin is not available, the driver will fall back to UART mode
+ * @note This function should only be called if the ESP32 driver is installed
  */
 ModbusHAL::UART::Result UART::setRS485Mode(bool enable) {
-    if (!_is_driver_installed) return Error(ERR_NOT_INITIALIZED, "driver not installed");
     if (_pin_rts_de == GPIO_NUM_NC && enable) {
         return Error(ERR_CONFIG, "impossible to enable RS485 mode without DE/RTS pin");
     }
