@@ -3,3 +3,6 @@
 .DS_Store
 CMakeCache.txt
 CMakeFiles
+mkdocs.yml
+external
+examples/pico-sdk
