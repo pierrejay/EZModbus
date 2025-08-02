@@ -73,6 +73,7 @@ public:
     size_t getActiveSocketCount();
     bool isServerRunning() const;
     bool isClientConnected();
+    bool isReady();
 
     // Get HAL configuration mode (server/client/uninit)
     CfgMode getMode() const { return _cfgMode; }

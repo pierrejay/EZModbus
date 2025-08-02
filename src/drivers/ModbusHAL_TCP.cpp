@@ -21,6 +21,7 @@
 
 namespace ModbusHAL {
 
+// Default constructor
 TCP::TCP()
     : _tcpTaskHandle(nullptr),
       _rxQueue(nullptr),
@@ -34,8 +35,37 @@ TCP::TCP()
     _cfgIP[0] = '\0'; // Clear the IP string
 }
 
+// Server constructor
+TCP::TCP(uint16_t serverPort) : TCP() {
+    _cfgMode = CfgMode::SERVER;
+    _cfgPort = serverPort;
+}
+
+// Client constructor
+TCP::TCP(const char* serverIP, uint16_t port) : TCP() {
+    _cfgMode = CfgMode::CLIENT;
+    if (serverIP) {
+        strncpy(_cfgIP, serverIP, sizeof(_cfgIP) - 1);
+        _cfgIP[sizeof(_cfgIP) - 1] = '\0';
+    } else {
+        _cfgIP[0] = '\0';
+    }
+    _cfgPort = port;
+}
+
 TCP::~TCP() {
     stop();
+}
+
+bool TCP::begin() {
+    switch (_cfgMode) {
+        case CfgMode::SERVER:
+            return beginServer(_cfgPort);
+        case CfgMode::CLIENT:
+            return beginClient(_cfgIP, _cfgPort);
+        default:
+            return false; // No config
+    }
 }
 
 void TCP::stop() {
@@ -67,7 +97,6 @@ void TCP::stop() {
         }
         _activeSocketCount = 0;
     }
-
 
     if (_rxQueue) {
         Modbus::Debug::LOG_MSG("Deleting RX queue.");
@@ -132,7 +161,6 @@ bool TCP::setupServerSocket(uint16_t port, uint32_t ip) {
     return true;
 }
 
-
 static uint32_t stringToIP(const char* ip_str) {
     struct in_addr addr;
     if (inet_pton(AF_INET, ip_str, &addr) == 1) {
@@ -151,7 +179,9 @@ bool TCP::setupClientSocket(const char* serverIP, uint16_t port) {
     _clientSocket = ::socket(AF_INET, SOCK_STREAM, 0);
     if (_clientSocket < 0) {
         Modbus::Debug::LOG_MSGF("Failed to create client socket, errno: %d", errno);
-        return false;
+        _clientSocket = -1;
+        Modbus::Debug::LOG_MSG("WARNING: Failed to create client socket, will retry connection on first sendMsg");
+        return true; // Continue anyway, will retry on sendMsg
     }
     Modbus::Debug::LOG_MSGF("Client socket created: %d", _clientSocket);
     
@@ -161,13 +191,15 @@ bool TCP::setupClientSocket(const char* serverIP, uint16_t port) {
         Modbus::Debug::LOG_MSGF("fcntl(F_GETFL) failed for client socket, errno: %d", errno);
         ::close(_clientSocket);
         _clientSocket = -1;
-        return false;
+        Modbus::Debug::LOG_MSG("WARNING: Failed to configure socket, will retry connection on first sendMsg");
+        return true; // Continue anyway
     }
     if (fcntl(_clientSocket, F_SETFL, flags | O_NONBLOCK) == -1) {
         Modbus::Debug::LOG_MSGF("fcntl(F_SETFL, O_NONBLOCK) for client socket failed, errno: %d", errno);
         ::close(_clientSocket);
         _clientSocket = -1;
-        return false;
+        Modbus::Debug::LOG_MSG("WARNING: Failed to configure socket, will retry connection on first sendMsg");
+        return true; // Continue anyway
     }
 
     sockaddr_in remote_addr;
@@ -195,12 +227,14 @@ bool TCP::setupClientSocket(const char* serverIP, uint16_t port) {
                 Modbus::Debug::LOG_MSGF("select() for connect failed, errno: %d", errno);
                 ::close(_clientSocket);
                 _clientSocket = -1;
-                return false;
+                Modbus::Debug::LOG_MSGF("WARNING: Initial connection to %s:%u failed, will retry on first sendMsg", serverIP, port);
+                return true; // Continue anyway
             } else if (ret == 0) {
                 Modbus::Debug::LOG_MSGF("Connect timeout to %s:%u", serverIP, port);
                 ::close(_clientSocket);
                 _clientSocket = -1;
-                return false;
+                Modbus::Debug::LOG_MSGF("WARNING: Initial connection to %s:%u timed out, will retry on first sendMsg", serverIP, port);
+                return true; // Continue anyway
             } else {
                 // Socket is writable, check SO_ERROR
                 int so_error;
@@ -209,13 +243,15 @@ bool TCP::setupClientSocket(const char* serverIP, uint16_t port) {
                     Modbus::Debug::LOG_MSGF("getsockopt(SO_ERROR) failed, errno: %d", errno);
                     ::close(_clientSocket);
                     _clientSocket = -1;
-                    return false;
+                    Modbus::Debug::LOG_MSGF("WARNING: Initial connection to %s:%u failed, will retry on first sendMsg", serverIP, port);
+                    return true; // Continue anyway
                 }
                 if (so_error != 0) {
                     Modbus::Debug::LOG_MSGF("Connect failed with SO_ERROR: %d", so_error);
                     ::close(_clientSocket);
                     _clientSocket = -1;
-                    return false;
+                    Modbus::Debug::LOG_MSGF("WARNING: Initial connection to %s:%u failed (SO_ERROR=%d), will retry on first sendMsg", serverIP, port, so_error);
+                    return true; // Continue anyway
                 }
                 Modbus::Debug::LOG_MSGF("Connected to %s:%u successfully!", serverIP, port);
             }
@@ -223,7 +259,8 @@ bool TCP::setupClientSocket(const char* serverIP, uint16_t port) {
             Modbus::Debug::LOG_MSGF("Connect failed immediately, errno: %d", errno);
             ::close(_clientSocket);
             _clientSocket = -1;
-            return false;
+            Modbus::Debug::LOG_MSGF("WARNING: Initial connection to %s:%u failed immediately, will retry on first sendMsg", serverIP, port);
+            return true; // Continue anyway
         }
     } else {
          // Connected immediately (should be rare for non-blocking)
@@ -232,7 +269,6 @@ bool TCP::setupClientSocket(const char* serverIP, uint16_t port) {
     
     return true;
 }
-
 
 bool TCP::beginServer(uint16_t port, uint32_t ip) {
     if (_isRunning) {
@@ -464,7 +500,6 @@ void TCP::runTcpTask() {
     } // while (_isRunning)
 }
 
-
 void TCP::closeSocket(int sock) {
     // Assumes _socketsMutex is held by caller if necessary, or called during stop()
     // For runTcpTask, it should be called within the _socketsMutex lock.
@@ -491,10 +526,21 @@ void TCP::closeSocket(int sock) {
     }
 }
 
-
-
 bool TCP::sendMsg(const uint8_t* payload, const size_t len, const int destSocket, int* actualSocket) {
     if (!_isRunning) return false;
+
+    // Auto-reconnect in client mode if disconnected
+    if (!_isServer && _clientSocket == -1 && destSocket == -1) {
+        Modbus::Debug::LOG_MSGF("Client disconnected, attempting reconnect to %s:%u", _cfgIP, _cfgPort);
+        if (setupClientSocket(_cfgIP, _cfgPort)) {
+            Modbus::Debug::LOG_MSGF("Auto-reconnection successful");
+            // Check if we're still running after reconnect (avoid race with stop())
+            if (!_isRunning) return false;
+        } else {
+            Modbus::Debug::LOG_MSGF("Auto-reconnection failed");
+            return false;
+        }
+    }
 
     int targetSocket = -1;
     if (destSocket != -1) { // Explicit destination
@@ -544,7 +590,6 @@ bool TCP::sendMsg(const uint8_t* payload, const size_t len, const int destSocket
     return true;
 }
 
-
 size_t TCP::getActiveSocketCount() {
     Lock guard(_socketsMutex);
     if (_isServer) {
@@ -563,32 +608,12 @@ bool TCP::isClientConnected() {
     return _isRunning && !_isServer && _clientSocket != -1;
 }
 
-// Server ctor
-TCP::TCP(uint16_t serverPort) : TCP() {
-    _cfgMode = CfgMode::SERVER;
-    _cfgPort = serverPort;
-}
-
-// Client ctor
-TCP::TCP(const char* serverIP, uint16_t port) : TCP() {
-    _cfgMode = CfgMode::CLIENT;
-    if (serverIP) {
-        strncpy(_cfgIP, serverIP, sizeof(_cfgIP) - 1);
-        _cfgIP[sizeof(_cfgIP) - 1] = '\0';
+bool TCP::isReady() {
+    if (!_isRunning) return false;
+    if (_isServer) {
+        return _listenSocket != -1;  // Server ready if listening
     } else {
-        _cfgIP[0] = '\0';
-    }
-    _cfgPort = port;
-}
-
-bool TCP::begin() {
-    switch (_cfgMode) {
-        case CfgMode::SERVER:
-            return beginServer(_cfgPort);
-        case CfgMode::CLIENT:
-            return beginClient(_cfgIP, _cfgPort);
-        default:
-            return false; // No config
+        return _cfgMode == CfgMode::CLIENT;  // Client ready if configured
     }
 }
 
