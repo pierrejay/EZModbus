@@ -363,10 +363,12 @@ void TCP::tcpTask(void* param) {
 
 void TCP::runTcpTask() {
     struct timeval tv; // For select timeout
+    int error_count = 0;  // Consecutive error counter for recovery
+    int empty_hits = 0;   // Empty rounds counter (anti-spin EAGAIN)
 
     while (_isRunning) {
-        tv.tv_sec = 0;
-        tv.tv_usec = 10000; // 10ms select timeout, as per original guidelines (1ms was too short for typical FreeRTOS tick)
+        tv.tv_sec = SELECT_TIMEOUT_MS / 1000;        // Seconds part
+        tv.tv_usec = (SELECT_TIMEOUT_MS % 1000) * 1000; // Microseconds part
 
         fd_set readfds;
         FD_ZERO(&readfds);
@@ -403,14 +405,38 @@ void TCP::runTcpTask() {
         if (!_isRunning) break; // Check flag again after select
 
         if (activity < 0) {
-            if (errno == EINTR) { // Interrupted system call
-                Modbus::Debug::LOG_MSGF("select() interrupted, retrying.");
+            if (errno == EINTR) {
+                error_count = 0;  // Normal signal, reset counter
                 continue;
             }
-            Modbus::Debug::LOG_MSGF("select() error, errno: %d. Task stopping.", errno);
-            _isRunning = false; // Stop the task loop on critical select error
-            break;
+            
+            if (errno == EBADF) {
+                Modbus::Debug::LOG_MSGF("EBADF detected, cleaning dead sockets");
+                cleanupDeadSockets();
+                error_count = 0;  // Reset after cleanup
+                continue;
+            }
+            
+            error_count++;
+            Modbus::Debug::LOG_MSGF("select() error #%d, errno: %d (%s)", error_count, errno, strerror(errno));
+            
+            if (error_count >= MAX_SELECT_ERRORS) {
+                Modbus::Debug::LOG_MSGF("Too many select errors, sleeping %lums then retrying...", SELECT_RECOVERY_SLEEP_MS);
+                
+                // Long sleep then reset and retry
+                vTaskDelay(pdMS_TO_TICKS(SELECT_RECOVERY_SLEEP_MS));
+                error_count = 0;
+                continue;
+            }
+            
+            // Progressive backoff and retry (prevent overflow)
+            uint32_t backoff_ms = std::min(SELECT_BACKOFF_BASE_MS * error_count, SELECT_RECOVERY_SLEEP_MS);
+            vTaskDelay(pdMS_TO_TICKS(backoff_ms));
+            continue;
         }
+ 
+        // Success! Reset error counter
+        error_count = 0;
 
         if (activity == 0) {
             // Timeout, just loop again
@@ -469,33 +495,48 @@ void TCP::runTcpTask() {
 
             int sockets_to_remove[MAX_ACTIVE_SOCKETS];
             size_t remove_count = 0;
-
+            bool no_data_read = true;  // Tracker for anti-spin detection
+ 
             uint8_t dummy;
             for (size_t idx = 0; idx < check_count; ++idx) {
                 int sock = sockets_to_check[idx];
                 if (!FD_ISSET(sock, &readfds)) continue;
-
+ 
                 ssize_t peek = ::recv(sock, &dummy, 1, MSG_PEEK);
-
+ 
                 if (peek > 0) {
+                    no_data_read = false;  // We have data!
                     if (xQueueSend(_rxQueue, &sock, portMAX_DELAY) != pdTRUE) {
                         Modbus::Debug::LOG_MSGF("RX queue full. Dropping event for socket %d.", sock);
                     }
                 } else if (peek == 0) {
+                    no_data_read = false;  // Connection closed = activity
                     Modbus::Debug::LOG_MSGF("Socket %d closed by peer.", sock);
                     sockets_to_remove[remove_count++] = sock;
                 } else {
                     if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        no_data_read = false;  // Error = activity
                         Modbus::Debug::LOG_MSGF("recv(MSG_PEEK) error on socket %d, errno: %d. Closing.", sock, errno);
                         sockets_to_remove[remove_count++] = sock;
                     }
                 }
             }
-
+ 
             for (size_t i = 0; i < remove_count; ++i) {
                 closeSocket(sockets_to_remove[i]);
             }
-
+ 
+            // Anti-spin: if select() says OK but no socket has data
+            if (activity > 0 && no_data_read) {
+                empty_hits++;
+                if (empty_hits > MAX_EMPTY_HITS) {
+                    vTaskDelay(pdMS_TO_TICKS(ANTI_SPIN_DELAY_MS));  // Short anti-spin pause
+                    empty_hits = 0;
+                }
+            } else {
+                empty_hits = 0;
+            }
+ 
         } // Unlock socketsMutex
     } // while (_isRunning)
 }
@@ -637,6 +678,46 @@ size_t TCP::readSocketData(int socketNum, uint8_t* dst, size_t maxLen) {
 
     Modbus::Debug::LOG_MSGF("readSocketData: recv error on socket %d, errno %d", socketNum, errno);
     return SIZE_MAX;
+}
+
+void TCP::cleanupDeadSockets() {
+    Lock guard(_socketsMutex);
+    
+    // Test listen socket (server)
+    if (_isServer && _listenSocket != -1) {
+        int error = 0;
+        socklen_t len = sizeof(error);
+        if (getsockopt(_listenSocket, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error != 0) {
+            Modbus::Debug::LOG_MSGF("Listen socket %d is dead, closing", _listenSocket);
+            ::close(_listenSocket);
+            _listenSocket = -1;
+        }
+    }
+    
+    // Test client socket
+    if (!_isServer && _clientSocket != -1) {
+        int error = 0;
+        socklen_t len = sizeof(error);
+        if (getsockopt(_clientSocket, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error != 0) {
+            Modbus::Debug::LOG_MSGF("Client socket %d is dead, closing", _clientSocket);
+            ::close(_clientSocket);
+            _clientSocket = -1;
+        }
+    }
+    
+    // Test active sockets (server clients)
+    for (size_t i = 0; i < _activeSocketCount; ) {
+        int sock = _activeSockets[i];
+        int error = 0;
+        socklen_t len = sizeof(error);
+        
+        if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error != 0) {
+            Modbus::Debug::LOG_MSGF("Active socket %d is dead, removing", sock);
+            closeSocket(sock); // closeSocket handles array shifting
+        } else {
+            i++;
+        }
+    }
 }
 
 } // namespace ModbusHAL
