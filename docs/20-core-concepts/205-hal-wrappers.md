@@ -6,11 +6,10 @@ The EZModbus drivers replace manual peripheral initialization such as `Serial.be
 
 This separation ensures you maintain control over hardware while benefiting from optimized, event-driven peripheral management designed specifically for Modbus communication requirements.
 
-{% hint style="info" %}
-**Note:** The drivers must be properly initialized with `begin()` **before** the other Modbus components! Otherwise you will get an `ERR_INIT_FAILED` error when trying to initialize the Modbus application layer.
-{% endhint %}
+!!! note
+    The drivers must be properly initialized with `begin()` **before** the other Modbus components! Otherwise you will get an `ERR_INIT_FAILED` error when trying to initialize the Modbus application layer.
 
-## **Design philosophy**
+## Design philosophy
 
 **Framework independence**
 
@@ -30,7 +29,7 @@ This separation ensures you maintain control over hardware while benefiting from
 * No hidden peripheral initialization
 * Transparent configuration and error handling
 
-## **ModbusHAL::UART** - UART/RS485 driver
+## ModbusHAL::UART - UART/RS485 driver
 
 ### Features
 
@@ -47,7 +46,7 @@ The UART driver allows initialization with a `Config` struct to keep your code t
 
 Arduino builds can still use the IDF-style config struct, but they need to explicitly declare it as an `IDFConfig` .
 
-#### **Legacy usage: UART/RS485 - Traditional approach (Arduino style)**
+#### Legacy usage: UART/RS485 - Traditional approach (Arduino style)
 
 This example is here just to illustrate how Serial UART initialization is generally done in Arduino projects. The following sections show how it's done with EZModbus.
 
@@ -66,7 +65,7 @@ Serial2.begin(RS485_BAUD_RATE, RS485_CONFIG, RS485_RX_PIN, RS485_TX_PIN);
 pinMode(RS485_DE_PIN, OUTPUT);
 ```
 
-#### **UART/RS485 - EZModbus approach (Arduino API)**
+#### UART/RS485 - EZModbus approach (Arduino API)
 
 ```cpp
 // Raw constructor
@@ -87,7 +86,7 @@ ModbusHAL::UART uart(uartConfig); // Create UART instance
 uart.begin(); // Handles all UART and RS-485 configuration (returns an esp_err_t)
 ```
 
-#### **UART/RS485 - EZModbus approach (ESP-IDF API)**
+#### UART/RS485 - EZModbus approach (ESP-IDF API)
 
 ```cpp
 // Raw constructor
@@ -116,7 +115,7 @@ ModbusInterface::RTU rtu(uart, Modbus::CLIENT);
 
 
 
-## **ModbusHAL::TCP** - TCP socket driver
+## ModbusHAL::TCP - TCP socket driver
 
 ### Features
 
@@ -126,7 +125,7 @@ ModbusInterface::RTU rtu(uart, Modbus::CLIENT);
 
 ### Usage pattern
 
-#### **Legacy usage: TCP - Traditional approach (Arduino style)**
+#### Legacy usage: TCP - Traditional approach (Arduino style)
 
 ```cpp
 // Parameters
@@ -143,7 +142,7 @@ EthernetClient tcpClient;
 tcpClient.connect(TCP_CLIENT_IP, TCP_CLIENT_PORT);
 ```
 
-#### **TCP - EZModbus approach (Arduino & ESP-IDF, same API)**
+#### TCP - EZModbus approach (Arduino & ESP-IDF, same API)
 
 ```cpp
 // Parameters

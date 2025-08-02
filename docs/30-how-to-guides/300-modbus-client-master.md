@@ -2,7 +2,7 @@
 
 The Modbus Client implements the master device role, initiating requests to slave devices and processing their responses. It offers both synchronous ("blocking") and asynchronous (non-blocking) operation modes to suit different application needs.
 
-## **Synchronous mode** ("blocking")
+## Synchronous mode ("blocking")
 
 * Simpler to use - request and response in one function call
 * Waits until the response arrives or a timeout occurs
@@ -26,11 +26,12 @@ if (result == Modbus::Client::SUCCESS) {
 
 `sendRequest()` does not _really_ block execution as it uses a FreeRTOS event notification internally. It's actually pretty efficient when called from a dedicated task: instead of wasting CPU clocks by continuously polling for the request status, it will totally yield while waiting ; if you have other tasks running in parallel, they will run uninterrupted.
 
-{% hint style="info" %}
-**Note on memory footprint**: the two request/response frames have a total memory overhead of 536 bytes. If you create them inside a FreeRTOS task, make sure to have enough stack, or declare them `static`. If doing successive requests, it is possible to reuse the same request & response Frames between different calls to `sendRequest()` .
-{% endhint %}
+!!! note "Note on memory footprint"
+    The two request/response frames have a total memory overhead of 536 bytes. If you create them inside a FreeRTOS task, make sure to have enough stack, or declare them `static`. If doing successive requests, it is possible to reuse the same request & response Frames between different calls to `sendRequest()`. 
+    
+    A "clever" trick to reduce memory usage, is to use the same `Frame` object for both request and response: internally, the Frame metadata & payload are stored before being sent on the bus so there is no race condition between reading your request and writing back the response.
 
-## **Asynchronous mode with Result tracker** (non-blocking)
+## Asynchronous mode with Result tracker (non-blocking)
 
 * Returns immediately after sending the request
 * Allows your application to continue other tasks while waiting
@@ -61,7 +62,7 @@ if (tracker == Modbus::Client::NODATA) {
 
 This methods allows you to do other stuff while waiting for the response without blocking the calling thread. If you are just placing the status checks inside a busy-waiting loop in the same thread, it will be more efficient and less verbose to use the synchronous approach (see comment on blocking aspect).
 
-### **Understanding the request Result tracker**
+### Understanding the request Result tracker
 
 The request result tracker is a key concept that makes asynchronous operations manageable:
 
@@ -73,7 +74,7 @@ The request result tracker is a key concept that makes asynchronous operations m
 
 In asynchronous mode, when `sendRequest()` returns `SUCCESS`, it just indicates it was accepted & queued for transmission. The actual outcome of the operation is notified via the callback mechanism after the response is received (or in case of timeout or other transmission errors) and will update the tracker accordingly.
 
-## **Asynchronous mode with response callback** (non-blocking):
+## Asynchronous mode with response callback (non-blocking):
 
 * Returns immediately after sending the request
 * Allows your application to continue other tasks while waiting
@@ -96,18 +97,17 @@ client.sendRequest(request, cb); // request + cb = async with callback (you can 
 
 Basically, there is nothing to do after calling `sendRequest()` : the handler will take care of everything when the response arrives or if an error occurs! This methods allows you to totally decouple the request from the response handling, and even transmit a "transmission ID" (through `userCtx`) so that the thread handling the response can identify it.
 
-{% hint style="info" %}
-**Note on memory usage:** callbacks are the most memory-efficient method because you don't need to allocate room for the response `Frame`. Inside the callback, you are directly reading into the server's internal response buffer, so a local copy isn't necessary.
-{% endhint %}
+!!! note "Note on memory usage"
+    Callbacks are the most memory-efficient method because you don't need to allocate room for the response `Frame`. Inside the callback, you are directly reading into the server's internal response buffer, so a local copy isn't necessary.
 
-### **Understanding the callback system**
+### Understanding the callback system
 
 As stated before, the callback allows you to define a custom function that will be called when the Modbus transaction succeeds (success, timeout or failure). In order to limit as much as possible the overhead and avoid dynamic allocation two design decisions were made for the Client application class:
 
 * A callback isn't an `std::function` but a traditional function pointer (N.B.: in C++ a non-capturing lambda decays to a function pointer, so you can still use the lambda syntax when declaring your callback).
 * The response is accessed through a pointer ; when no response is expected (transmission failure or broadcast request), EZModbus doesn't return an empty `Modbus::Frame` but a `nullptr` (saving \~260B of RAM and a few CPU clocks).
 
-#### **Callback function signature**
+#### Callback function signature
 
 The callback function follows a specific signature defined by the `ResponseCallback` type:
 
@@ -121,11 +121,11 @@ using ResponseCallback = void (*)(Result result,
 
 * `Result result`: The outcome of the Modbus transaction (similar to Result Tracker)
 * `const Modbus::Frame* response`: Pointer to the response frame
-  * **Valid pointer**: When `result == SUCCESS`, contains the actual response data
-  * **`nullptr`**: When the request failed (timeout, TX error) or for broadcast requests
+    * **Valid pointer**: When `result == SUCCESS`, contains the actual response data or exception code
+    * **`nullptr`**: When the request failed (timeout, TX error) or for broadcast requests
 * `void* userCtx`: User-defined context pointer passed-through unchanged
-  * Allows sharing callbacks between multiple requests while maintaining context
-  * Can be `nullptr` if no context is needed
+    * Allows sharing callbacks between multiple requests while maintaining context
+    * Can be `nullptr` if no context is needed
 
 The response pointer will be `nullptr` in three specific scenarios:
 
@@ -133,11 +133,10 @@ The response pointer will be `nullptr` in three specific scenarios:
 * Transmission Failures: When the request couldn't be sent over the physical interface
 * Timeout Scenarios: When no response is received within the configured timeout
 
-{% hint style="info" %}
-Always check the validity of `response` before trying to access it! Getting a `SUCCESS` result does not guarantee you will have data to process.
-{% endhint %}
+!!! warning
+    Always check the validity of `response` before trying to dereference it!
 
-#### **Using user context**
+#### Using user context
 
 Since we cannot use a capturing lambda, the `userCtx` parameter allows you (but is not mandatory) to pass a custom context when calling `sendRequest`, that will be handed back to you when the callback is called:
 
@@ -207,7 +206,7 @@ client.sendRequest(request, myCallback, &ctx);
 
 Here, we showcased an example of a simple context with a "catch-all" callback that just displays information about the original request & possible response, but it could be used to access any variable you want, or even a class instance if you need to update values or trigger actions on another component of your application.
 
-#### **Lambda functions vs function pointers**
+#### Lambda functions vs function pointers
 
 ✅ Supported - Function pointers:
 
@@ -247,10 +246,10 @@ client.sendRequest(request,
                   &localVar);
 ```
 
-#### **Callback execution context & considerations**
+#### Callback execution context & considerations
 
 * Callbacks are executed in the context of the Modbus interface's internal task, not your main application thread, so they should be kept fast and non-blocking to avoid delaying other Modbus operations. If your callback accesses shared data, ensure proper synchronization between threads. Additionally, avoid calling blocking FreeRTOS functions within callbacks as this could interfere with the lib's internal operations.
-* Non-`static` variables declared in your callbacks (even if the callbacks are `static` themselves) rely on the Modbus interface's internal task stack. Be careful with heavy internal variables & complex call paths inside the handlers, or resize the stack size in `ModbusRTU.h` / `ModbusTCP.h` (see [Settings](../additional-resources/settings-compile-flags.md#modbusrtu.h) page)
+* Non-`static` variables declared in your callbacks (even if the callbacks are `static` themselves) rely on the Modbus interface's internal task stack. Be careful with heavy internal variables & complex call paths inside the handlers, or resize the stack size in `ModbusRTU.h` / `ModbusTCP.h` (see [Settings](../40-additional-resources/401-settings-compile-flags.md#modbusrtuh) page)
 
 **Good callback practices:**
 
@@ -283,14 +282,14 @@ void problematicCallback(Result result, const Frame* response, void* ctx) {
 }
 ```
 
-## **Important note about variable lifetime**
+## Important note about variable lifetime
 
 {% hint style="info" %}
 * In asynchronous mode using a result tracker, it is the user’s responsibility to **ensure both the response placeholder & the tracker are valid throughout the whole request lifecycle**! Otherwise, a crash may occur as the library could try to access dangling memory locations. Once the tracker has updated to any other value than `NODATA`, it is safe to release the objects.
 * In asynchronous mode using a callback, it is the user's responsibility to **ensure the callback & the context (if used) remain valid throughout the whole request lifecycle**! Otherwise, a crash may occur as the library could try to access dangling memory locations. You are free to release the objects after the callback returns.
 {% endhint %}
 
-## **Managing multiple devices**
+## Managing multiple devices
 
 The client is designed to work with multiple slave devices on the same bus:
 
@@ -298,7 +297,7 @@ The client is designed to work with multiple slave devices on the same bus:
 * Wait for each request to complete before sending the next one (Modbus is sequential) for example by testing the `Client` status with the `isReady()` method (or retrying if `sendRequest()` returns `ERR_BUSY`)
 * For broadcast messages (slaveId 0), no response is expected and the status proceeds directly to `SUCCESS` after the TX fully completes.
 
-## **Error handling and diagnostics**
+## Error handling and diagnostics
 
 The client provides several tools for effective error handling:
 
@@ -319,7 +318,7 @@ The client provides several tools for effective error handling:
     ```
 3. **Debug Mode** - When `EZMODBUS_DEBUG` is defined, detailed logs show frame contents and round-trip timing.
 
-## **Handling broadcast requests**
+## Handling broadcast requests
 
 Modbus allows broadcast messages that are received by all slaves but not acknowledged:
 
@@ -330,7 +329,7 @@ Modbus allows broadcast messages that are received by all slaves but not acknowl
 
 Broadcast operations can significantly reduce bus traffic when updating multiple devices, but come with no guarantee that all devices received the message correctly.
 
-## **Setting custom request timeout**
+## Setting custom request timeout
 
 The client enforces a timeout: if a response isn’t received within this timeframe, the request will be closed (marked as `ERR_TIMEOUT`), and the client layer will be ready to accept a new request. The default round-trip timeout is 1 second (`DEFAULT_REQUEST_TIMEOUT_MS` constant). For convenience, you can select another timeout when instanciating the client :
 

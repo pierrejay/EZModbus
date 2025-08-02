@@ -1,10 +1,10 @@
 # Coupling Modbus components
 
-## **Connecting multiple components to a single interface**
+## Connecting multiple components to a single interface
 
 EZModbus’s modular design allows you to connect multiple application components to the same physical interface, offering flexible configurations for complex scenarios.
 
-### **Server: multiple servers on one interface**
+### Server: multiple servers on one interface
 
 **✅ Fully supported and recommended (RTU ONLY)**
 
@@ -43,11 +43,10 @@ This approach is ideal for:
 
 As stated before, the TCP server will totally ignore the `slaveId` field. It means ALL TCP servers sharing the same interface will be handed the requests received by the interface, and they will all try to respond it, which will create a conflict.
 
-{% hint style="info" %}
-**Only one TCP server can be connected to a single interface.** If you need to run several Modbus TCP servers on the same device, the correct way is to use different TCP servers and use a different port for each server.
-{% endhint %}
+!!! note
+    **Only one TCP server can be connected to a single interface.** If you need to run several Modbus TCP servers on the same device, the correct way is to use different TCP servers and use a different port for each server.
 
-### **Client: Multiple clients on one interface**
+### Client: Multiple clients on one interface
 
 **⚠️ Possible but not standard (RTU ONLY)**
 
@@ -68,23 +67,20 @@ temperatureClient.begin();
 controlClient.begin();
 ```
 
-{% hint style="info" %}
-**Important Note**: only one client can issue a request at a time. The others will get an `ERR_BUSY` error when calling `sendRequest()`.
-{% endhint %}
+!!! note
+    **Important Note**: only one client can issue a request at a time. The others will get an `ERR_BUSY` error when calling `sendRequest()`.
 
 **✅ Supported (TCP)**
 
 The TCP HAL wrapper manages sockets independently, so you can have as many clients as you want on a single interface. However, only one TCP transaction can be active at a time, so you need to make sure to wait for the previous request to complete before sending a new one, or you will get an `ERR_BUSY` error when trying to send it.
 
-### **Bridge: multiple Bridges & combination of Bridge and Client/Server**
+### Bridge: multiple Bridges & combination of Bridge and Client/Server
 
 **✅  Possible: combination of Bridge and Client/Server**
 
 Each end of the bridge acting with a proper interface, you can totally mix bridge and client/server on the same interface, as long as the case you are trying to achieve is supported by the previous statements.
 
 For example, you could have a unique TCP/UART connection to a bus formed of multiple slave devices, and access some of those devices from your code or act as another slave, and  expose the bus to external TCP clients through the bridge. However, the same limitations apply: only one request can be ongoing at a time.
-
-In bridge mode, the timeouts are still enforced by the `Client` layer: the default round trip timeout (`DEFAULT_REQUEST_TIMEOUT_MS`) is 1 second, which means any request should complete within this timeframe, otherwise any delayed response from the server will be rejected. This setting is editable in the `Client`'s constructor (see [Modbus Client (Master)](modbus-client-master.md#setting-custom-request-timeout))
 
 ## Using multiple physical interfaces
 

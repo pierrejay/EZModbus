@@ -2,9 +2,9 @@
 
 The Modbus Server implements the **Slave** role, responding to client requests by maintaining an internal list of `Word` blocks. It handles request validation, concurrency, and error reporting automatically.
 
-Read the [Core concepts > Word](../core-concepts/modbus-word.md) section of this guide before what follows.
+Read the [Core concepts > Word](../20-core-concepts/203-modbus-word.md) section of this guide before what follows.
 
-## **Basic workflow**
+## Basic workflow
 
 The workflow of the server is simple:&#x20;
 
@@ -42,11 +42,11 @@ server.begin(); // -> Returns ERR_WORD_xxx upon failure
                                           
 ```
 
-### **Words storage & memory management**
+### Words storage & memory management
 
 Words are stored on the server inside a `Modbus::WordStore` container which can store an arbitrary number of `Word` objects regardless of their underlying `RegisterType`. This container is created in user code space (to keep in control of memory allocation) but directly managed by the Server.
 
-The optimal process is the following :&#x20;
+The optimal process is the following :
 
 1. Create the `WordStore` object on the stack or on the heap (see above example)
 2. Pass the `WordStore` to the `Server` constructor
@@ -57,16 +57,15 @@ To guarantee performance with a low RAM footprint & simple API, the Server's `Wo
 
 The following process is observed to optimize computation overhead:
 
-* addWord() always do basic unit checks at each addition: validity of function code, register count, address range & pointer/handler definition.
+* `addWord()` always does basic unit checks at each addition: validity of function code, register count, address range & pointer/handler definition.
 * The user can add Words to the register before calling `Server::begin()` , which on the 1st time will sort the whole store & check for conflicted Words (address overlap). `begin()` returns an `ERR_WORD_OVERLAP` error upon the first overlap detected. All of this is efficient since it's done in a single operation.
 * Further Word additions after `Server::begin()` **individually** check for overlap & do a sorted insertion to ensure the Word store stays properly stored, which could require a significant amount of time for instance if you're adding 1000s of Words back-to-back.
 
-{% hint style="info" %}
-TLDR:&#x20;
+!!! note
+    TLDR:
 
-* Ideally do all `Word` additions to the store **before calling** `Server::begin()` (especially on servers exposing a large number of Words).
-* **Always monitor** the return value of `Server::addWord` especially if you add Words while the `Server` is running to be sure to catch any detect conflicts.
-{% endhint %}
+    * Ideally do all `Word` additions to the store **before calling** `Server::begin()` (especially on servers exposing a large number of Words).
+    * **Always monitor** the return value of `Server::addWord` especially if you add Words while the `Server` is running to be sure to catch any detect conflicts.
 
 ### Capacity limit
 
@@ -74,31 +73,30 @@ The capacity defined in `WordStore` instanciation will be enforced by the server
 
 ### Notes on `DynamicWordStore`
 
-Each `Word` has an \~18 bytes RAM footprint, which becomes significant for thousands of Words registered on a server: using dynamic allocation may become necessary if the Word store grows too much and the stack cannot handle it.
+Each `Word` has an ~18 bytes RAM footprint, which becomes significant for thousands of Words registered on a server: using dynamic allocation may become necessary if the Word store grows too much and the stack cannot handle it.
 
-The `DynamicWordStore` is quite efficient because it allocates a fixed chunk of memory at the start of the program, so it won't be re-allocated at runtime, avoiding fragmentation & allocation errors.&#x20;
+The `DynamicWordStore` is quite efficient because it allocates a fixed chunk of memory at the start of the program, so it won't be re-allocated at runtime, avoiding fragmentation & allocation errors.
 
 On ESP32, the `DynamicWordStore` will be automatically added to PSRAM (if enabled) if its size exceeds the free memory on the initial 320 kB DRAM, which is quite interesting for large servers with > 10k registers.
 
-### **Adding multiple Words at once**
+### Adding multiple Words at once
 
 To ease the initialization process, the `addWords(Word* words, size_t count)` method will add several words from a buffer to the server.
 
-{% hint style="info" %}
-Important note: this method is atomic, which means all Words will be added or none. If there's a validation issue with **any** of the Words you submit, it will return an error (`ERR_WORD_...`) and no Word will be stored consequently. The log trace will display which invalid Word returned the error first:
+!!! note
+    This method is atomic, which means all Words will be added or none. If there's a validation issue with **any** of the Words you submit, it will return an error (`ERR_WORD_...`) and no Word will be stored consequently. The log trace will display which invalid Word returned the error first:
 
-```
-[ModbusServer.cpp::addWords:110] Error: malformed handlers (holding register 23-24)
-```
-{% endhint %}
+    ```
+    [ModbusServer.cpp::addWords:110] Error: Malformed handlers (holding register 23-24)
+    ```
 
 Out of convenience, the method also has an overload to take an `std::vector<Word>` as argument.
 
-## **Word value access methods**
+## Word value access methods
 
 The server supports two complementary approaches for making `Word` value accessible from clients, designed for different use cases and performance requirements.
 
-### **Direct Value Pointers**
+### Direct Value Pointers
 
 * Simply provide a pointer to an existing variable (`volatile uint16_t`) in your code
 * The server will read from and write to this variable automatically
@@ -106,7 +104,7 @@ The server supports two complementary approaches for making `Word` value accessi
 * Very efficient with minimal overhead
 * **Only valid for single-register Words (**`nbRegs = 1`**)**
 
-#### **Word declaration example using a direct value pointer**
+#### Word declaration example using a direct value pointer
 
 ```cpp
 volatile uint16_t temperature = 0; // The variable exposed on the Word
@@ -123,17 +121,16 @@ server.addWord(tempWord);
 temperature = getSensorReading() * 100;  // Update the value any time
 ```
 
-Instead of the classical "struct w/ designated initializers" notation, you can also use a more straightforward syntax using a simple initializer list :&#x20;
+Instead of the classical "struct w/ designated initializers" notation, you can also use a more straightforward syntax using a simple initializer list :
 
 ```cpp
 Modbus::Word tempWord = {Modbus::INPUT_REGISTER, 100, 1, &temperature};
 ```
 
-{% hint style="info" %}
-**Thread safety note**: Using `volatile uint16_t` ensures atomic access for single registers & prevents concurrent access on most 32-bit architectures. However, if you're updating related Words or need strict timing guarantees, consider using handlers with proper synchronization instead.
-{% endhint %}
+!!! note "Thread safety note"
+    Using `volatile uint16_t` ensures atomic access for single registers & prevents concurrent access on most 32-bit architectures. However, if you're updating related Words or need strict timing guarantees, consider using handlers with proper synchronization instead.
 
-### **Handler functions**
+### Handler functions
 
 * Provide custom read and/or write functions for the entire Word
 * Automatically invoked by the server after checking request validity
@@ -160,7 +157,7 @@ Modbus::ExceptionCode (*)(const uint16_t* writeVals, // Input values array
 
 **Return type**
 
-* Your read handlers must fill the output array `outVals` and return a `Modbus::ExceptionCode` that will be sent back to the client in case of read failure (`NULL_EXCEPTION` to signal success & send back response data to the client).&#x20;
+* Your read handlers must fill the output array `outVals` and return a `Modbus::ExceptionCode` that will be sent back to the client in case of read failure (`NULL_EXCEPTION` to signal success & send back response data to the client).
 * Your write handlers read the requested write value array `writeVals`, process data & must also return an exception code that indicates whether the write operation  succeeded.
 
 It is then possible to manage validation of client input data by returning a non-null Modbus exception in the handler (on the contrary, the direct pointer won't allow any validation step as it accesses the raw variable).
@@ -177,9 +174,8 @@ You can use this context for:
 * Dynamic behavior based on Word properties
 * Mapping between Word addresses and application logic
 
-{% hint style="info" %}
-For Words that contain an unique register (`nbRegs == 1`) or Word registered with their own handler you don't need to use the context since you already know how many registers should be read or written. Still it's good practice to always check `reqWord.nbRegs` to avoid any buffer overflow, and not rely on the hard value defined when declaring your Word.
-{% endhint %}
+!!! note
+    For Words that contain an unique register (`nbRegs == 1`) or Word registered with their own handler you don't need to use the context since you already know how many registers should be read or written. Still it's good practice to always check `reqWord.nbRegs` to avoid any buffer overflow, and not rely on the hard value defined when declaring your Word.
 
 **Input/output values**
 
@@ -190,15 +186,14 @@ For Words that contain an unique register (`nbRegs == 1`) or Word registered wit
 
 Handlers are static function pointers that cannot capture any external variable like a lambda would allow. The user context allows you to attach to a `Word`, a pointer that will be passed to the handler as argument when it's called by the Server. It is very useful if you need to access class instances or non-global/non-static variables inside the handlers.
 
-The use of the user context and the implications in terms of syntax is very similar to what is done in the Client for asynchronous requests using callbacks. Refer to the [How-To Guides > Modbus Client (Master)](modbus-client-master.md)  section for more information.
+The use of the user context and the implications in terms of syntax is very similar to what is done in the Client for asynchronous requests using callbacks. Refer to the [How-To Guides > Modbus Client (Master)](300-modbus-client-master.md)  section for more information.
 
-{% hint style="info" %}
-Since `userCtx` is part of the handlers' signature, you must use it when declaring a handler even if you are not using it at all.
-{% endhint %}
+!!! note
+    Since `userCtx` is part of the handlers' signature, you must use it when declaring a handler even if you are not using it at all inside your callback.
 
 #### Word declaration examples with handlers
 
-To keep the exemples clear, we assume that :&#x20;
+To keep the exemples clear, we assume that :
 
 * The handler definition is done globally (outside of your main program scope a.k.a. `main()`, `app_main()` , `setup()`/`loop()` or any FreeRTOS task).
 * The `addWord()` method is called in the main program scope
@@ -379,48 +374,47 @@ server.addWord({
 
 **Important notes on handlers usage**
 
-{% hint style="info" %}
-* The handlers are called in the context of the Modbus interface task, so they must be fast and not block. Design them like you would do for an ISR; if there's intensive processing to do, consider offloading it to a background task.
-* Non-`static` variables declared in your callbacks (even if the callbacks are `static` themselves) rely on the Modbus interface's internal task stack. Be careful with heavy internal variables & complex call paths inside the handlers, or resize the stack size (see [Settings](../additional-resources/settings-compile-flags.md) page).
+!!! note
+    * The handlers are called in the context of the Modbus interface task, so they must be fast and not block. Design them like you would do for an ISR; if there's intensive processing to do, consider offloading it to a background task.
+    * Non-`static` variables declared in your callbacks (even if the callbacks are `static` themselves) rely on the Modbus interface's internal task stack. Be careful with heavy internal variables & complex call paths inside the handlers, or resize the stack size (see [Settings](../40-additional-resources/401-settings-compile-flags.md) page).
 
-See notes related to Callback usage in [How-To Guides > Modbus Client (Master)](modbus-client-master.md), they apply to Modbus Server handlers as well.
+    See notes related to Callback usage in [How-To Guides > Modbus Client (Master)](300-modbus-client-master.md), they apply to Modbus Server handlers as well.
 
-* For read-only register types, the `writeHandler` **must not** be provided, otherwise this will trigger an error when calling `addWord()`.
-* If you specify both a value pointer AND handlers, the handlers take priority, and the value pointer will be ignored.
-* If you try to add a Word that overlaps with existing Words, it will be rejected with an `ERR_WORD_OVERLAP` error
-* If used, the object designated by `userCtx` must be accessible during the whole Server lifetime! Otherwise, incoming requests could trigger a crash as the Server would access a dangling memory location
-{% endhint %}
+    * For read-only register types, the `writeHandler` **must not** be provided, otherwise this will trigger an error when calling `addWord()`.
+    * If you specify both a value pointer AND handlers, the handlers take priority, and the value pointer will be ignored.
+    * If you try to add a Word that overlaps with existing Words, it will be rejected with an `ERR_WORD_OVERLAP` error
+    * If used, the object designated by `userCtx` must be accessible during the whole Server lifetime! Otherwise, incoming requests could trigger a crash as the Server would access a dangling memory location
 
-## **Error codes**
+## Error codes
 
 ```cpp
 enum Result {
     // Success
-    SUCCESS,                        // success
+    SUCCESS,                        // Success
     // addWord errors
-    ERR_WORD_BUSY,                  // busy word store
-    ERR_WORD_OVERFLOW,              // stored too many words
-    ERR_WORD_INVALID,               // invalid word reg type
-    ERR_WORD_DIRECT_PTR,            // forbidden direct pointer
-    ERR_WORD_HANDLER,               // malformed handlers
-    ERR_WORD_OVERLAP,               // word overlapping an existing one
+    ERR_WORD_BUSY,                  // Busy word store
+    ERR_WORD_OVERFLOW,              // Stored too many words
+    ERR_WORD_INVALID,               // Invalid word reg type
+    ERR_WORD_DIRECT_PTR,            // Forbidden direct pointer
+    ERR_WORD_HANDLER,               // Malformed handlers
+    ERR_WORD_OVERLAP,               // Word overlapping an existing one
     // Request processing errors
-    ERR_RCV_UNKNOWN_WORD,           // word not found
-    ERR_RCV_BUSY,                   // incoming request: busy
-    ERR_RCV_INVALID_TYPE,           // received invalid request type
-    ERR_RCV_WRONG_SLAVE_ID,         // wrong slave ID in rcv'd frame
-    ERR_RCV_ILLEGAL_FUNCTION,       // illegal function in rcv'd frame
-    ERR_RCV_ILLEGAL_DATA_ADDRESS,   // illegal data address in rcv'd frame
-    ERR_RCV_ILLEGAL_DATA_VALUE,     // illegal data value in rcv'd frame
-    ERR_RCV_SLAVE_DEVICE_FAILURE,   // slave device failure on rcv'd frame
-    ERR_RSP_TX_FAILED,              // transmit response failed
+    ERR_RCV_UNKNOWN_WORD,           // Word not found
+    ERR_RCV_BUSY,                   // Incoming request: busy
+    ERR_RCV_INVALID_TYPE,           // Received invalid request type
+    ERR_RCV_WRONG_SLAVE_ID,         // Wrong slave ID in rcv'd frame
+    ERR_RCV_ILLEGAL_FUNCTION,       // Illegal function in rcv'd frame
+    ERR_RCV_ILLEGAL_DATA_ADDRESS,   // Illegal data address in rcv'd frame
+    ERR_RCV_ILLEGAL_DATA_VALUE,     // Illegal data value in rcv'd frame
+    ERR_RCV_SLAVE_DEVICE_FAILURE,   // Slave device failure on rcv'd frame
+    ERR_RSP_TX_FAILED,              // Transmit response failed
     // Misc errors
-    ERR_NOT_INITIALIZED,            // server not initialized
-    ERR_INIT_FAILED                 // init failed
+    ERR_NOT_INITIALIZED,            // Server not initialized
+    ERR_INIT_FAILED                 // Init failed
 };
 ```
 
-## **Rejecting undefined Words**
+## Rejecting undefined Words
 
 In the Modbus specification, access to undefined registers should result in an `ILLEGAL_DATA_ADDRESS` exception. However, if you have holes in your register table and both devices clearly know the correct set of registers to use, it might be more efficient to just ignore those requests (i.e. return `0` values) and proceed with the rest of the transaction, so that the client can use a single multiple-register-read/write request instead of many single-register-read/write requests.
 
@@ -430,7 +424,7 @@ By default, the EZModbus Server _does reject_ calls to undefined registers with 
 Modbus::Server server(iface, store, slaveId, false); // false = no exception on undefined registers
 ```
 
-A simple example to illustrate this: let's say you have Words registered covering the following Input Registers :&#x20;
+A simple example to illustrate this: let's say you have Words registered covering the following Input Registers :
 
 ```
 [100, 102] : Temperature value
@@ -445,7 +439,7 @@ If the client tries to send a read request for the whole range `[100...123]`  to
 
 This work even if you have leading or trailing undefined registers, and does not override the atomicity checks for Words registers: **if the requested range contains Words defined on several registers, the client still MUST read or write all of them**, or the request will fail, regardless if `rejectUndefined` is `true` or `false`!
 
-## **Exception handling**
+## Exception handling
 
 #### Single read/write
 
@@ -461,10 +455,10 @@ The way for the Server to handle Modbus exceptions for read/write handlers depen
 
 * For both read & write requests, a first pass is done checking the existence of words and the validity of requested ranges : if any of the requested words is not registered, OR in case of any partial read of a multi-register word, an exception is immediately returned to the client/master without even processing the handler.
 * After checking word validity:
-  * For multiple read requests,  any failing read handler execution (returning a non-null `Modbus::ExceptionCode`) will trigger the exception being returned to the client
-  * For multiple write requests, the Modbus specification requires **atomic operations**. In this case, **all handlers will be called one after the other**, and if any (or several) of those handlers fail with a non-null `Modbus::ExceptionCode`, the client/master will get no value but the first triggered exception. It is the responsability of the client/master to read back registers, if required, to check which of the writes were successful or not.
+    * For multiple read requests, any failing read handler execution (returning a non-null `Modbus::ExceptionCode`) will trigger the exception being returned to the client
+    * For multiple write requests, the Modbus specification requires **atomic operations**. In this case, **all handlers will be called one after the other**, and if any (or several) of those handlers fail with a non-null `Modbus::ExceptionCode`, the client/master will get no value but the first triggered exception. It is the responsability of the client/master to read back registers, if required, to check which of the writes were successful or not.
 
-## **Unit ID for Modbus TCP**
+## Unit ID for Modbus TCP
 
 Modbus TCP devices are normally not addressed using the traditional `slaveId` field, but by their port and IP address.\
 A `Unit ID` field exists in the Modbus TCP protocol, and is used to relay Modbus requests to other RTU devices that use the `slaveId` field (reserved to Modbus Gateway applications such as EZModbus's `Bridge` component).

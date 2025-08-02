@@ -167,7 +167,6 @@ namespace Modbus {
             ERR_TX_FAILED,              // Transmission failed
             ERR_TIMEOUT,                // Request timeout
             ERR_INVALID_RESPONSE,       // Invalid response
-            ERR_EXCEPTION_RESPONSE,     // Slave returned Modbus exception
             ERR_NOT_INITIALIZED,        // Client not initialized
             ERR_INIT_FAILED             // Init failed
         };
@@ -180,7 +179,7 @@ namespace Modbus {
         Result begin();
         bool isReady();
         
-        // Sync / async (tracker)
+        // Sync (tracker = nullptr) / async (tracker defined)
         Result sendRequest(const Modbus::Frame& request,
                           Modbus::Frame& response,
                           Result* tracker = nullptr);

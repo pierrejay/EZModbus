@@ -1,14 +1,12 @@
 # Memory & system resources
 
-## Memory management approach
+## Memory management
 
 ### Zero dynamic allocation by default
 
-EZModbus uses **zero dynamic allocation** in all its component by default - completely avoiding risks related to allocation failures & heap fragmentation.&#x20;
+EZModbus uses **zero dynamic allocation** in all its component by default. All FreeRTOS objects are created statically (using `xQueueCreateStatic`, `xTaskCreateStatic`, etc.) except for the UART event queue for ESP32 that is created by ESP-IDF (we only use the handle of this queue).
 
-All FreeRTOS objects are created statically (using `xQueueCreateStatic`, `xTaskCreateStatic`, etc.) except for the UART event queue for ESP32 that is created by ESP-IDF (we only use the handle of this queue).
-
-### **Strategic memory management in Server**
+### Strategic memory management in Server
 
 The `Server` component uses a transparent `WordStore` approach for memory management:
 
@@ -24,7 +22,7 @@ This transparent approach ensures you maintain full control over memory allocati
 ### HAL wrappers
 
 * The UART/RS485 HAL wrapper uses the native ESP UART implementation and does not rely on additional tasks.
-* The TCP HAL wrapper spins up a task to handle sockets. Its stack size is set to 4096 bytes by default (sufficient for handling 4 sockets at a time i.e. the default max supported), with a priority of `tskIDLE_PRIORITY + 1` & no core affinity
+* The TCP HAL wrapper spins up a task to handle sockets. Its stack size is set to 4096 bytes by default (sufficient for handling 4 sockets at a time i.e. the default max supported), with a priority of `tskIDLE_PRIORITY + 1` & no core affinity. Since the task uses a `select()` loop with a default timeout of 1 second, it spends most of its time doing nothing (idle), and only consumes CPU when awoken by the scheduler to process sockets as reactively as possible.
 
 ### Modbus interfaces
 
@@ -33,7 +31,7 @@ Both interfaces rely on a FreeRTOS task to manage communication:
 * Modbus RTU interface: 2048 bytes stack size (or 4096 when logs enabled), `tskIDLE_PRIORITY + 1` priority & no core affinity
 * Modbus TCP interface: 4096 bytes stack size (or 6144 when logs enabled), `tskIDLE_PRIORITY + 1` priority & no core affinity
 
-Those tasks use an event-driven logic (fed by the driver & application layers) and do not consume useless CPU clocks when idle (e.g. continuous polling with `vTaskDelay(1)`).
+Those tasks use an event-driven logic (fed by the driver & application layers event/data queues using `xQueueSet`) and do not consume useless CPU clocks when idle (e.g. continuous polling with `vTaskDelay(1)`).
 
 ### Application components
 
@@ -49,11 +47,11 @@ The main execution context that handles Modbus transactions is the task running 
 
 Stats from IDF ELF size analysis, per full Modbus stack (Client/Server app + RTU/TCP interface + driver, all declared globally)
 
-* ROM size (text + rodata):&#x20;
-  * \~10KB of Flash for both Modbus RTU & TCP
-* RAM usage (bss):&#x20;
-  * \~4KB for Modbus RTU
-  * \~10KB for Modbus TCP (includes 1KB TCP buffer per socket, default setting : max 4 active sockets)
+* ROM size (`.text` + `.rodata`):
+    * ~10KB of Flash for both Modbus RTU & TCP
+* RAM usage (`.bss`):
+    * ~4KB for Modbus RTU
+    * ~10KB for Modbus TCP (includes 1KB TCP buffer per socket, default setting : max 4 active sockets)
 
 This includes all tasks' stacks as they are allocated statically, but does not include :
 

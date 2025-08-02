@@ -19,34 +19,43 @@ Works with all ESP32 series chip (classic, S2, S3, C3...), single or dual-core.
 
 ## Installation
 
-### ESP-IDF Installation (Component Manager)
+### Component Manager installation
 
-1.  Add the dependency to your project's `idf_component.yml`:
+* Add the dependency to your project's `idf_component.yml`:
 
     ```yaml
     dependencies:
-      pierrejay/EZModbus: "^1.1.0"
+      pierrejay/EZModbus: "^1.1.3"
     ```
-2.  Build your project - the component will be downloaded automatically:
+
+* Build your project - the component will be downloaded automatically:
 
     ```bash
     idf.py build
     ```
-3.  Include in your code:
+
+* Include in your code:
 
     ```cpp
     #include "EZModbus.h"
     ```
 
-### ESP-IDF Manual Installation (Alternative)
+### Manual installation (alternative)
 
-1. Add the repo into the `components` folder in your project
-2.  Include the component in your project's root `CMakeLists.txt`:
+* Clone the repo into the `components` folder in your project - **its name should be in lowercase to match the ESP-IDF component naming**:
+
+    ```bash
+    cd /path/to/your/project/components
+    git clone https://github.com/pierrejay/EZModbus.git ezmodbus
+    ```
+
+* Include the component in your project's root `CMakeLists.txt`:
 
     ```cmake
-    idf_component_register(SRCS "main.cpp" PRIV_REQUIRES EZModbus ... # <- add here INCLUDE_DIRS "")
+    idf_component_register(SRCS "main.cpp" PRIV_REQUIRES ezmodbus ... # <- add here INCLUDE_DIRS "")
     ```
-3.  Include in your code:
+
+* Include in your code:
 
     ```cpp
     #include "EZModbus.h"
@@ -54,9 +63,9 @@ Works with all ESP32 series chip (classic, S2, S3, C3...), single or dual-core.
 
 ### PlatformIO Installation
 
-1. Add the repo into your `lib` folder
-2.  Include in your code:
+* Clone the repo into your `lib` folder
+* In your main sketch, include:
 
-    ```cpp
-    #include <EZModbus.h>
-    ```
+```cpp
+#include <EZModbus.h>
+```

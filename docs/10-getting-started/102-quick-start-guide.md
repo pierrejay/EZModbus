@@ -2,11 +2,11 @@
 
 This quick start guide presents the basic usage of EZModbus for `Client`, `Server` & `Bridge` applications, with the Arduino API.
 
-ESP-IDF only differs in not including `Arduino.h` & using the IDF-style struct for UART configuration (see [Core concepts > HAL wrappers](../core-concepts/hal-wrappers.md#uart-rs485-ezmodbus-approach-esp-idf-api) for more information)
+ESP-IDF only differs in not including `Arduino.h` & using the IDF-style struct for UART configuration (see [Core concepts > HAL wrappers](../20-core-concepts/205-hal-wrappers.md#uartrs485-ezmodbus-approach-esp-idf-api) for more information)
 
 ## Modbus Client
 
-This example shows how to read a single holding register over Modbus RTU. Here, we use a simple "blocking" read (synchronous). Detailed use of asynchronous requests is introduced in the [How To Guides > Modbus Client (Master)](../how-to-guides/modbus-client-master.md#asynchronous-mode-with-result-tracker-non-blocking) section of this guide.
+This example shows how to read a single holding register over Modbus RTU. Here, we use a simple "blocking" read (synchronous). Detailed use of asynchronous requests is introduced in the [How To Guides > Modbus Client (Master)](../30-how-to-guides/300-modbus-client-master.md) section of this guide.
 
 ```cpp
 #include <Arduino.h>
@@ -71,7 +71,7 @@ That’s it! Your ESP32 now reads a register every second.
 
 ## Modbus Server
 
-Here's how to implement a basic Modbus slave/server that exposes a few registers (Words). Here, we use a static Word store & basic pointer access to user variables. More advanced examples using custom callbacks are provided in the [How-To Guides > Modbus Server (Slave)](../how-to-guides/modbus-server-slave.md#handler-functions) section of this guide.
+Here's how to implement a basic Modbus slave/server that exposes a few registers (Words). Here, we use a static Word store & basic pointer access to user variables. More advanced examples using custom callbacks are provided in the [How-To Guides > Modbus Server (Slave)](../30-how-to-guides/301-modbus-server-slave.md#handler-functions) section of this guide.
 
 ```cpp
 #include <Arduino.h>

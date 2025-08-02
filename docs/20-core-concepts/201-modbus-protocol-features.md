@@ -26,9 +26,8 @@ The function codes supported are the following:
 
 They are described in the `Modbus::FunctionCode` enum and can be handled in plaintext in user code. Inconsistent data trigger explicit errors, such as `ERR_INVALID_REG_COUNT` when trying to use a “single write” function code while supplying several register values.
 
-{% hint style="info" %}
-Out of simplicity, the function code for “Diagnostics” and “Read/Write multiple registers” have not been implemented, the current features covering most common use cases for interfacing with industrial systems.
-{% endhint %}
+!!! note
+    Out of simplicity, the function code for “Diagnostics” and “Read/Write multiple registers” have not been implemented, the current features covering most common use cases for interfacing with industrial systems.
 
 ## Modbus Role semantics
 

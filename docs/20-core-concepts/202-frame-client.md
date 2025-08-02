@@ -15,9 +15,9 @@ struct Frame {
 };
 ```
 
-The memory footprint of a `Frame` is fixed: 268 bytes. It is the size required to store the data of the largest request payload (on 125 registers or 2000 coils).&#x20;
+The memory footprint of a `Frame` is fixed: 268 bytes. It is the size required to store the data of the largest request payload (on 125 registers or 2000 coils).
 
-## **Definition**
+## Definition
 
 The `Frame` structure is an enhanced representation of a raw Modbus message. It contains all the information needed to:
 
@@ -35,37 +35,37 @@ Two aspects will make your life easier when manipulating `Frame` in Modbus clien
 
 The `Frame` structure eliminates the need to understand low-level Modbus protocol details like PDUs, ADUs, coil bit packing or byte ordering - EZModbus handles all of that for you behind the scenes, and hands you a ready-to-use object filled with proper data once the response is received.
 
-## **Reading/writing register data in Frame**
+## Reading/writing register data in Frame
 
 In order to optimize memory usage without dynamic allocation, the `data` field in `Modbus::Frame` stores registers & coils in a unique array: coils are packed to occupy as little space as possible.
 
 Register data is thus typically not accessed directly by reading or writing the `data` array, but by using a simple API that will take care of storing & retrieving data in the correct format:
 
-### **Writing frame data**
+### Writing frame data
 
 Those methods will set the `data` field of the `Frame` structure from a value or set of values :
 
-#### **During `Frame` initialization**
+#### During `Frame` initialization
 
 * `packRegisters`: set frame data from a unique register value or list of registers values
-  * From a vector: `packRegisters(std::vector<uint16_t> regs)`
-  * From a buffer: `packRegisters(uint16_t* buf, size_t len)`
-  * In place : `packRegisters(std::initializer_list<uint16_t>)`
+    * From a vector: `packRegisters(std::vector<uint16_t> regs)`
+    * From a buffer: `packRegisters(uint16_t* buf, size_t len)`
+    * In place : `packRegisters(std::initializer_list<uint16_t>)`
 * `packCoils`: set frame data from a unique coil state or list of coils states
-  * From a vector: `packCoils(std::vector<bool> regs)`
-  * From a buffer: `packCoils(bool* buf, size_t len)`
-  * In place: `packCoils(std::initializer_list<bool>)`
+    * From a vector: `packCoils(std::vector<bool> regs)`
+    * From a buffer: `packCoils(bool* buf, size_t len)`
+    * In place: `packCoils(std::initializer_list<bool>)`
 
 Out of convenience, `packCoils` also include overloads for `uint16_t` in addition to `bool`, where any non-zero value will be considered as a `true` state.
 
-#### **After `Frame` initialization**
+#### After `Frame` initialization
 
 * `Frame::setRegisters`: set frame data & register count from a unique or list of registers
 * `Frame::setCoils`: set frame data & register count from a unique or list of coils
 
 The types used for arguments are the same as the `packXXX()` methods.
 
-#### **Examples**
+#### Examples
 
 ```cpp
 // From initializer list, in place
@@ -96,25 +96,25 @@ request.setRegisters(values, (sizeof(values) / sizeof(values[0])));
 ...
 ```
 
-### **Reading frame data**
+### Reading frame data
 
 Those methods will recover the data from a struct, either for a specific register or all of them:
 
-#### **Reading a specific register**
+#### Reading a specific register
 
 * `Frame::getRegister(size_t idx)`: returns a `uint16_t` with the register value at index `idx`
 * `Frame::getCoil(size_t idx)`: returns a `bool` with the coil state at index `idx`
 
-#### **Fetching all registers**
+#### Fetching all registers
 
 * `Frame::getRegisters()`: returns all registers values
-  * To a vector: `Frame::getRegisters()` returns a `std::vector<uint16_t>`
-  * To a buffer: `Frame::getRegisters(uint16_t* buf, size_t len)` writes registers values into the provided buffer & returns a `size_t` with the number of registers actually fetched
+    * To a vector: `Frame::getRegisters()` returns a `std::vector<uint16_t>`
+    * To a buffer: `Frame::getRegisters(uint16_t* buf, size_t len)` writes registers values into the provided buffer & returns a `size_t` with the number of registers actually fetched
 * `Frame::getCoils()`: returns all coil values
-  * To a vector: `Frame::getCoils()` returns a `std::vector<bool>`
-  * To a buffer: `Frame::getCoils(bool* buf, size_t len)` writes coil states into the provided buffer & returns a `size_t` with the number of coils actually fetched
+    * To a vector: `Frame::getCoils()` returns a `std::vector<bool>`
+    * To a buffer: `Frame::getCoils(bool* buf, size_t len)` writes coil states into the provided buffer & returns a `size_t` with the number of coils actually fetched
 
-#### **Examples**
+#### Examples
 
 ```cpp
 // REGISTERS EXAMPLES
@@ -153,9 +153,8 @@ bool buffer[10];
 size_t copied = coilResponse.getCoils(buffer, (sizeof(buffer) / sizeof(buffer[0])));
 ```
 
-{% hint style="info" %}
-**Note:** Technically, for registers it is possible to read/write the `data` field directly since they are not packed, but using those methods for both registers & coils will guarantee 100% validity of the data stored in the `Frame`, so they are recommended in all cases
-{% endhint %}
+!!! note
+    Technically, for registers it is possible to read/write the `data` field directly since they are not packed, but using those methods for both registers & coils will guarantee 100% validity of the data stored in the `Frame`, so they are recommended in all cases.
 
 ### Unit conversion
 
