@@ -334,6 +334,7 @@ namespace Modbus {
 ```
 
 **Requirements:**
+
 - Interfaces must have **different roles** (one CLIENT, one SERVER)
 - Bridge automatically forwards requests/responses between interfaces
 - Supports any combination: RTU↔TCP, RTU↔RTU, TCP↔TCP

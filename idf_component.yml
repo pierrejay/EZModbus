@@ -4,7 +4,7 @@ description: "EZModbus - C++ FreeRTOS Modbus library for ESP32"
 license: "MIT"
 url: "https://github.com/pierrejay/EZModbus/"
 repository: "https://github.com/pierrejay/EZModbus.git"
-documentation: "https://pierre-jay.gitbook.io/ezmodbus-docs"
+documentation: "https://ezmodbus.readthedocs.io/"
 issues: "https://github.com/pierrejay/EZModbus/issues"
 maintainers:
   - "Pierre Jay <pierre.jay@gmail.com>"

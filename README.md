@@ -13,7 +13,7 @@
 
 ## Documentation
 
-See the `/docs` directory for detailed library documentation.
+Complete documentation available on [Read the Docs](https://ezmodbus.readthedocs.io/) & in the `/docs` directory.
 
 ## License
 
