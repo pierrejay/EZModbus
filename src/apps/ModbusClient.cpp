@@ -169,8 +169,8 @@ void Client::PendingRequest::setResult(Result result, bool finalize) {
     // Since we don't expect a response (failure or broadcast), we pass nullptr as response
     cbSnapshot(result, nullptr, ctxSnapshot);
 
-    // Log request processing result
-    EventBus::pushRequest(_reqMetadata, result, _client);
+    // Log request processing result (only if the request is finalized)
+    if (finalize) EventBus::pushRequest(_reqMetadata, result, _client);
 }
 
 /* @brief Set the response for the pending request & update the result tracker
@@ -202,8 +202,8 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
         cbSnapshot(result, &response, ctxSnapshot);
     }
 
-    // Log request processing result
-    EventBus::pushRequest(_reqMetadata, result, _client);
+    // Log request processing result (only if the request is finalized)
+    if (finalize) EventBus::pushRequest(_reqMetadata, result, _client);
 }
 
 /* @brief Set the event group for synchronous waiting
