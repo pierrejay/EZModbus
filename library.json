@@ -1,6 +1,6 @@
 {
   "name": "EZModbus",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "description": "EZModbus - C++ FreeRTOS Modbus library for ESP32",
   "keywords": ["modbus", "networking", "rtu", "tcp", "industrial", "automation"],
   "authors": [
