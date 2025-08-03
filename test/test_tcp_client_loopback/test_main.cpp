@@ -1545,6 +1545,77 @@ void test_server_busy_exception() {
     TEST_ASSERT_EQUAL(Modbus::NULL_EXCEPTION, okResp.exceptionCode);
 }
 
+void test_client_reconnect_on_first_request() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_CLIENT_RECONNECT - Client starts before server is available");
+    
+    while (!client.isReady()) {
+        Modbus::Logger::logln("Waiting for client to be ready from previous test...");
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    
+    // Suspend the server task & stop the HAL server
+    vTaskSuspend(modbusTestServerTaskHandle);
+    halForServer.stop();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    
+    // Stop the client HAL & destruct the client & interface
+    halForClient.stop();
+    ezm.~TCP();
+    client.~Client();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    
+    // Reconstruct the client & client interface
+    new (&ezm) ModbusInterface::TCP(halForClient, Modbus::CLIENT);
+    new (&client) Modbus::Client(ezm);
+    
+    // Restart the client HAL, client should appear disconnected
+    halForClient.begin();
+    TEST_ASSERT_START();
+    TEST_ASSERT_FALSE(halForClient.isClientConnected());
+    
+    // Restart the client & client interface
+    ezm.begin();
+    client.begin();
+    
+    // Resume the server task & restart the server HAL
+    vTaskResume(modbusTestServerTaskHandle);
+    halForServer.begin();
+    
+    // Reconstruct server interface & restart it
+    mbt.~TCP();
+    new (&mbt) ModbusInterface::TCP(halForServer, Modbus::SERVER);
+    mbt.begin();
+    
+    // Reconstruct Modbus server & restart it to register callbacks properly
+    server.~Server();
+    new (&server) Modbus::Server(mbt, dynamicStore);
+    server.begin();
+    
+    // Let everything settle
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    
+    // Try to send the request now that everything is ready, it should succeed
+    uint16_t value;
+    Modbus::Frame req {
+        .type       = Modbus::REQUEST,
+        .fc         = Modbus::READ_HOLDING_REGISTERS,
+        .slaveId    = TEST_SLAVE_ID,
+        .regAddress = MBT_INIT_START_REG,
+        .regCount   = 1,
+        .data       = {}
+    };
+    Modbus::Frame resp;
+    auto result = client.sendRequest(req, resp);
+    
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result);
+    TEST_ASSERT_TRUE(halForClient.isClientConnected());
+    TEST_ASSERT_EQUAL(MBT_INIT_HOLDING_REGISTER_VALUE(MBT_INIT_START_REG), resp.getRegister(0));
+    
+    Modbus::Logger::logln("Client successfully reconnected on first request");
+}
+
 void setup() {
     // Debug port
     Serial.setTxBufferSize(2048);
@@ -1627,6 +1698,7 @@ void setup() {
     RUN_TEST(test_broadcast);
     // RUN_TEST(test_concurrent_calls);
     RUN_TEST(test_server_busy_exception);
+    RUN_TEST(test_client_reconnect_on_first_request);
     UNITY_END();
 }
 

@@ -21,6 +21,7 @@
 
 namespace ModbusHAL {
 
+// Default constructor
 TCP::TCP()
     : _tcpTaskHandle(nullptr),
       _rxQueue(nullptr),
@@ -34,8 +35,37 @@ TCP::TCP()
     _cfgIP[0] = '\0'; // Clear the IP string
 }
 
+// Server constructor
+TCP::TCP(uint16_t serverPort) : TCP() {
+    _cfgMode = CfgMode::SERVER;
+    _cfgPort = serverPort;
+}
+
+// Client constructor
+TCP::TCP(const char* serverIP, uint16_t port) : TCP() {
+    _cfgMode = CfgMode::CLIENT;
+    if (serverIP) {
+        strncpy(_cfgIP, serverIP, sizeof(_cfgIP) - 1);
+        _cfgIP[sizeof(_cfgIP) - 1] = '\0';
+    } else {
+        _cfgIP[0] = '\0';
+    }
+    _cfgPort = port;
+}
+
 TCP::~TCP() {
     stop();
+}
+
+bool TCP::begin() {
+    switch (_cfgMode) {
+        case CfgMode::SERVER:
+            return beginServer(_cfgPort);
+        case CfgMode::CLIENT:
+            return beginClient(_cfgIP, _cfgPort);
+        default:
+            return false; // No config
+    }
 }
 
 void TCP::stop() {
@@ -67,7 +97,6 @@ void TCP::stop() {
         }
         _activeSocketCount = 0;
     }
-
 
     if (_rxQueue) {
         Modbus::Debug::LOG_MSG("Deleting RX queue.");
@@ -132,7 +161,6 @@ bool TCP::setupServerSocket(uint16_t port, uint32_t ip) {
     return true;
 }
 
-
 static uint32_t stringToIP(const char* ip_str) {
     struct in_addr addr;
     if (inet_pton(AF_INET, ip_str, &addr) == 1) {
@@ -143,96 +171,101 @@ static uint32_t stringToIP(const char* ip_str) {
 }
 
 bool TCP::setupClientSocket(const char* serverIP, uint16_t port) {
+    
     uint32_t ip_addr = stringToIP(serverIP);
     if (ip_addr == 0) {
         return false; // Error logged in stringToIP
     }
 
-    _clientSocket = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (_clientSocket < 0) {
+    // Create local socket (don't touch _clientSocket yet)
+    int newSocket = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (newSocket < 0) {
         Modbus::Debug::LOG_MSGF("Failed to create client socket, errno: %d", errno);
         return false;
     }
-    Modbus::Debug::LOG_MSGF("Client socket created: %d", _clientSocket);
+    Modbus::Debug::LOG_MSGF("Client socket created: %d", newSocket);
     
-    // Set to non-blocking for connect attempt with select
-    int flags = fcntl(_clientSocket, F_GETFL, 0);
+    // Configure non-blocking
+    int flags = fcntl(newSocket, F_GETFL, 0);
     if (flags == -1) {
         Modbus::Debug::LOG_MSGF("fcntl(F_GETFL) failed for client socket, errno: %d", errno);
-        ::close(_clientSocket);
-        _clientSocket = -1;
+        ::close(newSocket);
         return false;
     }
-    if (fcntl(_clientSocket, F_SETFL, flags | O_NONBLOCK) == -1) {
-        Modbus::Debug::LOG_MSGF("fcntl(F_SETFL, O_NONBLOCK) for client socket failed, errno: %d", errno);
-        ::close(_clientSocket);
-        _clientSocket = -1;
+    if (fcntl(newSocket, F_SETFL, flags | O_NONBLOCK) == -1) {
+        Modbus::Debug::LOG_MSGF("fcntl(F_SETFL, O_NONBLOCK) failed, errno: %d", errno);
+        ::close(newSocket);
         return false;
     }
 
+    // Prepare address
     sockaddr_in remote_addr;
     memset(&remote_addr, 0, sizeof(remote_addr));
     remote_addr.sin_family = AF_INET;
     remote_addr.sin_port = htons(port);
     remote_addr.sin_addr.s_addr = ip_addr;
 
-    Modbus::Debug::LOG_MSGF("Attempting to connect to %s:%u (socket %d)...", serverIP, port, _clientSocket);
-    int ret = ::connect(_clientSocket, (struct sockaddr*)&remote_addr, sizeof(remote_addr));
+    // Attempt connection
+    Modbus::Debug::LOG_MSGF("Attempting to connect to %s:%u (socket %d)...", serverIP, port, newSocket);
+    int ret = ::connect(newSocket, (struct sockaddr*)&remote_addr, sizeof(remote_addr));
 
     if (ret < 0) {
         if (errno == EINPROGRESS) {
             Modbus::Debug::LOG_MSGF("Connection in progress...");
             fd_set wfds;
             FD_ZERO(&wfds);
-            FD_SET(_clientSocket, &wfds);
+            FD_SET(newSocket, &wfds);
 
             struct timeval tv;
-            tv.tv_sec = 5; // 5 second timeout for connection
+            tv.tv_sec = CONNECT_TIMEOUT_SEC; // 5 second timeout
             tv.tv_usec = 0;
 
-            ret = ::select(_clientSocket + 1, nullptr, &wfds, nullptr, &tv);
+            ret = ::select(newSocket + 1, nullptr, &wfds, nullptr, &tv);
             if (ret < 0) {
                 Modbus::Debug::LOG_MSGF("select() for connect failed, errno: %d", errno);
-                ::close(_clientSocket);
-                _clientSocket = -1;
+                ::close(newSocket);
                 return false;
             } else if (ret == 0) {
                 Modbus::Debug::LOG_MSGF("Connect timeout to %s:%u", serverIP, port);
-                ::close(_clientSocket);
-                _clientSocket = -1;
+                ::close(newSocket);
                 return false;
             } else {
-                // Socket is writable, check SO_ERROR
+                // Check SO_ERROR
                 int so_error;
                 socklen_t len = sizeof(so_error);
-                if (getsockopt(_clientSocket, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0) {
+                if (getsockopt(newSocket, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0) {
                     Modbus::Debug::LOG_MSGF("getsockopt(SO_ERROR) failed, errno: %d", errno);
-                    ::close(_clientSocket);
-                    _clientSocket = -1;
+                    ::close(newSocket);
                     return false;
                 }
                 if (so_error != 0) {
                     Modbus::Debug::LOG_MSGF("Connect failed with SO_ERROR: %d", so_error);
-                    ::close(_clientSocket);
-                    _clientSocket = -1;
+                    ::close(newSocket);
                     return false;
                 }
                 Modbus::Debug::LOG_MSGF("Connected to %s:%u successfully!", serverIP, port);
             }
         } else {
             Modbus::Debug::LOG_MSGF("Connect failed immediately, errno: %d", errno);
-            ::close(_clientSocket);
-            _clientSocket = -1;
+            ::close(newSocket);
             return false;
         }
     } else {
-         // Connected immediately (should be rare for non-blocking)
-         Modbus::Debug::LOG_MSGF("Connected to %s:%u immediately!", serverIP, port);
+        Modbus::Debug::LOG_MSGF("Connected to %s:%u immediately!", serverIP, port);
+    }
+    
+    // Atomic assignment at the end (under Mutex)
+    {
+        Lock guard(_socketsMutex);
+        if (_clientSocket != -1) {
+            Modbus::Debug::LOG_MSGF("Closing previous client socket %d", _clientSocket);
+            ::close(_clientSocket);
+        }
+        _clientSocket = newSocket;
     }
     
     return true;
 }
-
 
 bool TCP::beginServer(uint16_t port, uint32_t ip) {
     if (_isRunning) {
@@ -283,7 +316,8 @@ bool TCP::beginClient(const char* serverIP, uint16_t port) {
     _isServer = false;
 
     if (!setupClientSocket(serverIP, port)) {
-        return false; // Error logged in setupClientSocket
+        Modbus::Debug::LOG_MSGF("WARNING: Initial connection to %s:%u failed, will retry on first sendMsg", serverIP, port);
+        // Continue anyway, auto-reconnect will handle it
     }
 
     _rxQueue = xQueueCreateStatic(RX_QUEUE_SIZE, sizeof(int), _rxQueueStorage, &_rxQueueBuf);
@@ -327,10 +361,12 @@ void TCP::tcpTask(void* param) {
 
 void TCP::runTcpTask() {
     struct timeval tv; // For select timeout
+    int error_count = 0;  // Consecutive error counter for recovery
+    int empty_hits = 0;   // Empty rounds counter (anti-spin EAGAIN)
 
     while (_isRunning) {
-        tv.tv_sec = 0;
-        tv.tv_usec = 10000; // 10ms select timeout, as per original guidelines (1ms was too short for typical FreeRTOS tick)
+        tv.tv_sec = SELECT_TIMEOUT_MS / 1000;        // Seconds part
+        tv.tv_usec = (SELECT_TIMEOUT_MS % 1000) * 1000; // Microseconds part
 
         fd_set readfds;
         FD_ZERO(&readfds);
@@ -367,14 +403,38 @@ void TCP::runTcpTask() {
         if (!_isRunning) break; // Check flag again after select
 
         if (activity < 0) {
-            if (errno == EINTR) { // Interrupted system call
-                Modbus::Debug::LOG_MSGF("select() interrupted, retrying.");
+            if (errno == EINTR) {
+                error_count = 0;  // Normal signal, reset counter
                 continue;
             }
-            Modbus::Debug::LOG_MSGF("select() error, errno: %d. Task stopping.", errno);
-            _isRunning = false; // Stop the task loop on critical select error
-            break;
+            
+            if (errno == EBADF) {
+                Modbus::Debug::LOG_MSGF("EBADF detected, cleaning dead sockets");
+                cleanupDeadSockets();
+                error_count = 0;  // Reset after cleanup
+                continue;
+            }
+            
+            error_count++;
+            Modbus::Debug::LOG_MSGF("select() error #%d, errno: %d (%s)", error_count, errno, strerror(errno));
+            
+            if (error_count >= MAX_SELECT_ERRORS) {
+                Modbus::Debug::LOG_MSGF("Too many select errors, sleeping %lums then retrying...", SELECT_RECOVERY_SLEEP_MS);
+                
+                // Long sleep then reset and retry
+                vTaskDelay(pdMS_TO_TICKS(SELECT_RECOVERY_SLEEP_MS));
+                error_count = 0;
+                continue;
+            }
+            
+            // Progressive backoff and retry (prevent overflow)
+            uint32_t backoff_ms = std::min(SELECT_BACKOFF_BASE_MS * error_count, SELECT_RECOVERY_SLEEP_MS);
+            vTaskDelay(pdMS_TO_TICKS(backoff_ms));
+            continue;
         }
+ 
+        // Success! Reset error counter
+        error_count = 0;
 
         if (activity == 0) {
             // Timeout, just loop again
@@ -433,37 +493,51 @@ void TCP::runTcpTask() {
 
             int sockets_to_remove[MAX_ACTIVE_SOCKETS];
             size_t remove_count = 0;
-
+            bool no_data_read = true;  // Tracker for anti-spin detection
+ 
             uint8_t dummy;
             for (size_t idx = 0; idx < check_count; ++idx) {
                 int sock = sockets_to_check[idx];
                 if (!FD_ISSET(sock, &readfds)) continue;
-
+ 
                 ssize_t peek = ::recv(sock, &dummy, 1, MSG_PEEK);
-
+ 
                 if (peek > 0) {
+                    no_data_read = false;  // We have data!
                     if (xQueueSend(_rxQueue, &sock, portMAX_DELAY) != pdTRUE) {
                         Modbus::Debug::LOG_MSGF("RX queue full. Dropping event for socket %d.", sock);
                     }
                 } else if (peek == 0) {
+                    no_data_read = false;  // Connection closed = activity
                     Modbus::Debug::LOG_MSGF("Socket %d closed by peer.", sock);
                     sockets_to_remove[remove_count++] = sock;
                 } else {
                     if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        no_data_read = false;  // Error = activity
                         Modbus::Debug::LOG_MSGF("recv(MSG_PEEK) error on socket %d, errno: %d. Closing.", sock, errno);
                         sockets_to_remove[remove_count++] = sock;
                     }
                 }
             }
-
+ 
             for (size_t i = 0; i < remove_count; ++i) {
                 closeSocket(sockets_to_remove[i]);
             }
-
+ 
+            // Anti-spin: if select() says OK but no socket has data
+            if (activity > 0 && no_data_read) {
+                empty_hits++;
+                if (empty_hits > MAX_EMPTY_HITS) {
+                    vTaskDelay(pdMS_TO_TICKS(ANTI_SPIN_DELAY_MS));  // Short anti-spin pause
+                    empty_hits = 0;
+                }
+            } else {
+                empty_hits = 0;
+            }
+ 
         } // Unlock socketsMutex
     } // while (_isRunning)
 }
-
 
 void TCP::closeSocket(int sock) {
     // Assumes _socketsMutex is held by caller if necessary, or called during stop()
@@ -491,30 +565,47 @@ void TCP::closeSocket(int sock) {
     }
 }
 
-
-
 bool TCP::sendMsg(const uint8_t* payload, const size_t len, const int destSocket, int* actualSocket) {
     if (!_isRunning) return false;
 
-    int targetSocket = -1;
-    if (destSocket != -1) { // Explicit destination
-        targetSocket = destSocket;
-    } else { // Default destination
-        Lock guard(_socketsMutex); // Protect access to _clientSocket or _activeSockets
-        if (!_isServer) { // Client mode
-            targetSocket = _clientSocket;
-        } else { 
-            Modbus::Debug::LOG_MSGF("sendMsg: Server mode with default destSocket (-1) not fully supported without target.");
-            return false; // Or use a "last active" logic if implemented.
-        }
+    /* 1. Check reconnection needed */
+    bool needReconnect = false;
+    {
+        Lock guard(_socketsMutex);
+        needReconnect = (!_isServer && destSocket == -1 && _clientSocket == -1);
     }
+
+    /* 2. Reconnect OUTSIDE mutex if needed */
+    if (needReconnect) {
+        Modbus::Debug::LOG_MSGF("Client disconnected, attempting reconnect to %s:%u", _cfgIP, _cfgPort);
+        if (!setupClientSocket(_cfgIP, _cfgPort)) {
+            Modbus::Debug::LOG_MSGF("Auto-reconnection failed");
+            return false;
+        }
+        Modbus::Debug::LOG_MSGF("Auto-reconnection successful");
+        
+        if (!_isRunning) return false;
+    }
+
+    /* 3. Send phase - re-lock and re-read socket */
+    Lock guard(_socketsMutex);
     
+    int targetSocket = -1;
+    if (destSocket != -1) {
+        targetSocket = destSocket;
+    } else if (!_isServer) {
+        targetSocket = _clientSocket; // Re-read after potential reconnection
+    } else {
+        Modbus::Debug::LOG_MSGF("sendMsg: Server mode with default destSocket (-1) not supported");
+        return false;
+    }
+
     if (actualSocket) {
         *actualSocket = targetSocket;
     }
 
     if (targetSocket == -1) {
-        Modbus::Debug::LOG_MSGF("sendMsg: No valid target socket.");
+        Modbus::Debug::LOG_MSGF("sendMsg: No valid target socket");
         return false;
     }
 
@@ -522,28 +613,27 @@ bool TCP::sendMsg(const uint8_t* payload, const size_t len, const int destSocket
         Modbus::Debug::LOG_MSGF("sendMsg: Invalid message length %d.", len);
         return false;
     }
-    
-    Modbus::Debug::LOG_MSGF("Sending %d bytes to socket %d", len, targetSocket);
+
+    /* 4. Protected send */
+    Modbus::Debug::LOG_MSGF("Sending %zu bytes to socket %d", len, targetSocket);
     ssize_t sent_bytes = ::send(targetSocket, payload, len, 0);
 
     if (sent_bytes < 0) {
-        Modbus::Debug::LOG_MSGF("send() to socket %d failed, errno: %d", targetSocket, errno);
-        // Consider closing socket on certain errors like EPIPE, ECONNRESET
+        Modbus::Debug::LOG_MSGF("send() failed, errno: %d", errno);
         if (errno == EPIPE || errno == ECONNRESET || errno == ENOTCONN || errno == EBADF) {
-            Lock guard(_socketsMutex);
             closeSocket(targetSocket);
         }
         return false;
     }
+
     if ((size_t)sent_bytes != len) {
-        Modbus::Debug::LOG_MSGF("send() on socket %d: Incomplete send. Sent %d of %d bytes.", targetSocket, sent_bytes, len);
-        return false; // Or handle partial sends if appropriate
+        Modbus::Debug::LOG_MSGF("send() incomplete: sent %zd of %zu bytes", sent_bytes, len);
+        return false;
     }
 
     Modbus::Debug::LOG_MSGF("Successfully sent %d bytes to socket %d", sent_bytes, targetSocket);
     return true;
 }
-
 
 size_t TCP::getActiveSocketCount() {
     Lock guard(_socketsMutex);
@@ -563,32 +653,12 @@ bool TCP::isClientConnected() {
     return _isRunning && !_isServer && _clientSocket != -1;
 }
 
-// Server ctor
-TCP::TCP(uint16_t serverPort) : TCP() {
-    _cfgMode = CfgMode::SERVER;
-    _cfgPort = serverPort;
-}
-
-// Client ctor
-TCP::TCP(const char* serverIP, uint16_t port) : TCP() {
-    _cfgMode = CfgMode::CLIENT;
-    if (serverIP) {
-        strncpy(_cfgIP, serverIP, sizeof(_cfgIP) - 1);
-        _cfgIP[sizeof(_cfgIP) - 1] = '\0';
+bool TCP::isReady() {
+    if (!_isRunning) return false;
+    if (_isServer) {
+        return _listenSocket != -1;  // Server ready if listening
     } else {
-        _cfgIP[0] = '\0';
-    }
-    _cfgPort = port;
-}
-
-bool TCP::begin() {
-    switch (_cfgMode) {
-        case CfgMode::SERVER:
-            return beginServer(_cfgPort);
-        case CfgMode::CLIENT:
-            return beginClient(_cfgIP, _cfgPort);
-        default:
-            return false; // No config
+        return _cfgMode == CfgMode::CLIENT;  // Client ready if configured
     }
 }
 
@@ -612,6 +682,46 @@ size_t TCP::readSocketData(int socketNum, uint8_t* dst, size_t maxLen) {
 
     Modbus::Debug::LOG_MSGF("readSocketData: recv error on socket %d, errno %d", socketNum, errno);
     return SIZE_MAX;
+}
+
+void TCP::cleanupDeadSockets() {
+    Lock guard(_socketsMutex);
+    
+    // Test listen socket (server)
+    if (_isServer && _listenSocket != -1) {
+        int error = 0;
+        socklen_t len = sizeof(error);
+        if (getsockopt(_listenSocket, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error != 0) {
+            Modbus::Debug::LOG_MSGF("Listen socket %d is dead, closing", _listenSocket);
+            ::close(_listenSocket);
+            _listenSocket = -1;
+        }
+    }
+    
+    // Test client socket
+    if (!_isServer && _clientSocket != -1) {
+        int error = 0;
+        socklen_t len = sizeof(error);
+        if (getsockopt(_clientSocket, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error != 0) {
+            Modbus::Debug::LOG_MSGF("Client socket %d is dead, closing", _clientSocket);
+            ::close(_clientSocket);
+            _clientSocket = -1;
+        }
+    }
+    
+    // Test active sockets (server clients)
+    for (size_t i = 0; i < _activeSocketCount; ) {
+        int sock = _activeSockets[i];
+        int error = 0;
+        socklen_t len = sizeof(error);
+        
+        if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error != 0) {
+            Modbus::Debug::LOG_MSGF("Active socket %d is dead, removing", sock);
+            closeSocket(sock); // closeSocket handles array shifting
+        } else {
+            i++;
+        }
+    }
 }
 
 } // namespace ModbusHAL
