@@ -23,4 +23,7 @@ files:
     - "platformio.ini"            # Exclude PlatformIO configuration
     - "library.json"              # Exclude PlatformIO library descriptor
     - "test/**/*"                 # Exclude PlatformIO tests
+    - ".readthedocs.yaml"         # Exclude RTD cfg file
+    - "docs/requirements.txt"     # Exclude RTD req file
+    - "docs/mkdocs.yml"           # Exclude mkdocs cfg file
     - ".DS_Store"
