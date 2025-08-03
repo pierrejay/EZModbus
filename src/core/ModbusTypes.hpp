@@ -111,7 +111,7 @@
     inline void WAIT_US(uint32_t us)    { esp_rom_delay_us(us); }
 #elif defined(STM32_HAL)
     inline uint32_t TIME_MS()           { return HAL_GetTick(); }
-    inline uint64_t TIME_US()           { static uint8_t i=0; return i?DWT->CYCCNT/(SystemCoreClock/1000000):(i=1,CoreDebug->DEMCR|=CoreDebug_DEMCR_TRCENA_Msk,DWT->CTRL|=DWT_CTRL_CYCCNTENA_Msk,DWT->CYCCNT=0,DWT->CYCCNT/(SystemCoreClock/1000000)); }
+    inline uint64_t TIME_US()           { return HAL_GetTick() * 1000; }
     inline void WAIT_MS(uint32_t ms)    { vTaskDelay(pdMS_TO_TICKS(ms)); }
     inline void WAIT_US(uint32_t us)    { HAL_Delay(us / 1000); }
 #elif defined(PICO_SDK)
