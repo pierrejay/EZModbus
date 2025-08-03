@@ -13,7 +13,7 @@
 
 ## Documentation
 
-The docs are hosted on the following Gitbook site: [EZModbus Docs](https://pierre-jay.gitbook.io/ezmodbus-docs/).
+See the `/docs` directory for detailed library documentation.
 
 ## License
 
