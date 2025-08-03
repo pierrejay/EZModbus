@@ -284,10 +284,9 @@ void problematicCallback(Result result, const Frame* response, void* ctx) {
 
 ## Important note about variable lifetime
 
-{% hint style="info" %}
-* In asynchronous mode using a result tracker, it is the user’s responsibility to **ensure both the response placeholder & the tracker are valid throughout the whole request lifecycle**! Otherwise, a crash may occur as the library could try to access dangling memory locations. Once the tracker has updated to any other value than `NODATA`, it is safe to release the objects.
-* In asynchronous mode using a callback, it is the user's responsibility to **ensure the callback & the context (if used) remain valid throughout the whole request lifecycle**! Otherwise, a crash may occur as the library could try to access dangling memory locations. You are free to release the objects after the callback returns.
-{% endhint %}
+!!! warning
+    * In asynchronous mode using a result tracker, it is the user’s responsibility to **ensure both the response placeholder & the tracker are valid throughout the whole request lifecycle**! Otherwise, a crash may occur as the library could try to access dangling memory locations. Once the tracker has updated to any other value than `NODATA`, it is safe to release the objects.
+    * In asynchronous mode using a callback, it is the user's responsibility to **ensure the callback & the context (if used) remain valid throughout the whole request lifecycle**! Otherwise, a crash may occur as the library could try to access dangling memory locations. You are free to release the objects after the callback returns.
 
 ## Managing multiple devices
 

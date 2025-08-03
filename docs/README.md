@@ -2,7 +2,7 @@
 
 ## Welcome to the EZModbus documentation !
 
-EZModbus is a **C++ Modbus RTU/TCP library based on FreeRTOS**, initially designed for ESP32 projects on Arduino & ESP-IDF, and extended for RPi Pico & STM32 platforms on their native SDKs.
+EZModbus is a **C++ Modbus RTU/TCP library based on FreeRTOS**, designed for ESP32 projects on Arduino & ESP-IDF.
 
 It aims to offers a refreshing alternative to other Modbus implementations by prioritizing user experience, flexibility and efficiency, with a fully asynchronous & event-driven approach.
 
@@ -10,8 +10,8 @@ This documentation covers most aspects of the library from installation to advan
 
 ## Key features
 
-- Compatible with ESP32 (ESP-IDF & Arduino frameworks), RPi Pico (Pico SDK) & STM32 (STM32CubeMX)
-- Support for Modbus RTU (UART/RS-485) & Modbus TCP (netif, CH9120)
+- Compatible with both ESP-IDF & Arduino frameworks
+- Support for Modbus RTU (UART/RS-485) & Modbus TCP (WiFi/Ethernet/netif)
 - Client, Server & Bridge components included, compatible with both protocols
 - Easy coupling of components to suit any Modbus application needs
 - Thread-safe & no-lock public API, easy to implement with "expert" use cases possible
@@ -22,5 +22,5 @@ This documentation covers most aspects of the library from installation to advan
 ## Repository & release version
 
 * Repository URL : [https://github.com/pierrejay/EZModbus/](https://github.com/pierrejay/EZModbus/)
-* Release version : `v1.1.3`
+* Release version : `v1.1.4`
 
