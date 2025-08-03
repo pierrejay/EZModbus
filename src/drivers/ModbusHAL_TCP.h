@@ -19,7 +19,7 @@
 #ifndef EZMODBUS_HAL_TCP_MAX_ACTIVE_SOCKETS // TCP max active sockets (#)
     #define EZMODBUS_HAL_TCP_MAX_ACTIVE_SOCKETS 4
 #endif
-#ifndef EZMODBUS_HAL_TCP_RX_Q_SIZE // TCP RX queue size (# of frames)
+#ifndef EZMODBUS_HAL_TCP_RX_Q_SIZE // TCP RX queue size (# of frames to be signaled)
     #define EZMODBUS_HAL_TCP_RX_Q_SIZE 16
 #endif
 #ifndef EZMODBUS_HAL_TCP_TASK_STACK_SIZE // TCP RX/TX task stack size (bytes)
@@ -37,6 +37,15 @@ public:
     static constexpr size_t RX_QUEUE_SIZE = (size_t)EZMODBUS_HAL_TCP_RX_Q_SIZE; // Number of Modbus frames the RX queue can hold
     static constexpr size_t TCP_TASK_STACK_SIZE = (size_t)EZMODBUS_HAL_TCP_TASK_STACK_SIZE;
     static constexpr size_t MAX_MODBUS_FRAME_SIZE = 260;  // Modbus TCP max frame size (MBAP + PDU)
+    static constexpr uint32_t SELECT_TIMEOUT_MS = 1000; // select() timeout in milliseconds (1s = low CPU usage)
+    static constexpr uint32_t CONNECT_TIMEOUT_SEC = 5;  // Connect timeout in seconds (5s)
+
+    // Recovery configuration constants
+    static constexpr int MAX_SELECT_ERRORS = 5;               // Max select() errors before long sleep
+    static constexpr uint32_t SELECT_RECOVERY_SLEEP_MS = 2000; // Sleep after MAX_SELECT_ERRORS (2s)
+    static constexpr uint32_t SELECT_BACKOFF_BASE_MS = 1000;   // Progressive backoff base (1s)
+    static constexpr int MAX_EMPTY_HITS = 3;                   // Max empty rounds before anti-spin pause
+    static constexpr uint32_t ANTI_SPIN_DELAY_MS = 10;        // Anti-spin EAGAIN delay (10ms)
 
     // Structure for messages exchanged between HAL and Modbus layer
     struct TCPMsg {
@@ -46,7 +55,7 @@ public:
     };
 
     TCP();
-    explicit TCP(uint16_t serverPort);                       // Serveur
+    explicit TCP(uint16_t serverPort);                       // Server
     TCP(const char* serverIP, uint16_t port);                // Client
     ~TCP();
 
@@ -73,6 +82,7 @@ public:
     size_t getActiveSocketCount();
     bool isServerRunning() const;
     bool isClientConnected();
+    bool isReady();
 
     // Get HAL configuration mode (server/client/uninit)
     CfgMode getMode() const { return _cfgMode; }
@@ -92,6 +102,7 @@ private:
     bool setupServerSocket(uint16_t port, uint32_t ip);
     bool setupClientSocket(const char* serverIP, uint16_t port);
     void closeSocket(int sock);
+    void cleanupDeadSockets();  // Clean up dead sockets (EBADF recovery)
 
     // Internal state
     TaskHandle_t _tcpTaskHandle;
