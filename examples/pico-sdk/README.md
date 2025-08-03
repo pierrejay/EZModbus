@@ -6,12 +6,28 @@ This directory contains examples and test programs for EZModbus on RP2040/RP2350
 
 ```
 examples/pico-sdk/
+│
+│   # System files (build requirements)
+├── freertos/                  # FreeRTOS configuration
+├── CMakeLists.txt             # CMakeLists.txt to build examples
+├── pico_sdk_import.cmake      # Pico SDK import script
+│
+│   # Examples files
 ├── README.md                  # This documentation
-├── rtu_loopback_main.cpp      # RTU loopback test (internal UART)
+├── rtu_loopback_main.cpp      # RTU loopback test (local UART loop)
 ├── tcp_server_main.cpp        # Modbus TCP server via CH9120
 ├── tcp_client_main.cpp        # Modbus TCP client via CH9120
 ├── modbus_echo_server.py      # Python test server for Pico client
 └── modbus_client_tester.py    # Python automated tester for Pico server
+```
+This directory is arranged so you can build the examples directly from a local clone of the EZModbus repo (they are standalone Pico projects). The only prerequisite is to have FreeRTOS installed in your SDK folder - only the configuration files are supplied here.
+
+The `CMakeLists.txt` will find the EZModbus library sources in the parent folder. If you copy those examples in a local directory/project, you will need to edit its path to point to the correct `EZModbus` folder path :
+
+```cmake
+# Add EZModbus & link it with FreeRTOS
+add_subdirectory(../../lib/EZModbus ezmodbus) # <- Edit this path
+target_link_libraries(ezmodbus PUBLIC freertos)
 ```
 
 ## Network Configuration
