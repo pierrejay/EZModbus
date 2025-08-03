@@ -27,7 +27,7 @@ inline Result Error(Result res, const char* desc = nullptr
     #endif
     #if defined(EZMODBUS_EVENTBUS)
         // Capture address when calling from a class instance
-        Modbus::EventBus::push(res, desc, this, ctx); 
+        Modbus::EventBus::pushResult(res, desc, this, ctx); 
     #endif
     return res;
 }
@@ -75,7 +75,7 @@ static inline Result Error(Result res, const char* desc = nullptr
     #endif
     #if defined(EZMODBUS_EVENTBUS)
         // Use the raw method with nullptr instance address when calling from a static class/function (e.g. ModbusCodec)
-        Modbus::EventBus::pushRaw(res, toString(res), desc, nullptr, ctx);
+        Modbus::EventBus::pushResultRaw(res, toString(res), desc, nullptr, ctx);
     #endif
     return res;
 }

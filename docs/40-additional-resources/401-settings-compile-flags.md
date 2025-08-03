@@ -99,13 +99,13 @@ target_compile_definitions(EZModbus PUBLIC
     * Stack size of TCP task (bytes)
     * Default: 4096, or 6144 if debug enabled
 
-### ModbusHAL\_UART.h
+### ModbusHAL_UART.h
 
 * **`EZMODBUS_HAL_UART_EVT_Q_SIZE`**
     * Size of IDF UART event queue (# events)
     * Default: 20
 
-### ModbusHAL\_TCP.h
+### ModbusHAL_TCP.h
 
 * **`EZMODBUS_HAL_TCP_RX_Q_SIZE`**
     * Size of TCP driver RX queue size (# frames)
@@ -140,4 +140,16 @@ target_compile_definitions(EZModbus PUBLIC
 * **`EZMODBUS_LOG_OUTPUT`**
     * Log output pipe (Serial port)
     * Default: `Serial` on Arduino, `UART_NUM_MAX` on ESP-IDF (will enable default console output)
+
+### ModbusEventBus.hpp
+
+* **`EZMODBUS_EVENTBUS`**
+    * Enables EventBus system for production monitoring
+    * Default: undefined = disabled (no value, just a flag)
+* **`EZMODBUS_EVENTBUS_Q_SIZE`**
+    * EventBus queue size (# events)
+    * Default: 16
+* **`EZMODBUS_EVENTBUS_INSTANCE_FILTER_SIZE`**
+    * Number of instances that can be filtered out
+    * Default: 8
 

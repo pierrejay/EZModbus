@@ -73,10 +73,10 @@ public:
      * @note This version is used for calls from class instances that have a Result type & toString() method
      */
     template<typename T>
-    static inline void push(typename T::Result res, 
-                            const char* desc, 
-                            const T* instance, 
-                            ModbusTypeDef::CallCtx ctx = ModbusTypeDef::CallCtx()) {
+    static inline void pushResult(typename T::Result res, 
+                                  const char* desc, 
+                                  const T* instance, 
+                                  ModbusTypeDef::CallCtx ctx = ModbusTypeDef::CallCtx()) {
         if (!begin()) return;
         
         uintptr_t instanceAddr = reinterpret_cast<uintptr_t>(instance);
@@ -105,10 +105,10 @@ public:
      * @note This version is used for calls from class instances that have a Result type & toString() method
      */
     template<typename T>
-    static inline void pushFromISR(typename T::Result res, 
-                                    const char* desc, 
-                                    const T* instance, 
-                                    ModbusTypeDef::CallCtx ctx) {
+    static inline void pushResultFromISR(typename T::Result res, 
+                                         const char* desc, 
+                                         const T* instance, 
+                                         ModbusTypeDef::CallCtx ctx) {
         if (!begin()) return;
         
         uintptr_t instanceAddr = reinterpret_cast<uintptr_t>(instance);
@@ -130,18 +130,18 @@ public:
     }
 
     /* @brief Push an event to the event bus
-     * @param res Result code
+     * @param res Result code (casted to uint16_t)
      * @param resultStr Result string
      * @param desc Additional description
      * @param instance Instance of caller class
      * @param ctx Call context (optional - hidden parameter)
      * @note This version is used for calls from static classes/functions (e.g. ModbusCodec)
      */
-    static inline void pushRaw(uint16_t res, 
-                            const char* resultStr,
-                            const char* desc, 
-                            const void* instance, 
-                            ModbusTypeDef::CallCtx ctx = ModbusTypeDef::CallCtx()) {
+    static inline void pushResultRaw(uint16_t res, 
+                                     const char* resultStr,
+                                     const char* desc, 
+                                     const void* instance, 
+                                     ModbusTypeDef::CallCtx ctx = ModbusTypeDef::CallCtx()) {
         if (!begin()) return;
         
         uintptr_t instanceAddr = reinterpret_cast<uintptr_t>(instance);
@@ -163,18 +163,18 @@ public:
     }
     
     /* @brief Push an event to the event bus from ISR
-     * @param res Result code
+     * @param res Result code (casted to uint16_t)
      * @param resultStr Result string
      * @param desc Additional description
      * @param instance Instance of caller class
      * @param ctx Call context (optional - hidden parameter)
      * @note This version is used for calls from static classes/functions (e.g. ModbusCodec)
      */
-    static inline void pushRawFromISR(uint16_t res, 
-                                    const char* resultStr,
-                                    const char* desc, 
-                                    const void* instance, 
-                                    ModbusTypeDef::CallCtx ctx) {
+    static inline void pushResultRawFromISR(uint16_t res, 
+                                            const char* resultStr,
+                                            const char* desc, 
+                                            const void* instance, 
+                                            ModbusTypeDef::CallCtx ctx) {
         if (!begin()) return;
         
         uintptr_t instanceAddr = reinterpret_cast<uintptr_t>(instance);
@@ -196,13 +196,15 @@ public:
     }
 
     /* @brief Push a successful request event to the event bus (optimized for success cases)
-     * @param request Modbus request frame (converted to metadata internally)
+     * @param request Modbus request frame converted to FrameMeta
+     * @param res Result code for processing the request
      * @param instance Instance of caller class
      * @param ctx Call context (optional - hidden parameter)
      * @note This version is optimized for successful request logging - no string formatting overhead
      */
     template<typename T>
-    static inline void pushRequest(const Modbus::Frame& request,
+    static inline void pushRequest(const Modbus::FrameMeta& request,
+                                   typename T::Result res,
                                    const T* instance,
                                    ModbusTypeDef::CallCtx ctx = ModbusTypeDef::CallCtx()) {
         if (!begin()) return;
@@ -212,10 +214,10 @@ public:
         
         Record rcd = {
             .eventType = EVENT_REQUEST,
-            .result = static_cast<uint16_t>(T::SUCCESS),
-            .resultStr = T::toString(T::SUCCESS),
-            .desc = nullptr, // No description needed for success
-            .requestInfo = Modbus::FrameMeta(request), // Convert Frame to FrameMeta
+            .result = static_cast<uint16_t>(res),
+            .resultStr = T::toString(res),
+            .desc = nullptr, // No description for Request events
+            .requestInfo = request,
             .instance = instanceAddr,
             .timestampUs = TIME_US(),
             .fileName = ModbusTypeDef::getBasename(ctx.file),
@@ -339,10 +341,19 @@ private:
     // disable calls to class methods (will not evaluate args)
 
     template<typename... Args>
-    static void push(Args&&...) {}
+    static void pushResult(Args&&...) {}
     
     template<typename... Args>
-    static void pushFromISR(Args&&...) {}
+    static void pushResultFromISR(Args&&...) {}
+
+    template<typename... Args>
+    static void pushResultRaw(Args&&...) {}
+    
+    template<typename... Args>
+    static void pushResultRawFromISR(Args&&...) {}
+
+    template<typename... Args>
+    static void pushRequest(Args&&...) {}
     
     template<typename... Args>
     static bool begin(Args&&...) { return true; }

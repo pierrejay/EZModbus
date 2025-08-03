@@ -104,7 +104,8 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
     Lock guard(_serverMutex, 0);
     if (!guard.isLocked()) {
         // A request is already being processed, ignore this one
-        return Error(Server::ERR_RCV_BUSY);
+        EventBus::pushRequest(Modbus::FrameMeta(request), Server::ERR_RCV_BUSY, this);
+        return Error(Server::ERR_RCV_BUSY, "received request while busy");
     }
 
     _responseBuffer.clear();
@@ -118,9 +119,17 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
                         && (request.slaveId != _serverId)
                         && !broadcastRequest; // We drop requests not addressed to us
 
-    // We ignore requests not addressed to us & unsolicited responses
-    if (dropRequest) return Error(Server::ERR_RCV_WRONG_SLAVE_ID);
-    if (request.type != Modbus::REQUEST) return Error(Server::ERR_RCV_INVALID_TYPE);
+    // We ignore requests not addressed to us & reject unsolicited responses
+    if (dropRequest) {
+        // Commented out: we don't want to log this to avoid spamming the event bus
+        // EventBus::pushRequest(request, Server::ERR_RCV_WRONG_SLAVE_ID, this);
+        // return Error(Server::ERR_RCV_WRONG_SLAVE_ID, "received request not addressed to us");
+        return Success();
+    }
+    if (request.type != Modbus::REQUEST) {
+        EventBus::pushRequest(Modbus::FrameMeta(request), Server::ERR_RCV_INVALID_TYPE, this);
+        return Error(Server::ERR_RCV_INVALID_TYPE, "received unsolicited response or invalid request type");
+    }
 
     // Reject read requests in broadcast mode according to Modbus spec
     bool isWrite = (request.fc == Modbus::WRITE_REGISTER || 
@@ -128,7 +137,8 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
                     request.fc == Modbus::WRITE_COIL ||
                     request.fc == Modbus::WRITE_MULTIPLE_COILS);
     if (broadcastRequest && !isWrite) {
-        return Error(Server::ERR_RCV_ILLEGAL_FUNCTION);
+        EventBus::pushRequest(Modbus::FrameMeta(request), Server::ERR_RCV_ILLEGAL_FUNCTION, this);
+        return Error(Server::ERR_RCV_ILLEGAL_FUNCTION, "received read request in broadcast mode");
     }
 
     // Prepare the response
@@ -145,27 +155,32 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
     if (!ModbusCodec::isValidFunctionCode(static_cast<uint8_t>(request.fc))) {
         _responseBuffer.exceptionCode = Modbus::ILLEGAL_FUNCTION;
         if (!dropResponse) _interface.sendFrame(_responseBuffer, nullptr, nullptr);
+        EventBus::pushRequest(Modbus::FrameMeta(request), Server::ERR_RCV_ILLEGAL_FUNCTION, this);
         return Error(Server::ERR_RCV_ILLEGAL_FUNCTION);
     }
 
     // Process the request based on whether it's a read or write
+    Result handleRes;
     if (isWrite) {
-        handleWrite(request, _responseBuffer);
+        handleRes = handleWrite(request, _responseBuffer);
     } else {
-        handleRead(request, _responseBuffer);
+        handleRes = handleRead(request, _responseBuffer);
     }
 
     // Send the response (unless broadcast) - keep mutex locked during transmission
     if (!dropResponse) {
         Server::Result res = sendResponse(_responseBuffer);
-        if (res != Server::SUCCESS) return res;
+        if (res != Server::SUCCESS) {
+            EventBus::pushRequest(Modbus::FrameMeta(request), res, this);
+            return Error(res, "failed to send response back to client");
+        }
     }
 
-    // Log successful request processing (optimized POD approach)
-    #ifdef EZMODBUS_EVENTBUS
-    EventBus::pushRequest(request, this);
-    #endif
-
+    // Log request processing result
+    EventBus::pushRequest(Modbus::FrameMeta(request), handleRes, this);
+    if (handleRes != Server::SUCCESS) {
+        return Error(handleRes, "failed to handle request");
+    }
     return Success();
 }
 
@@ -588,7 +603,7 @@ Server::Result Server::addWords(const std::vector<Word>& words) {
     for (const auto& word : words) {
         Result res = addWordInternal(word);
         if (res != SUCCESS) {
-            return res;  // Return first error encountered
+            return Error(res, "failed to add word within batch");  // Return first error encountered
         }
     }
     
@@ -647,7 +662,7 @@ Server::Result Server::addWords(const Word* words, size_t count) {
     // 3) Insert each word
     for (size_t i = 0; i < count; ++i) {
         Result res = addWordInternal(words[i]);
-        if (res != SUCCESS) return res;
+        if (res != SUCCESS) return Error(res, "failed to add word within batch"); // Return first error encountered
     }
 
     return Success();
