@@ -159,6 +159,7 @@ void Client::PendingRequest::setResult(Result result, bool finalize) {
         cbSnapshot = _cb;
         ctxSnapshot = _cbCtx;
         if (finalize) {
+            EventBus::pushRequest(_reqMetadata, result, _client); // Log request processing result (only if finalized)
             resetUnsafe(); // also sets _active=false
         }
         notifySyncWaiterUnsafe(); // still inside mutex
@@ -168,9 +169,6 @@ void Client::PendingRequest::setResult(Result result, bool finalize) {
     // Invoke callback outside of critical section
     // Since we don't expect a response (failure or broadcast), we pass nullptr as response
     cbSnapshot(result, nullptr, ctxSnapshot);
-
-    // Log request processing result (only if the request is finalized)
-    if (finalize) EventBus::pushRequest(_reqMetadata, result, _client);
 }
 
 /* @brief Set the response for the pending request & update the result tracker
@@ -191,6 +189,7 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
         cbSnapshot = _cb;
         ctxSnapshot = _cbCtx;
         if (finalize) {
+            EventBus::pushRequest(_reqMetadata, result, _client); // Log request processing result (only if finalized)
             resetUnsafe(); // also sets _active=false
         }
         notifySyncWaiterUnsafe(); // still inside mutex
@@ -201,9 +200,6 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
     if (cbSnapshot) {
         cbSnapshot(result, &response, ctxSnapshot);
     }
-
-    // Log request processing result (only if the request is finalized)
-    if (finalize) EventBus::pushRequest(_reqMetadata, result, _client);
 }
 
 /* @brief Set the event group for synchronous waiting
