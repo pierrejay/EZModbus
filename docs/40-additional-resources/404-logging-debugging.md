@@ -84,17 +84,24 @@ The EventBus logs two types of events:
 
 #### 1. Enable EventBus
 
-Add the compile flag to your project (see [Settings (compile flags)](./401-settings-compile-flags.md))
+- Add the compile flag to your project (see [Settings (compile flags)](./401-settings-compile-flags.md))
+- The EventBus will be automatically initialized when the first event is pushed, you don't need to call `begin()` manually.
 
-#### 2. Initialize the EventBus
+#### 2. Consume Events
 
-The EventBus must be initialized after the scheduler has started, otherwise FreeRTOS won't be able to create the queue.
+**Single Consumer API**
+
+The EventBus provides one method for reading events:
 
 ```cpp
-Modbus::EventBus::begin();
+static bool pop(Record& rcd, uint32_t timeoutMs = 0);
 ```
 
-#### 3. Consume Events
+- **Pending behavior**: When `timeoutMs > 0`, the method yields CPU control and lets other tasks execute during the wait period
+- **Non-blocking**: When `timeoutMs = 0`, returns immediately if no events are available
+- **Return value**: `true` if an event was retrieved, `false` on timeout or no events
+
+**Usage Pattern Example**
 
 Example boilerplate of a task that processes events from the queue and prints them to the console:
 
