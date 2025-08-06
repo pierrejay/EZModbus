@@ -12,7 +12,7 @@ To run them, replace the content of your `main.cpp` file by the provided ones. N
 
 ## ESP-IDF
 
-The same examples as PlatformIO are available for IDF, with specific folders for each example :&#x20;
+The same examples as PlatformIO are available for IDF, with specific folders for each example :
 
 * **`/rtu-client`**: Modbus RTU client
 * **`/rtu-server`**: Modbus RTU server

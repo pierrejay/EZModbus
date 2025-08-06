@@ -34,7 +34,6 @@ UART::UART(uart_port_t uart_num,
         #else
             _current_hw_config.source_clk = UART_SCLK_APB;
         #endif
-        Modbus::Debug::LOG_MSGF("Constructor for port %d", _uart_num);
 }
 
 // Constructor from IDFConfig struct (always available)
@@ -62,7 +61,6 @@ UART::UART(HardwareSerial& serial_dev,
                     pin_rts_de) // Pass int directly, conversion handled by the delegated constructor
 {
     // The actual initialization is done by the delegated constructor.
-    Modbus::Debug::LOG_MSGF("Arduino constructor for UART port %d", getPort());
 }
 
 // Constructor from ArduinoConfig struct for Arduino

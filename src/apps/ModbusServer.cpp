@@ -104,8 +104,9 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
     Lock guard(_serverMutex, 0);
     if (!guard.isLocked()) {
         // A request is already being processed, ignore this one
-        EventBus::pushRequest(Modbus::FrameMeta(request), Server::ERR_RCV_BUSY, this);
-        return Error(Server::ERR_RCV_BUSY, "received request while busy");
+        Result ret = ERR_RCV_BUSY;
+        EventBus::pushRequest(Modbus::FrameMeta(request), static_cast<uint16_t>(ret), toString(ret), this);
+        return Error(ret, "received request while busy");
     }
 
     _responseBuffer.clear();
@@ -127,8 +128,9 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
         return Success();
     }
     if (request.type != Modbus::REQUEST) {
-        EventBus::pushRequest(Modbus::FrameMeta(request), Server::ERR_RCV_INVALID_TYPE, this);
-        return Error(Server::ERR_RCV_INVALID_TYPE, "received unsolicited response or invalid request type");
+        Result ret = ERR_RCV_INVALID_TYPE;
+        EventBus::pushRequest(Modbus::FrameMeta(request), static_cast<uint16_t>(ret), toString(ret), this);
+        return Error(ret, "received unsolicited response or invalid request type");
     }
 
     // Reject read requests in broadcast mode according to Modbus spec
@@ -137,8 +139,9 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
                     request.fc == Modbus::WRITE_COIL ||
                     request.fc == Modbus::WRITE_MULTIPLE_COILS);
     if (broadcastRequest && !isWrite) {
-        EventBus::pushRequest(Modbus::FrameMeta(request), Server::ERR_RCV_ILLEGAL_FUNCTION, this);
-        return Error(Server::ERR_RCV_ILLEGAL_FUNCTION, "received read request in broadcast mode");
+        Result ret = ERR_RCV_ILLEGAL_FUNCTION;
+        EventBus::pushRequest(Modbus::FrameMeta(request), static_cast<uint16_t>(ret), toString(ret), this);
+        return Error(ret, "received read request in broadcast mode");
     }
 
     // Prepare the response
@@ -155,8 +158,9 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
     if (!ModbusCodec::isValidFunctionCode(static_cast<uint8_t>(request.fc))) {
         _responseBuffer.exceptionCode = Modbus::ILLEGAL_FUNCTION;
         if (!dropResponse) _interface.sendFrame(_responseBuffer, nullptr, nullptr);
-        EventBus::pushRequest(Modbus::FrameMeta(request), Server::ERR_RCV_ILLEGAL_FUNCTION, this);
-        return Error(Server::ERR_RCV_ILLEGAL_FUNCTION);
+        Result ret = ERR_RCV_ILLEGAL_FUNCTION;
+        EventBus::pushRequest(Modbus::FrameMeta(request), static_cast<uint16_t>(ret), toString(ret), this);
+        return Error(ret);
     }
 
     // Process the request based on whether it's a read or write
@@ -171,13 +175,13 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
     if (!dropResponse) {
         Server::Result res = sendResponse(_responseBuffer);
         if (res != Server::SUCCESS) {
-            EventBus::pushRequest(Modbus::FrameMeta(request), res, this);
+            EventBus::pushRequest(Modbus::FrameMeta(request), static_cast<uint16_t>(res), toString(res), this);
             return Error(res, "failed to send response back to client");
         }
     }
 
     // Log request processing result
-    EventBus::pushRequest(Modbus::FrameMeta(request), handleRes, this);
+    EventBus::pushRequest(Modbus::FrameMeta(request), static_cast<uint16_t>(handleRes), toString(handleRes), this);
     if (handleRes != Server::SUCCESS) {
         return Error(handleRes, "failed to handle request");
     }

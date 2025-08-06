@@ -37,7 +37,7 @@ pico_sdk_init()
 add_subdirectory(freertos)
 
 # Add EZModbus & link it with FreeRTOS
-add_subdirectory(../.. ezmodbus)
+add_subdirectory(../../lib/EZModbus ezmodbus)
 target_link_libraries(ezmodbus PUBLIC freertos)
 
 # Enable debug and/or EventBus (optional)

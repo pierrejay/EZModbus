@@ -115,9 +115,6 @@ UART::UART(UART_HandleTypeDef* huart,
     
     // Register instance in static lookup table (STM32G0 has no pUserData)
     registerInstance(this);
-    
-    Modbus::Debug::LOG_MSGF("STM32 UART constructor for handle %p (DMA chunk: %u bytes, silence: %u us, FreeRTOS timer)", 
-                           _huart, (unsigned int)DMA_CHUNK_SIZE, (unsigned int)_silence_timeout_us);
 }
 
 // Constructor from STM32Config struct

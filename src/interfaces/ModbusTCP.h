@@ -15,12 +15,15 @@
     #define EZMODBUS_TCP_TXN_SAFETY_TIMEOUT 5000
 #endif
 
-#ifndef EZMODBUS_TCP_RXTX_TASK_STACK_SIZE // TCP RX/TX task stack size (bytes)
+#ifndef EZMODBUS_TCP_TASK_STACK_SIZE // TCP RX/TX task stack size (bytes)
     #ifdef EZMODBUS_DEBUG
-        #define EZMODBUS_TCP_RXTX_TASK_STACK_SIZE BYTES_TO_STACK_SIZE(6144)
+        #define EZMODBUS_TCP_TASK_STACK_SIZE BYTES_TO_STACK_SIZE(6144)
     #else
-        #define EZMODBUS_TCP_RXTX_TASK_STACK_SIZE BYTES_TO_STACK_SIZE(4096)
+        #define EZMODBUS_TCP_TASK_STACK_SIZE BYTES_TO_STACK_SIZE(4096)
     #endif
+#endif
+#ifndef EZMODBUS_TCP_TASK_PRIORITY // TCP RX/TX task priority
+    #define EZMODBUS_TCP_TASK_PRIORITY tskIDLE_PRIORITY + 3
 #endif
 
 namespace ModbusInterface {
@@ -38,7 +41,8 @@ public:
     static constexpr uint32_t TCP_TRANSACTION_SAFETY_TIMEOUT_MS = (uint32_t)EZMODBUS_TCP_TXN_SAFETY_TIMEOUT;
 
     // Tasks stack sizes (higher for debug to let room for the printf/hexdump buffers)
-    static constexpr uint32_t RXTX_TASK_STACK_SIZE = (uint32_t)EZMODBUS_TCP_RXTX_TASK_STACK_SIZE;
+    static constexpr uint32_t RXTX_TASK_STACK_SIZE = (uint32_t)EZMODBUS_TCP_TASK_STACK_SIZE;
+    static constexpr UBaseType_t RXTX_TASK_PRIORITY = (UBaseType_t)EZMODBUS_TCP_TASK_PRIORITY;
 
     // ===================================================================================
     // DATA STRUCTURES

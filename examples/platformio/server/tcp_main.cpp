@@ -8,6 +8,17 @@
 #include <WiFi.h>
 #include "EZModbus.h"
 
+// EZModbus debug configuration (optional if debug is not enabled)
+#ifdef EZMODBUS_DEBUG
+    // Debug print function for EZModbus - outputs to Arduino Serial
+    int Arduino_LogPrint(const char* msg, size_t len) {
+        return Serial.write(msg, len);
+    }
+
+    // Automatically register debug function
+    static Modbus::Debug::PrintFunctionSetter func(Arduino_LogPrint);
+#endif
+
 // Wi-Fi configuration
 #define WIFI_SSID "My-WiFi-Network"   // Your SSID here
 #define WIFI_PASS "mypassword1234"    // Your password here

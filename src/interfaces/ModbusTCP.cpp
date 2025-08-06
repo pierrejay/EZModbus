@@ -21,10 +21,10 @@ TCP::TCP(ModbusHAL::TCP& hal, Modbus::Role role)
     _role = role;
 
     if (role == Modbus::CLIENT) {
-        Modbus::Debug::LOG_MSG("ModbusInterface::TCP (Client) created – connect HAL before calling begin()");
+        // Modbus::Debug::LOG_MSG("ModbusInterface::TCP (Client) created – connect HAL before calling begin()"); // Removed - no logs in ctor
     } else {
-        _catchAllSlaveIds = true; // serveur : accepte tout UID
-        Modbus::Debug::LOG_MSG("ModbusInterface::TCP (Server) created – make sure HAL is listening before calling begin()");
+        _catchAllSlaveIds = true; // TCP server : accepts all UIDs
+        // Modbus::Debug::LOG_MSG("ModbusInterface::TCP (Server) created – make sure HAL is listening before calling begin()"); // Removed - no logs in ctor
     }
 }
 
@@ -112,7 +112,7 @@ TCP::Result TCP::begin() {
         /*pcName*/          "ModbusTCP_RxTxTask",
         /*usStackDepth*/    RXTX_TASK_STACK_SIZE,
         /*pvParameters*/    this,
-        /*uxPriority*/      tskIDLE_PRIORITY + 1,
+        /*uxPriority*/      RXTX_TASK_PRIORITY,
         /*puxStackBuffer*/  _rxTxTaskStack,
         /*xTaskBuffer*/     &_rxTxTaskBuffer
     );
@@ -198,11 +198,7 @@ bool TCP::isReady() {
     // (a server still accepts responses to pending client requests)
     if (_role == Modbus::CLIENT && _currentTransaction.active) return false;
 
-    if (_role == Modbus::CLIENT) {
-        return _tcpHAL.isClientConnected();
-    } else { // SERVER
-        return _tcpHAL.isServerRunning();
-    }
+    return _tcpHAL.isReady();
 }
 
 /* @brief Abort current transaction (cleanup hint from client)

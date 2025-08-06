@@ -4,7 +4,39 @@
 #include "test_helpers.h"
 #include "ModbusTestAgent.h"
 #include "ModbusTestClient.h"
-#include <utils/ModbusLogger.hpp>
+#include <utils/ModbusDebug.hpp>
+
+// ESP32 Logger compatibility wrapper
+namespace Modbus {
+namespace Logger {
+    static ModbusTypeDef::Mutex logMutex;
+    
+    void logf(const char* fmt, ...) {
+        ModbusTypeDef::Lock guard(logMutex);
+        va_list args;
+        va_start(args, fmt);
+        Serial.printf(fmt, args);
+        va_end(args);
+    }
+    
+    void logln(const char* msg = "") {
+        ModbusTypeDef::Lock guard(logMutex);
+        Serial.printf("%s\n", msg);
+    }
+    
+    void waitQueueFlushed() {
+        Serial.flush();
+    }
+}
+}
+
+// ESP32 Arduino print function for EZModbus debug output
+int ESP32_LogPrint_Serial(const char* msg, size_t len) {
+    ModbusTypeDef::Lock guard(Modbus::Logger::logMutex);
+    size_t written = Serial.write((const uint8_t*)msg, len);
+    Serial.flush();
+    return (written > 0) ? written : -1;
+}
 
 // Aliases for convenience
 using UART = ModbusHAL::UART;
@@ -1731,6 +1763,12 @@ void setup() {
     Serial.setTxBufferSize(2048);
     Serial.setRxBufferSize(2048);
     Serial.begin(115200);
+    
+    // Configure EZModbus debug output
+    #ifdef EZMODBUS_DEBUG
+    Modbus::Debug::setPrintFunction(ESP32_LogPrint_Serial);
+    #endif
+    
     vTaskDelay(pdMS_TO_TICKS(1000));
 
     // ModbusTestClient init

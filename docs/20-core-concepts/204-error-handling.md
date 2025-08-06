@@ -50,7 +50,7 @@ EZModbus propagates errors through its layered architecture. When a low-level er
 
 For example, if a CRC check fails in the RTU interface, this error is passed to the client, which then returns it to your code. This clear propagation path means you always know exactly where and why an operation failed.
 
-EZModbus offers two options (enabled with compile flags) to catch runtime errors, one for troubleshooting (`DEBUG`) and another more suited for production (`EVENTBUS`). Error that are never catched (such as invalid request to the Modbus server which is never polled by user code) also trigger a log trace or an error event. Lightweight "stack trace" that shows exactly where an error occurred. For instance, you might see log messages like:
+EZModbus offers two options (enabled with compile flags) to catch runtime errors, one for troubleshooting (`DEBUG`) and another more suited for production (`EVENTBUS`). Error that are never catched (such as invalid request to the Modbus server which is never polled by user code) also trigger a log trace or an error event. Debug traces behave like lightweight "stack traces" that show exactly where an error occurred. For instance, you might see log messages like:
 
 ```
 [ModbusCodec.h::isValidFrame:203] Error: Invalid function code

@@ -59,8 +59,7 @@ namespace Modbus {
 // Frame encoding/decoding
 namespace ModbusCodec {
     namespace RTU { /* ... */ }     // RTU frame codec
-    namespace TCP { /* ... */ }     // TCP frame codec  
-    namespace JSON { /* ... */ }    // JSON frame codec
+    namespace TCP { /* ... */ }     // TCP frame codec
 }
 
 // Transport layer management

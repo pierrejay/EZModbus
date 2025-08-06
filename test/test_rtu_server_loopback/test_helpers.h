@@ -4,11 +4,11 @@
 #include <vector>
 #include <unity.h>
 #include "EZModbus.h"
-#include <utils/ModbusLogger.hpp>
+#include <utils/ModbusDebug.hpp>
 
 // Give some time for the application logs to be printed before asserting
 #ifdef EZMODBUS_DEBUG
-    #define TEST_ASSERT_START() { Modbus::Logger::waitQueueFlushed(); }
+    #define TEST_ASSERT_START() { Modbus::LogSink::waitQueueFlushed(); vTaskDelay(pdMS_TO_TICKS(1)); }
 #else
     #define TEST_ASSERT_START() { vTaskDelay(pdMS_TO_TICKS(50)); }
 #endif

@@ -89,7 +89,7 @@ RTU::Result RTU::begin() {
         /*pcName*/          "ModbusRTU_RxTxTask", 
         /*usStackDepth*/    RXTX_TASK_STACK_SIZE,
         /*pvParameters*/    this,
-        /*uxPriority*/      tskIDLE_PRIORITY + 1,
+        /*uxPriority*/      RXTX_TASK_PRIORITY,
         /*puxStackBuffer*/  _rxTxTaskStack,
         /*xTaskBuffer*/     &_rxTxTaskBuffer
     );

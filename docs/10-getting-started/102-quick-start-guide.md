@@ -2,7 +2,7 @@
 
 This quick start guide presents the basic usage of EZModbus for `Client`, `Server` & `Bridge` applications, with the Arduino API.
 
-Other platforms only differ in not including `Arduino.h` & using their own struct or signature for UART/TCP configuration (see [Core concepts > HAL wrappers](../20-core-concepts/205-hal-wrappers.md#uartrs485-ezmodbus-approach-esp-idf-api), or check the platform-specific examples in the `examples/` folder of the repo)
+Other platforms only differ in not including `Arduino.h` & using their own struct or signature for UART/TCP configuration (see [Core concepts > HAL wrappers](../20-core-concepts/205-hal-wrappers.md), or check the platform-specific examples in the `examples/` folder of the repo)
 
 ## Modbus Client
 

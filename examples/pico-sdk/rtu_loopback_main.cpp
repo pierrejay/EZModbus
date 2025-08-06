@@ -19,6 +19,20 @@
 #include "EZModbus.h"
 
 // ===================================================================================
+// EZMODBUS DEBUG CONFIGURATION (optional if debug is not enabled)
+// ===================================================================================
+
+#ifdef EZMODBUS_DEBUG
+    // Debug print function for EZModbus - outputs to Pico stdio
+    int Pico_LogPrint(const char* msg, size_t len) {
+        return printf("%.*s", (int)len, msg);
+    }
+
+    // Automatically register debug function
+    static Modbus::Debug::PrintFunctionSetter func(Pico_LogPrint);
+#endif
+
+// ===================================================================================
 // LOG TAGS
 // ===================================================================================
 

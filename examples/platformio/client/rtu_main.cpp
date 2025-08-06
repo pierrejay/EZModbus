@@ -7,6 +7,17 @@
 #include <Arduino.h>
 #include "EZModbus.h"
 
+// EZModbus debug configuration (optional if debug is not enabled)
+#ifdef EZMODBUS_DEBUG
+    // Debug print function for EZModbus - outputs to Arduino Serial
+    int Arduino_LogPrint(const char* msg, size_t len) {
+        return Serial.write(msg, len);
+    }
+
+    // Automatically register debug function
+    static Modbus::Debug::PrintFunctionSetter func(Arduino_LogPrint);
+#endif
+
 // Thermostat Modbus configuration
 #define THERMOSTAT_SLAVE_ID 1
 

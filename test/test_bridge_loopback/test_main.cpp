@@ -4,13 +4,45 @@
 #include "test_params.h"
 #include "dummy_interface.h"
 #include <WiFi.h>
-#include <utils/ModbusLogger.hpp>
+#include <utils/ModbusDebug.hpp>
+
+// ESP32 Logger compatibility wrapper
+namespace Modbus {
+namespace Logger {
+    static ModbusTypeDef::Mutex logMutex;
+    
+    void logf(const char* fmt, ...) {
+        ModbusTypeDef::Lock guard(logMutex);
+        va_list args;
+        va_start(args, fmt);
+        Serial.printf(fmt, args);
+        va_end(args);
+    }
+    
+    void logln(const char* msg = "") {
+        ModbusTypeDef::Lock guard(logMutex);
+        Serial.printf("%s\n", msg);
+    }
+    
+    void waitQueueFlushed() {
+        Serial.flush();
+    }
+}
+}
+
+// ESP32 Arduino print function for EZModbus debug output
+int ESP32_LogPrint_Serial(const char* msg, size_t len) {
+    ModbusTypeDef::Lock guard(Modbus::Logger::logMutex);
+    size_t written = Serial.write((const uint8_t*)msg, len);
+    Serial.flush();
+    return (written > 0) ? written : -1;
+}
 
 using ByteBuffer = ModbusCodec::ByteBuffer;
 // Give some time for the application logs to be printed before asserting
 
 #ifdef EZMODBUS_DEBUG
-    #define TEST_ASSERT_START() { Modbus::Logger::waitQueueFlushed(); }
+    #define TEST_ASSERT_START() { Modbus::LogSink::waitQueueFlushed(); vTaskDelay(pdMS_TO_TICKS(1)); }
 #else
     #define TEST_ASSERT_START() { vTaskDelay(pdMS_TO_TICKS(50)); }
 #endif
@@ -306,6 +338,11 @@ void setup() {
     Serial.setTxBufferSize(2048);
     Serial.setRxBufferSize(2048);
     Serial.begin(115200);
+    
+    // Configure EZModbus debug output
+    #ifdef EZMODBUS_DEBUG
+    Modbus::Debug::setPrintFunction(ESP32_LogPrint_Serial);
+    #endif
     
     // Initialize UART HAL objects first (like in working RTU client/server code)
     Modbus::Logger::logln("[setup] Initializing EZModbus UART HAL...");

@@ -22,9 +22,7 @@ TCP::TCP(uart_inst_t* uart, uint32_t baudrate,
  _rxQueue(nullptr),
  _isConnected(false),
  _isRunning(false)
-{
-Modbus::Debug::LOG_MSG("ModbusHAL::TCP (Pico/CH9120) created");
-}
+{}
 
 // Unified constructor - auto-detects mode from NetworkConfig
 TCP::TCP(const CH9120Config& hwConfig, const CH9120Driver::NetworkConfig& netConfig)
@@ -38,7 +36,7 @@ TCP::TCP(const CH9120Config& hwConfig, const CH9120Driver::NetworkConfig& netCon
 // Validate that mode is TCP (not UDP) - security feature
 if (netConfig.mode == CH9120Driver::Mode::UDP_SERVER || 
    netConfig.mode == CH9120Driver::Mode::UDP_CLIENT) {
-   Modbus::Debug::LOG_MSG("ModbusHAL::TCP ERROR: UDP modes not supported for Modbus TCP");
+//    Modbus::Debug::LOG_MSG("ModbusHAL::TCP ERROR: UDP modes not supported for Modbus TCP"); // Removed - no logs in ctor
    _cfgMode = CfgMode::UNINIT;
    return;
 }
@@ -112,7 +110,7 @@ bool TCP::begin() {
         "ModbusHAL_TCP_Pico_CH9120",
         TCP_TASK_STACK_SIZE,
         this,
-        tskIDLE_PRIORITY + 2,
+        TCP_TASK_PRIORITY,
         _tcpTaskStack,
         &_tcpTaskBuf
     );
@@ -208,10 +206,16 @@ bool TCP::sendMsg(const uint8_t* payload, const size_t len, const int destSocket
     if (!_isRunning) {
         return false;
     }
-    // For a server we try to send even if previous client disconnected.
-    // For a client the connection must be active.
+    // Auto-reconnect in client mode if disconnected
     if (_cfgMode == CfgMode::CLIENT && !_isConnected) {
-        return false;
+        Modbus::Debug::LOG_MSG("TCP: Client disconnected, attempting reconnect...");
+        int connectResult = _ch9120.connect(_networkConfig, pdMS_TO_TICKS(10000));
+        if (connectResult != 0) {
+            Modbus::Debug::LOG_MSGF("TCP: Auto-reconnection failed with error %d", -connectResult);
+            return false;
+        }
+        _isConnected = true;
+        Modbus::Debug::LOG_MSG("TCP: Auto-reconnection successful");
     }
 
     if (!payload || len == 0 || len > MAX_MODBUS_FRAME_SIZE) {
@@ -271,6 +275,15 @@ bool TCP::isClientConnected() {
     return (_cfgMode == CfgMode::CLIENT) && _isConnected;
 }
 
+bool TCP::isReady() {
+    if (!_isRunning) return false;
+    if (_cfgMode == CfgMode::SERVER) {
+        return true;  // Server ready if running (CH9120 handles listening)
+    } else {
+        return _cfgMode == CfgMode::CLIENT;  // Client ready if configured
+    }
+}
+
 // ===================================================================================
 // PRIVATE METHODS
 // ===================================================================================
@@ -287,8 +300,9 @@ bool TCP::setupConnection() {
         // Client mode: connect to server
         int connectResult = _ch9120.connect(_networkConfig, pdMS_TO_TICKS(10000));
         if (connectResult != 0) {
-            Modbus::Debug::LOG_MSGF("TCP: Client connection failed with error %d", -connectResult);
-            return false;
+            Modbus::Debug::LOG_MSGF("WARNING: Initial client connection failed with error %d, will retry on first sendMsg", -connectResult);
+            _isConnected = false;
+            return true; // Continue anyway, allow auto-reconnect
         }
         _isConnected = true;
         Modbus::Debug::LOG_MSG("TCP: Client connected successfully");

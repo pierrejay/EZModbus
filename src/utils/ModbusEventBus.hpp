@@ -20,33 +20,32 @@
 
 namespace Modbus {
 
-/* @brief Event type for EventBus records */
-enum EventType : uint8_t {
-    EVENT_ERROR = 0,   // Error/exception event
-    EVENT_REQUEST = 1  // Successful request event
-};
-
 class EventBus {
 public:
 
     // ===================================================================================
     // TYPES
     // ===================================================================================
+
+    /* @brief Event type for EventBus records */
+    enum EventType : uint8_t {
+        EVT_RESULT = 0,   // Error/exception event
+        EVT_REQUEST = 1  // Successful request event
+    };
     
+    /* @brief Struct storing event data */
     struct Record {
-        // Event classification
-        EventType eventType;     // ERROR or REQUEST
-        // Payload
-        uint16_t result;         // Error/result code (enum casted)
-        const char* resultStr;   // toString(enum) - static string
-        const char* desc;        // Additional description - static string
-        // Modbus request info (valid only if eventType == EVENT_REQUEST)
-        Modbus::FrameMeta requestInfo; // Request metadata (POD struct)
-        // Context / origin
-        uintptr_t instance;      // Caller instance address
-        uint64_t timestampUs;    // TIME_US()
-        const char* fileName;    // Basename
-        uint16_t lineNo;         // Line number
+    // Event classification
+        EventType eventType;            // EVT_RESULT or EVT_REQUEST
+    // Payload
+        uint16_t result;                // Error/result code (enum casted)
+        const char* resultStr;          // toString(enum) - static string
+        Modbus::FrameMeta requestInfo;  // Request metadata (POD) - only for EVT_REQUEST
+    // Context / origin
+        uintptr_t instance;             // Caller instance address
+        uint64_t timestampUs;           // TIME_US()
+        const char* fileName;           // Basename
+        uint16_t lineNo;                // Line number
     };
 
     
@@ -59,225 +58,41 @@ public:
     static constexpr size_t EVT_SIZE = sizeof(Record);
 
 
+// Methods only defined if EventBus is enabled (and not in native test)
+#if defined(EZMODBUS_EVENTBUS) && !defined(NATIVE_TEST)
+
     // ===================================================================================
     // "PRODUCER" PUBLIC METHODS (used internally in lib)
     // ===================================================================================
 
-#if defined(EZMODBUS_EVENTBUS) && !defined(NATIVE_TEST)
-
-    /* @brief Push an event to the event bus
-     * @param res Result code
-     * @param desc Additional description
-     * @param instance Instance of caller class
-     * @param ctx Call context (optional - hidden parameter)
-     * @note This version is used for calls from class instances that have a Result type & toString() method
-     */
-    template<typename T>
-    static inline void pushResult(typename T::Result res, 
-                                  const char* desc, 
-                                  const T* instance, 
-                                  ModbusTypeDef::CallCtx ctx = ModbusTypeDef::CallCtx()) {
-        if (!begin()) return;
-        
-        uintptr_t instanceAddr = reinterpret_cast<uintptr_t>(instance);
-        if (_isFiltered(instanceAddr)) return;
-        
-        Record rcd = {
-            .eventType = EVENT_ERROR,
-            .result = static_cast<uint16_t>(res),
-            .resultStr = T::toString(res),
-            .desc = desc,
-            .requestInfo = {}, // Default (invalid) RequestInfo
-            .instance = instanceAddr,
-            .timestampUs = TIME_US(),
-            .fileName = ModbusTypeDef::getBasename(ctx.file),
-            .lineNo = static_cast<uint16_t>(ctx.line)
-        };
-        
-        _send(rcd);
-    }
+    static void pushResult(uint16_t res, 
+                              const char* resultStr,
+                              const void* instance = nullptr, 
+                              ModbusTypeDef::CallCtx ctx = ModbusTypeDef::CallCtx());
     
-    /* @brief Push an event to the event bus from ISR
-     * @param res Result code
-     * @param desc Additional description
-     * @param instance Instance of caller class
-     * @param ctx Call context (optional - hidden parameter)
-     * @note This version is used for calls from class instances that have a Result type & toString() method
-     */
-    template<typename T>
-    static inline void pushResultFromISR(typename T::Result res, 
-                                         const char* desc, 
-                                         const T* instance, 
-                                         ModbusTypeDef::CallCtx ctx) {
-        if (!begin()) return;
-        
-        uintptr_t instanceAddr = reinterpret_cast<uintptr_t>(instance);
-        if (_isFiltered(instanceAddr)) return;
-        
-        Record rcd = {
-            .eventType = EVENT_ERROR,
-            .result = static_cast<uint16_t>(res),
-            .resultStr = T::toString(res),
-            .desc = desc,
-            .requestInfo = {}, // Default (invalid) RequestInfo
-            .instance = instanceAddr,
-            .timestampUs = TIME_US(),
-            .fileName = ModbusTypeDef::getBasename(ctx.file),
-            .lineNo = static_cast<uint16_t>(ctx.line)
-        };
-        
-        _sendFromISR(rcd);
-    }
 
-    /* @brief Push an event to the event bus
-     * @param res Result code (casted to uint16_t)
-     * @param resultStr Result string
-     * @param desc Additional description
-     * @param instance Instance of caller class
-     * @param ctx Call context (optional - hidden parameter)
-     * @note This version is used for calls from static classes/functions (e.g. ModbusCodec)
-     */
-    static inline void pushResultRaw(uint16_t res, 
+    static void pushResultFromISR(uint16_t res, 
                                      const char* resultStr,
-                                     const char* desc, 
-                                     const void* instance, 
-                                     ModbusTypeDef::CallCtx ctx = ModbusTypeDef::CallCtx()) {
-        if (!begin()) return;
-        
-        uintptr_t instanceAddr = reinterpret_cast<uintptr_t>(instance);
-        if (_isFiltered(instanceAddr)) return;
-        
-        Record rcd = {
-            .eventType = EVENT_ERROR,
-            .result = res,
-            .resultStr = resultStr,
-            .desc = desc,
-            .requestInfo = {}, // Default (invalid) RequestInfo
-            .instance = instanceAddr,
-            .timestampUs = TIME_US(),
-            .fileName = ModbusTypeDef::getBasename(ctx.file),
-            .lineNo = static_cast<uint16_t>(ctx.line)
-        };
-        
-        _send(rcd);
-    }
-    
-    /* @brief Push an event to the event bus from ISR
-     * @param res Result code (casted to uint16_t)
-     * @param resultStr Result string
-     * @param desc Additional description
-     * @param instance Instance of caller class
-     * @param ctx Call context (optional - hidden parameter)
-     * @note This version is used for calls from static classes/functions (e.g. ModbusCodec)
-     */
-    static inline void pushResultRawFromISR(uint16_t res, 
-                                            const char* resultStr,
-                                            const char* desc, 
-                                            const void* instance, 
-                                            ModbusTypeDef::CallCtx ctx) {
-        if (!begin()) return;
-        
-        uintptr_t instanceAddr = reinterpret_cast<uintptr_t>(instance);
-        if (_isFiltered(instanceAddr)) return;
-        
-        Record rcd = {
-            .eventType = EVENT_ERROR,
-            .result = res,
-            .resultStr = resultStr,
-            .desc = desc,
-            .requestInfo = {}, // Default (invalid) RequestInfo
-            .instance = instanceAddr,
-            .timestampUs = TIME_US(),
-            .fileName = ModbusTypeDef::getBasename(ctx.file),
-            .lineNo = static_cast<uint16_t>(ctx.line)
-        };
-        
-        _sendFromISR(rcd);
-    }
+                                     const void* instance = nullptr, 
+                                     ModbusTypeDef::CallCtx ctx = ModbusTypeDef::CallCtx());
 
-    /* @brief Push a successful request event to the event bus (optimized for success cases)
-     * @param request Modbus request frame converted to FrameMeta
-     * @param res Result code for processing the request
-     * @param instance Instance of caller class
-     * @param ctx Call context (optional - hidden parameter)
-     * @note This version is optimized for successful request logging - no string formatting overhead
-     */
-    template<typename T>
-    static inline void pushRequest(const Modbus::FrameMeta& request,
-                                   typename T::Result res,
-                                   const T* instance,
-                                   ModbusTypeDef::CallCtx ctx = ModbusTypeDef::CallCtx()) {
-        if (!begin()) return;
-        
-        uintptr_t instanceAddr = reinterpret_cast<uintptr_t>(instance);
-        if (_isFiltered(instanceAddr)) return;
-        
-        Record rcd = {
-            .eventType = EVENT_REQUEST,
-            .result = static_cast<uint16_t>(res),
-            .resultStr = T::toString(res),
-            .desc = nullptr, // No description for Request events
-            .requestInfo = request,
-            .instance = instanceAddr,
-            .timestampUs = TIME_US(),
-            .fileName = ModbusTypeDef::getBasename(ctx.file),
-            .lineNo = static_cast<uint16_t>(ctx.line)
-        };
-        
-        _send(rcd);
-    }
+
+    static void pushRequest(const Modbus::FrameMeta& request,
+                               uint16_t res,
+                               const char* resultStr,
+                               const void* instance = nullptr,
+                               ModbusTypeDef::CallCtx ctx = ModbusTypeDef::CallCtx());
+
+    static bool begin();
+
 
     // ===================================================================================
     // "CONSUMER" PUBLIC METHODS (USER API)
     // ===================================================================================
 
-    /* @brief Initialize the event bus, or check if it is already initialized
-     * @return True if initialization was successful, false otherwise
-     */
-    static bool begin() {
-        if (_initialized) return true; // Already initialized
-
-        ModbusTypeDef::Lock lock(_initMutex);         // Not initialized: try to lock the mutex
-        if (_initialized) return true; // Double check if another thread already did the job in the meantime
-        
-        _queue = xQueueCreateStatic(QUEUE_SIZE, sizeof(Record), (uint8_t*)_queueStorage, &_queueBuffer);
-        if (!_queue) return false;
-        
-        _droppedCount = 0;
-        
-        // Clear filter instances
-        for (size_t i = 0; i < INSTANCE_FILTER_SIZE; i++) {
-            _filteredInstances[i] = 0;
-        }
-        
-        _initialized = true;
-        return true;
-    }
-    
-    static bool pop(Record& rcd, uint32_t timeoutMs = 0) {
-        if (!_initialized) return false;
-        return xQueueReceive(_queue, &rcd, pdMS_TO_TICKS(timeoutMs)) == pdPASS;
-    }
-    
-    static bool filterOut(void* instance) {
-        uintptr_t instanceAddr = (uintptr_t)instance;
-        
-        // Find first empty slot
-        for (size_t i = 0; i < INSTANCE_FILTER_SIZE; i++) {
-            if (_filteredInstances[i] == 0) {
-                _filteredInstances[i] = instanceAddr;
-                return true;
-            }
-        }
-        return false; // No slot left
-    }
-    
-    /* @brief Get the number of dropped events
-     * @return Number of dropped events
-     */
-    static uint32_t getDroppedCount() {
-        return _droppedCount;
-    }
+    static bool pop(Record& rcd, uint32_t timeoutMs = 0);
+    static bool filterOut(void* instance);
+    static uint32_t getDroppedCount();
 
 private:
 
@@ -285,54 +100,26 @@ private:
     // PRIVATE METHODS
     // ===================================================================================
 
-    /* @brief Check if an instance is filtered out
-     * @param instanceAddr Instance address
-     * @return True if the instance is filtered out, false otherwise
-     */
-    static inline bool _isFiltered(uintptr_t instanceAddr) {
-        for (size_t i = 0; i < INSTANCE_FILTER_SIZE; i++) {
-            if (_filteredInstances[i] == instanceAddr) return true;
-        }
-        return false;
-    }
-    
-    /* @brief Send a record to the event bus
-     * @param rcd Record to send
-     */
-    static inline void _send(const Record& rcd) {
-        if (xQueueSend(_queue, &rcd, 0) != pdPASS) {
-            _droppedCount = _droppedCount + 1;
-        }
-    }
-    
-    /* @brief Send a record to the event bus from ISR
-     * @param rcd Record to send
-     */
-    static inline void _sendFromISR(const Record& rcd) {
-        // Do not yield to higher priority task, logs are not time-critical.
-        // Let the library be able to wake its own HP tasks in the ISR, they
-        // are probably more important than waking the logs consumer...
-        if (xQueueSendFromISR(_queue, &rcd, NULL) != pdPASS) {
-            _droppedCount = _droppedCount + 1;
-        }
-    }
+    static bool _isFiltered(uintptr_t instanceAddr);
+    static void _send(const Record& rcd);
+    static void _sendFromISR(const Record& rcd);
 
     // ===================================================================================
     // PRIVATE MEMBERS
     // ===================================================================================
 
     // State
-    inline static volatile bool _initialized = false;
-    inline static ModbusTypeDef::Mutex _initMutex; // Mutex to prevent race condition on initialization
-    inline static volatile uint32_t _droppedCount = 0;
+    static volatile bool _initialized;
+    static ModbusTypeDef::Mutex _initMutex; // Mutex to prevent race condition on initialization
+    static volatile uint32_t _droppedCount;
     
     // Static FreeRTOS objects
-    inline static StaticQueue_t _queueBuffer;
-    inline static Record _queueStorage[QUEUE_SIZE];
-    inline static QueueHandle_t _queue = nullptr;
+    static StaticQueue_t _queueBuffer;
+    static Record _queueStorage[QUEUE_SIZE];
+    static QueueHandle_t _queue;
     
     // Instance filtering
-    inline static uintptr_t _filteredInstances[INSTANCE_FILTER_SIZE];
+    static uintptr_t _filteredInstances[INSTANCE_FILTER_SIZE];
     
 
 #else // EZMODBUS_EVENTBUS not defined or NATIVE_TEST
@@ -345,12 +132,6 @@ private:
     
     template<typename... Args>
     static void pushResultFromISR(Args&&...) {}
-
-    template<typename... Args>
-    static void pushResultRaw(Args&&...) {}
-    
-    template<typename... Args>
-    static void pushResultRawFromISR(Args&&...) {}
 
     template<typename... Args>
     static void pushRequest(Args&&...) {}
@@ -368,6 +149,7 @@ private:
     static uint32_t getDroppedCount(Args&&...) { return 0; }
 
 #endif // EZMODBUS_EVENTBUS && !NATIVE_TEST
-};
+
+}; // class EventBus
 
 } // namespace Modbus

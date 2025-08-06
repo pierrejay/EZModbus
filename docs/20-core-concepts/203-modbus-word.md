@@ -1,6 +1,6 @@
 # Modbus::Word
 
-The `Modbus::Word` structure defines how your server exposes and manages **atomic blocks of registers** for Modbus clients to access.&#x20;
+The `Modbus::Word` structure defines how your server exposes and manages **atomic blocks of registers** for Modbus clients to access.
 
 A `Word` can be either :
 

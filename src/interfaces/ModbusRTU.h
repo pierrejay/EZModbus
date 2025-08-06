@@ -17,6 +17,9 @@
         #define EZMODBUS_RTU_TASK_STACK_SIZE BYTES_TO_STACK_SIZE(2048)
     #endif
 #endif
+#ifndef EZMODBUS_RTU_TASK_PRIORITY // RTU RX/TX task priority
+    #define EZMODBUS_RTU_TASK_PRIORITY tskIDLE_PRIORITY + 3
+#endif
 
 
 namespace ModbusInterface {
@@ -29,8 +32,9 @@ public:
 
     static constexpr uint32_t RXTX_QUEUE_CHECK_TIMEOUT_MS = 100;
 
-    // Tasks stack sizes
+    // Task settings
     static constexpr uint32_t RXTX_TASK_STACK_SIZE = (uint32_t)EZMODBUS_RTU_TASK_STACK_SIZE;
+    static constexpr UBaseType_t RXTX_TASK_PRIORITY = (UBaseType_t)EZMODBUS_RTU_TASK_PRIORITY;
 
     // ===================================================================================
     // DATA STRUCTURES

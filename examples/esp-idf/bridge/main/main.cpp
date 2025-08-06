@@ -12,6 +12,20 @@
 #include "EZModbus.h"
 
 // ===================================================================================
+// EZMODBUS DEBUG CONFIGURATION (optional if debug is not enabled)
+// ===================================================================================
+
+#ifdef EZMODBUS_DEBUG
+    // Debug print function for EZModbus - outputs to ESP32 console
+    int ESP32_LogPrint(const char* msg, size_t len) {
+        return fwrite(msg, 1, len, stdout);
+    }
+
+    // Automatically register debug function
+    static Modbus::Debug::PrintFunctionSetter func(ESP32_LogPrint);
+#endif
+
+// ===================================================================================
 // LOG TAGS
 // ===================================================================================
 

@@ -55,7 +55,7 @@ namespace ModbusHAL {
     class UART {
     public:
         // Configuration structures
-        struct ArduinoConfig {           // Arduino API
+        struct ArduinoConfig {           // ESP32 Arduino API
             HardwareSerial& serial;      // Serial1, Serial2, etc.
             uint32_t baud;               // Baud rate (9600, 19200...)
             uint32_t config;             // SERIAL_8N1, SERIAL_8E1...
@@ -63,7 +63,7 @@ namespace ModbusHAL {
             int dePin;                   // DE/RE pin (-1 = disabled)
         };
         
-        struct IDFConfig {               // ESP-IDF API  
+        struct IDFConfig {               // ESP32 ESP-IDF API  
             uart_port_t uartNum;         // UART_NUM_0, UART_NUM_1...
             uint32_t baud;               // Baud rate
             uint32_t config;             // CONFIG_8N1, CONFIG_8E1...
@@ -71,8 +71,27 @@ namespace ModbusHAL {
             gpio_num_t dePin;            // DE/RE pin (GPIO_NUM_NC = disabled)
         };
         
-        using Config = ArduinoConfig;    // Default (Arduino builds)
-        using Config = IDFConfig;        // Default (ESP-IDF builds)
+        struct PicoConfig {              // Raspberry Pi Pico
+            uart_inst_t* uart;           // uart0, uart1
+            uint32_t baud;               // Baud rate
+            uint32_t config;             // CONFIG_8N1, CONFIG_8E1...
+            uint8_t rxPin, txPin;        // GPIO pins
+            int8_t dePin;                // DE/RE pin (-1 = disabled)
+        };
+        
+        struct STM32Config {             // STM32
+            UART_HandleTypeDef* huart;   // UART handle from ST HAL
+            uint32_t baud;               // Baud rate (informational)
+            uint32_t config;             // CONFIG_8N1 (informational)
+            int dePin;                   // DE/RE pin (-1 = disabled)
+            GPIO_TypeDef* dePinPort;     // DE/RE GPIO port (defaults to GPIOA)
+        };
+        
+        // Platform-specific type alias
+        using Config = ArduinoConfig;    // ESP32 Arduino builds
+        using Config = IDFConfig;        // ESP32 ESP-IDF builds
+        using Config = PicoConfig;       // Pico SDK builds
+        using Config = STM32Config;      // STM32 builds
 
         // Constructors
         UART(const Config& config);
@@ -132,14 +151,14 @@ namespace ModbusHAL {
         };
         
         using CH9120Config = HardwareConfig;  // Alias for compatibility
-        
-        // =================================================================
-        // COMMON API
-        // =================================================================
 
         // Unified constructor (auto-detects server/client from NetworkConfig.mode)
         TCP(const HardwareConfig& hwConfig, 
             const NetworkConfig& netConfig);
+        
+        // =================================================================
+        // COMMON API
+        // =================================================================
 
         // Methods  
         bool begin();    // Initialize based on constructor mode
@@ -225,7 +244,7 @@ namespace Modbus {
         // TRANSPORT-LEVEL API (Frame-based)
         // =================================================================
         
-        // Sync / async (tracker)
+        // Sync (tracker = nullptr) / async (tracker defined)
         Result sendRequest(const Modbus::Frame& request,
                           Modbus::Frame& response,
                           Result* tracker = nullptr);

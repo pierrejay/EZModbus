@@ -6,7 +6,7 @@ Read the [Core concepts > Word](../20-core-concepts/203-modbus-word.md) section 
 
 ## Basic workflow
 
-The workflow of the server is simple:&#x20;
+The workflow of the server is simple:
 
 * You define your data model by adding a set of Words to the Server's store
 * When the server receives a request, it will look for registered Words that match the target registers contained in the request, and if the request is valid, individually read/write each Word through the pointer or callbacks (handlers) defined in the Words metadata
@@ -46,7 +46,7 @@ server.begin(); // -> Returns ERR_WORD_xxx upon failure
 
 Words are stored on the server inside a `Modbus::WordStore` container which can store an arbitrary number of `Word` objects regardless of their underlying `RegisterType`. This container is created in user code space (to keep in control of memory allocation) but directly managed by the Server.
 
-The optimal process is the following :&#x20;
+The optimal process is the following :
 
 1. Create the `WordStore` object on the stack or on the heap (see above example)
 2. Pass the `WordStore` to the `Server` constructor
@@ -75,7 +75,7 @@ The capacity defined in `WordStore` instanciation will be enforced by the server
 
 Each `Word` has an ~18 bytes RAM footprint, which becomes significant for thousands of Words registered on a server: using dynamic allocation may become necessary if the Word store grows too much and the stack cannot handle it.
 
-The `DynamicWordStore` is quite efficient because it allocates a fixed chunk of memory at the start of the program, so it won't be re-allocated at runtime, avoiding fragmentation & allocation errors.&#x20;
+The `DynamicWordStore` is quite efficient because it allocates a fixed chunk of memory at the start of the program, so it won't be re-allocated at runtime, avoiding fragmentation & allocation errors.
 
 On ESP32, the `DynamicWordStore` will be automatically added to PSRAM (if enabled) if its size exceeds the free memory on the initial 320 kB DRAM, which is quite interesting for large servers with > 10k registers.
 
@@ -121,7 +121,7 @@ server.addWord(tempWord);
 temperature = getSensorReading() * 100;  // Update the value any time
 ```
 
-Instead of the classical "struct w/ designated initializers" notation, you can also use a more straightforward syntax using a simple initializer list :&#x20;
+Instead of the classical "struct w/ designated initializers" notation, you can also use a more straightforward syntax using a simple initializer list :
 
 ```cpp
 Modbus::Word tempWord = {Modbus::INPUT_REGISTER, 100, 1, &temperature};
@@ -161,7 +161,7 @@ Modbus::ExceptionCode (*)(const uint16_t* writeVals, // Input values array
 
 **Return type**
 
-* Your read handlers must fill the output array `outVals` and return a `Modbus::ExceptionCode` that will be sent back to the client in case of read failure (`NULL_EXCEPTION` to signal success & send back response data to the client).&#x20;
+* Your read handlers must fill the output array `outVals` and return a `Modbus::ExceptionCode` that will be sent back to the client in case of read failure (`NULL_EXCEPTION` to signal success & send back response data to the client).
 * Your write handlers read the requested write value array `writeVals`, process data & must also return an exception code that indicates whether the write operation  succeeded.
 
 It is then possible to manage validation of client input data by returning a non-null Modbus exception in the handler (on the contrary, the direct pointer won't allow any validation step as it accesses the raw variable).
@@ -197,7 +197,7 @@ The use of the user context and the implications in terms of syntax is very simi
 
 #### Word declaration examples with handlers
 
-To keep the exemples clear, we assume that :&#x20;
+To keep the exemples clear, we assume that :
 
 * The handler definition is done globally (outside of your main program scope a.k.a. `main()`, `app_main()` , `setup()`/`loop()` or any FreeRTOS task).
 * The `addWord()` method is called in the main program scope
@@ -428,7 +428,7 @@ By default, the EZModbus Server _does reject_ calls to undefined registers with 
 Modbus::Server server(iface, store, slaveId, false); // false = no exception on undefined registers
 ```
 
-A simple example to illustrate this: let's say you have Words registered covering the following Input Registers :&#x20;
+A simple example to illustrate this: let's say you have Words registered covering the following Input Registers :
 
 ```
 [100, 102] : Temperature value

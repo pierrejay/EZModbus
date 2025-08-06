@@ -78,9 +78,7 @@ UART::UART(uart_inst_t* uart,
       _is_driver_started(false),
       _baud_rate(baud_rate),
       _config_flags(config_flags),
-      _dmaDriver(makeDmaDriver(uart, pin_tx, pin_rx, baud_rate, config_flags)) {
-    Modbus::Debug::LOG_MSGF("RP2040 UART constructor (DMA mode, uart=%p, config=0x%02X)", _uart, config_flags);
-}
+      _dmaDriver(makeDmaDriver(uart, pin_tx, pin_rx, baud_rate, config_flags)) {}
 
 // Constructor from PicoConfig struct
 UART::UART(const PicoConfig& config)

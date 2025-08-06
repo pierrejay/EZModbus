@@ -89,6 +89,9 @@ target_compile_definitions(EZModbus PUBLIC
 * **`EZMODBUS_RTU_TASK_STACK_SIZE`**
     * Stack size of RTU task (bytes)
     * Default: 2048, or 4096 if debug enabled
+* **`EZMODBUS_RTU_TASK_PRIORITY`**
+    * Priority of RTU task
+    * Default: `tskIDLE_PRIORITY + 3`
 
 ### ModbusTCP.h
 
@@ -98,6 +101,9 @@ target_compile_definitions(EZModbus PUBLIC
 * **`EZMODBUS_TCP_TASK_STACK_SIZE`**
     * Stack size of TCP task (bytes)
     * Default: 4096, or 6144 if debug enabled
+* **`EZMODBUS_TCP_TASK_PRIORITY`**
+    * Priority of TCP task
+    * Default: `tskIDLE_PRIORITY + 3`
 
 ### ModbusHAL_UART.h
 
@@ -113,6 +119,9 @@ target_compile_definitions(EZModbus PUBLIC
 * **`EZMODBUS_HAL_TCP_TASK_STACK_SIZE`**
     * Stack size of TCP driver task (bytes)
     * Default: 4096
+* **`EZMODBUS_HAL_TCP_TASK_PRIORITY`**
+    * Priority of TCP driver task
+    * Default: `tskIDLE_PRIORITY + 4`
 
 ### ModbusDebug.hpp
 
@@ -133,7 +142,7 @@ target_compile_definitions(EZModbus PUBLIC
     * Default: 256
 * **`EZMODBUS_LOG_TASK_PRIORITY`**
     * Priority of Log task
-    * Default: 1
+    * Default: `tskIDLE_PRIORITY + 1`
 * **`EZMODBUS_LOG_TASK_STACK_SIZE`**
     * Stack size of Log task (bytes)
     * Default: 4096

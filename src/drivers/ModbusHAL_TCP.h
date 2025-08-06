@@ -36,6 +36,9 @@
 #ifndef EZMODBUS_HAL_TCP_TASK_STACK_SIZE // TCP RX/TX task stack size (bytes)
     #define EZMODBUS_HAL_TCP_TASK_STACK_SIZE BYTES_TO_STACK_SIZE(4096)
 #endif
+#ifndef EZMODBUS_HAL_TCP_TASK_PRIORITY // TCP RX/TX task priority
+    #define EZMODBUS_HAL_TCP_TASK_PRIORITY tskIDLE_PRIORITY + 4
+#endif
 
 namespace ModbusHAL {
 
@@ -46,8 +49,10 @@ public:
     static constexpr size_t MAX_ACTIVE_SOCKETS = (size_t)EZMODBUS_HAL_TCP_MAX_ACTIVE_SOCKETS;
     static constexpr size_t RX_QUEUE_SIZE = (size_t)EZMODBUS_HAL_TCP_RX_Q_SIZE;
     static constexpr size_t TCP_TASK_STACK_SIZE = (size_t)EZMODBUS_HAL_TCP_TASK_STACK_SIZE;
+    static constexpr UBaseType_t TCP_TASK_PRIORITY = (UBaseType_t)EZMODBUS_HAL_TCP_TASK_PRIORITY;
     static constexpr size_t MAX_MODBUS_FRAME_SIZE = 260;  // Modbus TCP max frame size (MBAP + PDU)
     static constexpr uint32_t SELECT_TIMEOUT_MS = 1000;  // Select timeout in milliseconds (1s = low CPU usage)
+    static constexpr uint32_t CONNECT_TIMEOUT_SEC = 5;  // Connect timeout in seconds (5s)
     
     // Recovery configuration constants
     static constexpr int MAX_SELECT_ERRORS = 5;               // Max select() errors before long sleep
@@ -114,6 +119,7 @@ public:
     size_t getActiveSocketCount();
     bool isServerRunning() const;
     bool isClientConnected();
+    bool isReady();
 
     // Get HAL configuration mode (server/client/uninit)
     CfgMode getMode() const { return _cfgMode; }

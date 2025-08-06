@@ -159,7 +159,7 @@ void Client::PendingRequest::setResult(Result result, bool finalize) {
         cbSnapshot = _cb;
         ctxSnapshot = _cbCtx;
         if (finalize) {
-            EventBus::pushRequest(_reqMetadata, result, _client); // Log request processing result (only if finalized)
+            EventBus::pushRequest(_reqMetadata, result, toString(result), _client); // Log request processing result (only if finalized)
             resetUnsafe(); // also sets _active=false
         }
         notifySyncWaiterUnsafe(); // still inside mutex
@@ -189,7 +189,7 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
         cbSnapshot = _cb;
         ctxSnapshot = _cbCtx;
         if (finalize) {
-            EventBus::pushRequest(_reqMetadata, result, _client); // Log request processing result (only if finalized)
+            EventBus::pushRequest(_reqMetadata, result, toString(result), this); // Log request processing result (only if finalized)
             resetUnsafe(); // also sets _active=false
         }
         notifySyncWaiterUnsafe(); // still inside mutex

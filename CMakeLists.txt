@@ -26,6 +26,9 @@ set(EZMODBUS_SRCS_BASE
     ${CMAKE_CURRENT_LIST_DIR}/src/apps/ModbusServer.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/drivers/ModbusHAL_UART.cpp
     ${CMAKE_CURRENT_LIST_DIR}/src/interfaces/ModbusRTU.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/utils/ModbusDebug.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/utils/ModbusEventBus.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/utils/ModbusLogSink.cpp
 )
 
 set(EZMODBUS_SRCS_TCP
@@ -61,11 +64,17 @@ function(apply_ezmodbus_config TARGET_NAME)
     if(DEFINED EZMODBUS_RTU_TASK_STACK_SIZE)
         target_compile_definitions(${TARGET_NAME} PRIVATE EZMODBUS_RTU_TASK_STACK_SIZE=${EZMODBUS_RTU_TASK_STACK_SIZE})
     endif()
+    if(DEFINED EZMODBUS_RTU_TASK_PRIORITY)
+        target_compile_definitions(${TARGET_NAME} PRIVATE EZMODBUS_RTU_TASK_PRIORITY=${EZMODBUS_RTU_TASK_PRIORITY})
+    endif()
     if(DEFINED EZMODBUS_TCP_TXN_SAFETY_TIMEOUT)
         target_compile_definitions(${TARGET_NAME} PRIVATE EZMODBUS_TCP_TXN_SAFETY_TIMEOUT=${EZMODBUS_TCP_TXN_SAFETY_TIMEOUT})
     endif()
     if(DEFINED EZMODBUS_TCP_TASK_STACK_SIZE)
         target_compile_definitions(${TARGET_NAME} PRIVATE EZMODBUS_TCP_TASK_STACK_SIZE=${EZMODBUS_TCP_TASK_STACK_SIZE})
+    endif()
+    if(DEFINED EZMODBUS_TCP_TASK_PRIORITY)
+        target_compile_definitions(${TARGET_NAME} PRIVATE EZMODBUS_TCP_TASK_PRIORITY=${EZMODBUS_TCP_TASK_PRIORITY})
     endif()
     if(DEFINED EZMODBUS_HAL_UART_EVT_Q_SIZE)
         target_compile_definitions(${TARGET_NAME} PRIVATE EZMODBUS_HAL_UART_EVT_Q_SIZE=${EZMODBUS_HAL_UART_EVT_Q_SIZE})
@@ -75,6 +84,9 @@ function(apply_ezmodbus_config TARGET_NAME)
     endif()
     if(DEFINED EZMODBUS_HAL_TCP_TASK_STACK_SIZE)
         target_compile_definitions(${TARGET_NAME} PRIVATE EZMODBUS_HAL_TCP_TASK_STACK_SIZE=${EZMODBUS_HAL_TCP_TASK_STACK_SIZE})
+    endif()
+    if(DEFINED EZMODBUS_HAL_TCP_TASK_PRIORITY)
+        target_compile_definitions(${TARGET_NAME} PRIVATE EZMODBUS_HAL_TCP_TASK_PRIORITY=${EZMODBUS_HAL_TCP_TASK_PRIORITY})
     endif()
     if(DEFINED EZMODBUS_MAX_DEBUG_MSG_SIZE)
         target_compile_definitions(${TARGET_NAME} PRIVATE EZMODBUS_MAX_DEBUG_MSG_SIZE=${EZMODBUS_MAX_DEBUG_MSG_SIZE})

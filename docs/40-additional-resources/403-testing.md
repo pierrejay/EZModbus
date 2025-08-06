@@ -22,13 +22,13 @@ Each test category ensures key functionality works as expected:
 * CRC, MBAP, error handling
 * ~1500 frame tests
 
-**Server tests:**&#x20;
+**Server tests:**
 
 * Word storage
 * Request & exception handling
 * ~40 test cases
 
-**Client tests:**&#x20;
+**Client tests:**
 
 * Sync & async operations
 * Timeout handling, error recovery
@@ -42,7 +42,7 @@ For more details on the testing methodology, see the `test/` directory of the li
 
 ## Running tests with PlatformIO
 
-The `platformio.ini` file is configured with one environment for each test.&#x20;
+The `platformio.ini` file is configured with one environment for each test.
 
 It requires [pioarduino](https://github.com/pioarduino)'s `espressif32` platform to be installed before running the tests  (except `test_codec` which is compiled & run on the host machine), and the ESP32 board to be properly wired & connected via USB to the computer.
 

@@ -18,7 +18,7 @@ struct Frame {
 };
 ```
 
-The memory footprint of a `Frame` is fixed: 268 bytes. It is the size required to store the data of the largest request payload (on 125 registers or 2000 coils).&#x20;
+The memory footprint of a `Frame` is fixed: 268 bytes. It is the size required to store the data of the largest request payload (on 125 registers or 2000 coils).
 
 ## Definition
 

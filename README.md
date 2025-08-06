@@ -19,12 +19,12 @@ It aims to offers a refreshing alternative to other Modbus implementations by pr
 |--|--|--|--|--|
 |ESP32|Arduino|3.0.0|✅|✅|
 |ESP32|ESP-IDF|5.4.0|✅|✅ |
-|STM32|STM32CubeMX|6.14.1|✅|⚙️ LwIP+W5500|
-|RP2040<br>RP2350|Pico SDK|2.1.1|✅|✅ CH9120<br>⚙️ LwIP+W5500|
+|STM32|STM32CubeMX|6.14.1|✅|⚙️ W5500|
+|RP2040<br>RP2350|Pico SDK|2.1.1|✅|✅ CH9120<br>⚙️ W5500|
 
 ## Documentation
 
-The docs are hosted on GitHub pages: [EZModbus Docs](https://pierrejay.github.io/EZModbus/).
+The docs are hosted on ReadTheDocs: [EZModbus Docs](https://ezmodbus.readthedocs.io/en/latest/).
 
 ## License
 
@@ -32,4 +32,4 @@ EZModbus is released under the MIT License. See the LICENSE file for details.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit PRs or open issues. I'm always looking for ideas to improve EZModbus's robustness, performance, and memory usage & safety. Even without a PR, your advice and suggestions are greatly appreciated - don't hesitate to share your thoughts or expertise.
+Contributions welcome!
