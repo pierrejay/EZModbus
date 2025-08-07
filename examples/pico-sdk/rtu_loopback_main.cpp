@@ -302,19 +302,14 @@ void eventTask(void* param) {
 
             // Log the event
             printf("\r\n");
-            if (evt.eventType == Modbus::EVENT_REQUEST) {
+            if (evt.eventType == Modbus::EventBus::EVT_REQUEST) {
                 // Request event - show function code, address, count
                 printf("[%s] [%3f][%s:%u] REQUEST: %s addr=%u count=%u\n", 
                 TAG_EVENT_TASK,
                 timestamp, evt.fileName, evt.lineNo,
                 Modbus::toString(evt.requestInfo.fc), evt.requestInfo.regAddress, evt.requestInfo.regCount);
-            } else if (evt.desc && *evt.desc != '\0') {
-                // Error event with description
-                printf("[%s] [%3f][%s:%u] ERROR: %s (%s)\n", 
-                TAG_EVENT_TASK,
-                timestamp, evt.fileName, evt.lineNo, evt.resultStr, evt.desc);
             } else {
-                // Error event without description
+                // Error event
                 printf("[%s] [%3f][%s:%u] ERROR: %s\n", 
                 TAG_EVENT_TASK,
                 timestamp, evt.fileName, evt.lineNo, evt.resultStr);
