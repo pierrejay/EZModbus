@@ -123,17 +123,11 @@ target_compile_definitions(EZModbus PUBLIC
     * Priority of TCP driver task
     * Default: `tskIDLE_PRIORITY + 4`
 
-### ModbusDebug.hpp
+### ModbusDebug.hpp & ModbusLogSink.hpp
 
 * **`EZMODBUS_DEBUG`**
     * Enables Debug logs
     * Default: undefined = no logs (no value, just a flag)
-* **`EZMODBUS_MAX_DEBUG_MSG_SIZE`**
-    * Max length of debug message including null terminator (char)
-    * Default: 256
-
-### ModbusLogger.hpp
-
 * **`EZMODBUS_LOG_Q_SIZE`**
     * Log message queue size (# messages)
     * Default: 16
@@ -146,9 +140,6 @@ target_compile_definitions(EZModbus PUBLIC
 * **`EZMODBUS_LOG_TASK_STACK_SIZE`**
     * Stack size of Log task (bytes)
     * Default: 4096
-* **`EZMODBUS_LOG_OUTPUT`**
-    * Log output pipe (Serial port)
-    * Default: `Serial` on Arduino, `UART_NUM_MAX` on ESP-IDF (will enable default console output)
 
 ### ModbusEventBus.hpp
 
