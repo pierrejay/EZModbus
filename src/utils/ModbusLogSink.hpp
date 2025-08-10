@@ -33,20 +33,6 @@ public:
     static constexpr UBaseType_t TASK_PRIORITY = (UBaseType_t)EZMODBUS_LOG_TASK_PRIORITY;
     static constexpr uint32_t STACK_SIZE = (uint32_t)EZMODBUS_LOG_TASK_STACK_SIZE;
     static constexpr uint32_t LOG_PRINT_TIMEOUT_MS = 500;
-    
-    /**
-     * User-provided print function for EZModbus logs
-     * @param msg Message to print (null-terminated)
-     * @param len Length of message (excluding null terminator)
-     * @return int Status code:
-     *   -1 : Error occurred, skip this message
-     *    0 : Busy/would block, retry later
-     *   >0 : Success, number of characters printed
-     *        If less than 'len' characters were printed, the logger
-     *        will call the function again with the remaining portion
-     *        until the entire message is sent.
-     */
-    using PrintFunction = int(*)(const char* msg, size_t len);
 
     struct LogMessage {
         char msg[MAX_MSG_SIZE];
@@ -57,9 +43,6 @@ public:
 
     // Automatic initialization
     static void begin();
-    
-    // Set user-provided print function (internal API, use Modbus::Debug::setPrintFunction instead)
-    static void setPrintFunction(PrintFunction fn);
 
     // Low-copy logging methods - caller provides buffer, no internal buffering
     // WARNING: These methods MODIFY the provided buffer (normalize line endings, formatting)
@@ -75,9 +58,6 @@ private:
     static bool initialized;
     static QueueHandle_t logQueue;
     static TaskHandle_t logTaskHandle;
-    
-    // User-provided print function (nullptr = use platform-specific implementation)
-    static PrintFunction userPrintFn;
 
     // Send a message to the queue
     static void sendToQueue(const LogMessage& msg);

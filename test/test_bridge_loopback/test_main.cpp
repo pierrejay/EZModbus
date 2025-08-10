@@ -38,6 +38,10 @@ int ESP32_LogPrint_Serial(const char* msg, size_t len) {
     return (written > 0) ? written : -1;
 }
 
+int Modbus::Debug::printLog(const char* msg, size_t len) {
+    return ESP32_LogPrint_Serial(msg, len);
+}
+
 using ByteBuffer = ModbusCodec::ByteBuffer;
 // Give some time for the application logs to be printed before asserting
 
@@ -338,11 +342,6 @@ void setup() {
     Serial.setTxBufferSize(2048);
     Serial.setRxBufferSize(2048);
     Serial.begin(115200);
-    
-    // Configure EZModbus debug output
-    #ifdef EZMODBUS_DEBUG
-    Modbus::Debug::setPrintFunction(ESP32_LogPrint_Serial);
-    #endif
     
     // Initialize UART HAL objects first (like in working RTU client/server code)
     Modbus::Logger::logln("[setup] Initializing EZModbus UART HAL...");

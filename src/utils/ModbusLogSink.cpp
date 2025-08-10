@@ -4,6 +4,7 @@
  */
 
 #include "ModbusLogSink.hpp"
+#include "ModbusDebug.hpp" // For printLog()
 #include <cstdarg>  // For va_list, va_start, va_end
 
 #ifndef NATIVE_TEST
@@ -18,7 +19,6 @@ using Mutex = ModbusTypeDef::Mutex;
 bool LogSink::initialized = false;
 QueueHandle_t LogSink::logQueue = nullptr;
 TaskHandle_t LogSink::logTaskHandle = nullptr;
-LogSink::PrintFunction LogSink::userPrintFn = nullptr;
 
 /* @brief Initialize the log sink
  * @brief Creates the message queue and the logging task
@@ -43,14 +43,6 @@ void LogSink::begin() {
             initialized = true;
         }
     }
-}
-
-/* @brief Set the user-provided print function
- * @brief This function is used to set the user-provided print function
- * @param fn The user-provided print function
- */
-void LogSink::setPrintFunction(PrintFunction fn) {
-    userPrintFn = fn;
 }
 
 /* @brief Log a message with line ending
@@ -148,7 +140,8 @@ void LogSink::logf(char* buffer, const char* format, ...) {
     sendToQueue(msg);
 }
 
-// Wait for all messages to be flushed from the queue
+/* @brief Wait for all messages to be flushed from the queue
+ */
 void LogSink::waitQueueFlushed() {
     // Simple delay to allow queue to flush
     // Much simpler than event bits and avoids race conditions
@@ -162,43 +155,41 @@ void LogSink::waitQueueFlushed() {
 void LogSink::sendToQueue(const LogMessage& msg) {
     // If scheduler not started, use direct output
     if (xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) {
-        if (userPrintFn) {
-            // Direct call to user function before scheduler starts
-            // Use TIME_US() as TIME_MS() may depend on FreeRTOS
-            const char* ptr = msg.msg;
-            size_t remaining = strlen(msg.msg);
-            uint32_t startTimeUs = TIME_US();
+        // Direct call to user function before scheduler starts
+        // Use TIME_US() as TIME_MS() may depend on FreeRTOS
+        const char* ptr = msg.msg;
+        size_t remaining = strlen(msg.msg);
+        uint32_t startTimeUs = TIME_US();
+        
+        while (remaining > 0) {
+            int result = Modbus::Debug::printLog(ptr, remaining);
             
-            while (remaining > 0) {
-                int result = userPrintFn(ptr, remaining);
-                
-                if (result < 0) {
-                    // Error, skip this message
+            if (result < 0) {
+                // Error, skip this message
+                break;
+            } else if (result == 0) {
+                // Busy, check timeout (do NOT reload)
+                uint32_t currentTimeUs = TIME_US();
+                uint32_t elapsedMs = (currentTimeUs >= startTimeUs) ? 
+                    ((currentTimeUs - startTimeUs) / 1000) : 
+                    ((UINT32_MAX - startTimeUs + currentTimeUs + 1) / 1000); // Handle wraparound
+                if (elapsedMs > LOG_PRINT_TIMEOUT_MS) {
+                    // Timeout exceeded, abandon message
                     break;
-                } else if (result == 0) {
-                    // Busy, check timeout (do NOT reload)
-                    uint32_t currentTimeUs = TIME_US();
-                    uint32_t elapsedMs = (currentTimeUs >= startTimeUs) ? 
-                        ((currentTimeUs - startTimeUs) / 1000) : 
-                        ((UINT32_MAX - startTimeUs + currentTimeUs + 1) / 1000); // Handle wraparound
-                    if (elapsedMs > LOG_PRINT_TIMEOUT_MS) {
-                        // Timeout exceeded, abandon message
-                        break;
-                    }
-                    // No delay possible without scheduler, just retry immediately
-                    continue;
-                } else {
-                    // Success, advance pointer and RELOAD timeout
-                    // Security check: ensure result is not greater than remaining
-                    size_t bytes_written = (result > 0) ? static_cast<size_t>(result) : 0;
-                    if (bytes_written > remaining) {
-                        // User function returned invalid value, abort
-                        break;
-                    }
-                    ptr += bytes_written;
-                    remaining -= bytes_written;
-                    startTimeUs = TIME_US(); // Reload timeout on progress
                 }
+                // No delay possible without scheduler, just retry immediately
+                continue;
+            } else {
+                // Success, advance pointer and RELOAD timeout
+                // Security check: ensure result is not greater than remaining
+                size_t bytes_written = (result > 0) ? static_cast<size_t>(result) : 0;
+                if (bytes_written > remaining) {
+                    // User function returned invalid value, abort
+                    break;
+                }
+                ptr += bytes_written;
+                remaining -= bytes_written;
+                startTimeUs = TIME_US(); // Reload timeout on progress
             }
         }
         // Note: writeOutput() is now legacy code, not used anymore
@@ -225,44 +216,39 @@ void LogSink::logTask(void*) {
             const char* ptr = msg.msg;
             size_t remaining = strlen(msg.msg);
             
-            // Only use user function if provided
-            if (userPrintFn) {
-                // User-provided function with retry logic and timeout protection
-                uint32_t startTime = TIME_MS();
+            // User-provided function with retry logic and timeout protection
+            uint32_t startTime = TIME_MS();
+            while (remaining > 0) {
+                int result = Modbus::Debug::printLog(ptr, remaining);
                 
-                while (remaining > 0) {
-                    int result = userPrintFn(ptr, remaining);
-                    
-                    if (result < 0) {
-                        // Error, skip this message
+                if (result < 0) {
+                    // Error, skip this message
+                    break;
+                } else if (result == 0) {
+                    // Busy, check timeout (do NOT reload)
+                    uint32_t currentTime = TIME_MS();
+                    uint32_t elapsed = (currentTime >= startTime) ? 
+                        (currentTime - startTime) : 
+                        (UINT32_MAX - startTime + currentTime + 1); // Handle wraparound
+                    if (elapsed > LOG_PRINT_TIMEOUT_MS) {
+                        // Timeout exceeded, abandon message
                         break;
-                    } else if (result == 0) {
-                        // Busy, check timeout (do NOT reload)
-                        uint32_t currentTime = TIME_MS();
-                        uint32_t elapsed = (currentTime >= startTime) ? 
-                            (currentTime - startTime) : 
-                            (UINT32_MAX - startTime + currentTime + 1); // Handle wraparound
-                        if (elapsed > LOG_PRINT_TIMEOUT_MS) {
-                            // Timeout exceeded, abandon message
-                            break;
-                        }
-                        // Retry after a short delay
-                        vTaskDelay(pdMS_TO_TICKS(10));
-                    } else {
-                        // Success, advance pointer and RELOAD timeout
-                        // Security check: ensure result is not greater than remaining
-                        size_t bytes_written = (result > 0) ? static_cast<size_t>(result) : 0;
-                        if (bytes_written > remaining) {
-                            // User function returned invalid value, abort
-                            break;
-                        }
-                        ptr += bytes_written;
-                        remaining -= bytes_written;
-                        startTime = TIME_MS(); // Reload timeout on progress
                     }
+                    // Retry after a short delay
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                } else {
+                    // Success, advance pointer and RELOAD timeout
+                    // Security check: ensure result is not greater than remaining
+                    size_t bytes_written = (result > 0) ? static_cast<size_t>(result) : 0;
+                    if (bytes_written > remaining) {
+                        // User function returned invalid value, abort
+                        break;
+                    }
+                    ptr += bytes_written;
+                    remaining -= bytes_written;
+                    startTime = TIME_MS(); // Reload timeout on progress
                 }
             }
-            // Note: writeOutput() is now legacy code, not used anymore
         }
         vTaskDelay(5); // Yield before processing next message
     }

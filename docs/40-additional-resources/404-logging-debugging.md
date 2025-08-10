@@ -9,6 +9,26 @@ EZModbus provides two complementary diagnostic systems:
 
 EZModbus includes a flexible debug system that provides detailed information about Modbus protocol operations, frame contents, timing, and errors.
 
+Example of log messages:
+
+```
+# Errors & informations
+[ModbusCodec.h::isValidFrame:203] Error: Invalid function code
+[ModbusClient.cpp::sendRequest:141] Error: Invalid frame (Invalid fields)
+[ModbusRTU.cpp::setSilenceTimeMs:141] Silence time set to 2 ms (2000 us)
+
+# Frame dump
+[ModbusRTU.cpp::processReceivedFrame:317] Received raw data (8 bytes) from port 2
+[ModbusRTU.cpp::processReceivedFrame:318] Hexdump: 01 03 27 0F 00 01 BE BD 
+[ModbusRTU.cpp::processReceivedFrame:341] Received frame successfully decoded:
+> Type           : REQUEST
+> Function code  : 0x03 (Read holding registers)
+> Slave ID       : 1
+> Register Addr  : 9999
+> Register Count : 1
+> Data           : 0x0000 
+```
+
 ### Enabling Debug Mode
 
 Debug mode is enabled by defining the `EZMODBUS_DEBUG` flag:
@@ -27,64 +47,31 @@ target_compile_definitions(EZModbus PUBLIC EZMODBUS_DEBUG)
 
 When `EZMODBUS_DEBUG` is undefined, all debug calls are compiled out as no-op templates, ensuring zero overhead in production builds.
 
+!!! warning
+    You **MUST define a debug print function** in your code when `EZMODBUS_DEBUG` is defined (see next section). Otherwise you will get a compilation error.
+
 ### Configuring Output
 
-Unlike previous versions, EZModbus no longer includes platform-specific output code. Instead, you must provide a print function that handles the actual output:
+Unlike previous versions, EZModbus no longer includes platform-specific log output code. Instead, you must provide a print function in your own code that handles the actual output. Rationale : 
 
-**1. Using `setPrintFunction()`**
-
-```cpp
-// Define your print function
-int MyLogPrint(const char* msg, size_t len) {
-    // Your output implementation here
-    // Return: >0 = success (bytes written), 0 = busy/retry, -1 = error
-    //
-    // If multiplexing user console & logs on a shared UART, implement
-    // synchronization (Mutex, Semaphore, etc.) to avoid mixing characters
-}
-
-// Configure EZModbus to use your function in setup(), main() or your task
-void setup() {
-    Modbus::Debug::setPrintFunction(MyLogPrint);
-    // ... rest of initialization
-}
-```
-
-**2. Using `PrintFunctionSetter`(RAII)**
-
-With this approach, you can register the print function before runtime, in the global scope, before entering `setup()` or `main()`.
-
-```cpp
-// Define your print function
-int MyLogPrint(const char* msg, size_t len) {
-    // Your output implementation here
-    return len;
-}
-
-// Register the print function before runtime
-static Modbus::Debug::PrintFunctionSetter func(MyLogPrint);
-
-void main() {
-    // Print function is already configured!
-}
-```
-
-This gives the maximum flexibility to handle logs output in any possible way (FIFO, DMA, etc.) without platform-specific code in the library (less risk of bugs, easier to maintain).
-
-### Print Function Contract
+- Maximum flexibility to handle logs output in any possible way (FIFO, DMA, etc.)
+- Less platform-specific code in the library for non-mission-critical aspects (better readability, less risk of bugs, easier to maintain)
+- Enables users to implement their own synchronization logic if needed, to properly interleave EZModbus logs with other messages.
 
 The print function must implement the following contract:
 
 ```cpp
-int MyPrintFunction(const char* msg, size_t len);
+/**
+ * @brief User-provided print function for EZModbus logs
+ * @param msg Message to print (null-terminated)
+ * @param len Length of message (excluding null terminator)
+ * @return int Status code:
+ *   -1 : Error occurred, skip this message
+ *    0 : Busy/would block, retry later
+ *   >0 : Success, return number of characters printed
+ */
+int Modbus::Debug::printLog(const char* msg, size_t len);
 ```
-
-- `msg`: message to print (null-terminated)
-- `len`: length of message (excluding null terminator)
-- Return value:
-    - `-1`: Error occurred, skip this message
-    - `0`: Busy/would block, retry later
-    - `>0`: Success, number of characters printed
 
 Internal behavior:
 
@@ -98,25 +85,29 @@ Internal behavior:
 ##### Arduino - basic Serial output
 
 ```cpp
-int ESP32_LogPrint_Serial(const char* msg, size_t len) {
+int ESP32_printLogSerial(const char* msg, size_t len) {
     size_t written = Serial.write(msg, len);
     Serial.flush();
     return (int)written;
 }
 
-static Modbus::Debug::PrintFunctionSetter func(ESP32_LogPrint_Serial);
+int Modbus::Debug::printLog(const char* msg, size_t len) {
+    return ESP32_printLogSerial(msg, len);
+}
 ```
 
 ##### ESP-IDF - basic console output
 
 ```cpp
-int ESP32_LogPrint_Console(const char* msg, size_t len) {
+int ESP32_printLogConsole(const char* msg, size_t len) {
     int written = fwrite(msg, 1, len, stdout);
     fflush(stdout);
     return written;
 }
 
-static Modbus::Debug::PrintFunctionSetter func(ESP32_LogPrint_Console);
+int Modbus::Debug::printLog(const char* msg, size_t len) {
+    return ESP32_printLogConsole(msg, len);
+}
 ```
 
 #### Raspberry Pi Pico
@@ -125,7 +116,7 @@ static Modbus::Debug::PrintFunctionSetter func(ESP32_LogPrint_Console);
 ```cpp
 #include "hardware/uart.h"
 
-int Pico_LogPrint_UART(const char* msg, size_t len) {
+int Pico_printLogUART(const char* msg, size_t len) {
     int written = 0;
     for (size_t i = 0; i < len; i++) {
         if (uart_is_writable(uart1)) {
@@ -138,16 +129,20 @@ int Pico_LogPrint_UART(const char* msg, size_t len) {
     return written;
 }
 
-static Modbus::Debug::PrintFunctionSetter func(Pico_LogPrint_UART);
+int Modbus::Debug::printLog(const char* msg, size_t len) {
+    return Pico_printLogUART(msg, len);
+}
 ```
 
 ##### USB Serial (stdio)
 ```cpp
-int Pico_LogPrint_USB(const char* msg, size_t len) {
+int Pico_printLogUSB(const char* msg, size_t len) {
     return printf("%.*s", (int)len, msg);
 }
 
-static Modbus::Debug::PrintFunctionSetter func(Pico_LogPrint_USB);
+int Modbus::Debug::printLog(const char* msg, size_t len) {
+    return Pico_printLogUSB(msg, len);
+}
 ```
 
 #### STM32
@@ -155,42 +150,15 @@ static Modbus::Debug::PrintFunctionSetter func(Pico_LogPrint_USB);
 ##### Basic UART transmit (blocking)
 
 ```cpp
-int STM32_LogPrint_Basic(const char* msg, size_t len) {
+int STM32_printLogBasic(const char* msg, size_t len) {
     HAL_StatusTypeDef status = HAL_UART_Transmit(&huart2, (uint8_t*)msg, len, HAL_MAX_DELAY);
     return (status == HAL_OK) ? len : -1;
 }
 
-static Modbus::Debug::PrintFunctionSetter func(STM32_LogPrint_Basic);
+int Modbus::Debug::printLog(const char* msg, size_t len) {
+    return STM32_printLogBasic(msg, len);
+}
 ```
-
-### System Features
-
-#### Thread Safety
-The debug system uses a FreeRTOS queue and dedicated log task to ensure thread-safe operation:
-
-- Log calls from any context are queued
-- A dedicated task processes messages sequentially
-- User print function is always called from the same task context
-
-#### Timeout Protection
-The system includes timeout protection in the internal log task:
-
-- 500ms timeout per message (configurable via `LOG_PRINT_TIMEOUT_MS`)
-- Timeout is **reset on each successful chunk** - slow but progressing transmissions won't be cut
-- Different timing functions: `TIME_US()` before scheduler, `TIME_MS()` after scheduler
-
-#### Message Formatting
-All log messages are automatically formatted with:
-
-- Consistent line endings (exactly one `\r\n` per message)
-- Context information `[file::function:line]` for debug messages
-- Automatic truncation if messages exceed buffer size
-
-#### Performance
-
-- **Caller side**: Only formatting, no I/O blocking
-- **Task side**: Handles all I/O and retry logic
-- **Zero overhead** when `EZMODBUS_DEBUG` is undefined
 
 ### Configuration
 
@@ -233,9 +201,41 @@ The EventBus logs two types of events:
     - Result indicates success or specific failure reason
 
 !!! note
-    - Failed transactions generate TWO events: `EVT_REQUEST` with error code + `EVT_RESULT` with detailed description
+    - Failed transactions generate at least TWO events: `EVT_REQUEST` with API-side error code + one `EVT_RESULT` per error that occured along the internal call chain
     - Server requests "not addressed to us" are silently dropped - no events logged
-    - This dual logging provides complete context: what was attempted (REQUEST) and why it failed (ERROR)
+    - This dual logging provides complete context: what was attempted (REQUEST) and why it failed (RESULT)
+
+### Event Record Structure
+
+Each event is an instance of a `Modbus::EventBus::Record` structure, which contains the following fields:
+
+```cpp
+struct Record {
+// Event classification
+    EventType eventType;            // EVT_RESULT or EVT_REQUEST
+// Payload
+    uint16_t result;                // Error/result code (enum casted)
+    const char* resultStr;          // toString(enum) - static string
+    Modbus::FrameMeta requestInfo;  // Request metadata (POD) - only for EVT_REQUEST
+// Context / origin
+    uintptr_t instance;             // Caller instance address
+    uint64_t timestampUs;           // TIME_US()
+    const char* fileName;           // Basename
+    uint16_t lineNo;                // Line number
+};
+```
+
+The `Modbus::FrameMeta` structure contains only metadata of a `Modbus::Frame` object (without payload):
+
+```cpp
+struct FrameMeta {
+    Modbus::MsgType type;       // Message type (request/response)
+    Modbus::FunctionCode fc;    // Function code
+    uint8_t slaveId;            // Origin/target slave ID
+    uint16_t regAddress;        // Base register address
+    uint16_t regCount;          // Number of registers read/written
+};
+```
 
 ### Usage
 
@@ -265,28 +265,22 @@ Example boilerplate of a task that processes events from the queue and prints th
 ```cpp
 void eventTask(void* param) {
     constexpr uint32_t EVT_POP_WAIT_MS = 100;
-    
+
     while (1) {
+        // Pop an event from the event bus
         Modbus::EventBus::Record evt;
         if (Modbus::EventBus::pop(evt, EVT_POP_WAIT_MS)) {
-            // Format timestamp
-            float timestamp = evt.timestampUs / 1000000.0f;
-            
-            if (evt.eventType == Modbus::EVT_REQUEST) {
-                // Request event - show result status
-                const char* statusStr = (evt.result == 0) ? "OK" : evt.resultStr;
-                printf("[%.3f] REQUEST: %s addr=%u count=%u | %s\n",
-                       timestamp,
-                       Modbus::toString(evt.requestInfo.fc),
-                       evt.requestInfo.regAddress,
-                       evt.requestInfo.regCount,
-                       statusStr);
+            // Format timestamp in seconds
+            float timestamp = (float)(evt.timestampUs / 1000000.0f);
+            // Log the event
+            if (evt.eventType == Modbus::EventBus::EVT_REQUEST) {
+                // Request event - show function code, address, count
+                printf("[%3f] REQUEST: %s addr=%u count=%u -> %s\n", timestamp,
+                Modbus::toString(evt.requestInfo.fc), evt.requestInfo.regAddress, 
+                evt.requestInfo.regCount, evt.resultStr);
             } else {
-                // Error event - show error details
-                printf("[%.3f] ERROR: %s (%s)\n",
-                       timestamp,
-                       evt.resultStr,
-                       evt.desc ? evt.desc : "");
+                // Error event
+                printf("[%3f] ERROR: %s\n", timestamp, evt.resultStr);
             }
         }
     }
@@ -298,44 +292,23 @@ xTaskCreate(eventTask, "EventTask", 2048, NULL, 1, NULL);
 
 **Example Output - Normal Operations:**
 ```
-[12.345] REQUEST: Read holding registers addr=100 count=5 | OK
-[12.367] REQUEST: Write single register addr=105 count=1 | OK
-[13.123] REQUEST: Read coils addr=0 count=8 | OK
+[12.345] REQUEST: Read holding registers addr=100 count=5 -> Success
+[12.367] REQUEST: Write single register addr=105 count=1 -> Success
+[13.123] REQUEST: Read coils addr=0 count=8 -> Success
 ```
 
 **Example Output - Error Scenarios:**
 ```
 // Client timeout - generates both REQUEST and ERROR events
-[14.567] REQUEST: Read input registers addr=200 count=10 | Timeout
-[14.567] ERROR: Timeout (No response received within 1000ms)
+[14.567] REQUEST: Read input registers addr=200 count=10 -> Timeout
+[14.567] ERROR: Timeout
 
 // Server illegal address - generates both events
-[15.234] REQUEST: Write multiple registers addr=999 count=5 | Illegal data address
-[15.234] ERROR: Illegal data address (Register 999 not found in store)
+[15.234] REQUEST: Write multiple registers addr=999 count=5 -> Illegal function in received frame
+[15.234] ERROR: Illegal function in received frame
 
 // Interface error - only ERROR event (no request was made)
 [16.789] ERROR: TX failed (UART buffer full)
-```
-
-### Event Record Structure
-
-```cpp
-struct Record {
-    // Metadata
-    EventType eventType;       // EVT_RESULT or EVT_REQUEST
-    // Payload (common to both event types)
-    uint16_t result;           // Error/result code
-    const char* resultStr;     // Result string
-    // Error description (only for EVT_RESULT)
-    const char* desc;
-    // Frame metadata (for EVT_REQUEST)
-    Modbus::FrameMeta requestInfo;
-    // Context
-    uintptr_t instance;        // Source instance address
-    uint64_t timestampUs;      // Microsecond timestamp
-    const char* fileName;      // Source file name
-    uint16_t lineNo;           // Source line number
-};
 ```
 
 ### Advanced Features

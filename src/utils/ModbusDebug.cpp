@@ -11,13 +11,6 @@
 namespace Modbus {
 namespace Debug {
 
-/* @brief Set user-provided print function for EZModbus debug output
- * @param fn Print function implementing the PrintFunction contract
- */
-void setPrintFunction(PrintFunction fn) {
-    Modbus::LogSink::setPrintFunction(fn);
-}
-
 /* @brief Copy the prefix into dst and return the number of characters written.
  * @brief Reduces calls to snprintf in logs (heavy overhead on RP2040)
  * @param dst Destination buffer

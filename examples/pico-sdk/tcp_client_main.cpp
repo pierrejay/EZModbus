@@ -33,8 +33,9 @@
         return printf("%.*s", (int)len, msg);
     }
 
-    // Automatically register debug function
-    static Modbus::Debug::PrintFunctionSetter func(Pico_LogPrint);
+    int Modbus::Debug::printLog(const char* msg, size_t len) {
+        return Pico_LogPrint(msg, len);
+    }
 #endif
 
 // ===================================================================================

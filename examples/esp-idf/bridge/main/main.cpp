@@ -21,8 +21,9 @@
         return fwrite(msg, 1, len, stdout);
     }
 
-    // Automatically register debug function
-    static Modbus::Debug::PrintFunctionSetter func(ESP32_LogPrint);
+    int Modbus::Debug::printLog(const char* msg, size_t len) {
+        return ESP32_LogPrint(msg, len);
+    }
 #endif
 
 // ===================================================================================

@@ -38,6 +38,10 @@ int ESP32_LogPrint_Serial(const char* msg, size_t len) {
     return (written > 0) ? written : -1;
 }
 
+int Modbus::Debug::printLog(const char* msg, size_t len) {
+    return ESP32_LogPrint_Serial(msg, len);
+}
+
 // Aliases for convenience
 using UART = ModbusHAL::UART;
 using UARTConfig = ModbusHAL::UART::Config;
@@ -1763,11 +1767,6 @@ void setup() {
     Serial.setTxBufferSize(2048);
     Serial.setRxBufferSize(2048);
     Serial.begin(115200);
-    
-    // Configure EZModbus debug output
-    #ifdef EZMODBUS_DEBUG
-    Modbus::Debug::setPrintFunction(ESP32_LogPrint_Serial);
-    #endif
     
     vTaskDelay(pdMS_TO_TICKS(1000));
 

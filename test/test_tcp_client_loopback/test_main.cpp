@@ -38,6 +38,10 @@ int ESP32_LogPrint_Serial(const char* msg, size_t len) {
     return (written > 0) ? written : -1;
 }
 
+int Modbus::Debug::printLog(const char* msg, size_t len) {
+    return ESP32_LogPrint_Serial(msg, len);
+}
+
 // Give some time for the application logs to be printed before asserting
 #ifdef EZMODBUS_DEBUG
     #define TEST_ASSERT_START() { Modbus::LogSink::waitQueueFlushed(); vTaskDelay(pdMS_TO_TICKS(1)); }
@@ -1644,11 +1648,6 @@ void setup() {
     Serial.setTxBufferSize(2048);
     Serial.setRxBufferSize(2048);
     Serial.begin(115200);
-    
-    // Configure EZModbus debug output
-    #ifdef EZMODBUS_DEBUG
-    Modbus::Debug::setPrintFunction(ESP32_LogPrint_Serial);
-    #endif
 
     // Initialize ModbusTestServer TCP server
     // WiFi.setSleep(WIFI_PS_NONE);

@@ -28,8 +28,9 @@
         return printf("%.*s", (int)len, msg);
     }
 
-    // Automatically register debug function
-    static Modbus::Debug::PrintFunctionSetter func(Pico_LogPrint);
+    int Modbus::Debug::printLog(const char* msg, size_t len) {
+        return Pico_LogPrint(msg, len);
+    }
 #endif
 
 // ===================================================================================
@@ -303,11 +304,12 @@ void eventTask(void* param) {
             // Log the event
             printf("\r\n");
             if (evt.eventType == Modbus::EventBus::EVT_REQUEST) {
-                // Request event - show function code, address, count
-                printf("[%s] [%3f][%s:%u] REQUEST: %s addr=%u count=%u\n", 
+                // Request event - show function code, address, count, result
+                printf("[%s] [%3f][%s:%u] REQUEST: %s addr=%u count=%u -> %s\n", 
                 TAG_EVENT_TASK,
                 timestamp, evt.fileName, evt.lineNo,
-                Modbus::toString(evt.requestInfo.fc), evt.requestInfo.regAddress, evt.requestInfo.regCount);
+                Modbus::toString(evt.requestInfo.fc), evt.requestInfo.regAddress, 
+                evt.requestInfo.regCount, evt.resultStr);
             } else {
                 // Error event
                 printf("[%s] [%3f][%s:%u] ERROR: %s\n", 

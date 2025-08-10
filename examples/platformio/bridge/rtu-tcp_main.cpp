@@ -15,8 +15,9 @@
         return Serial.write(msg, len);
     }
 
-    // Automatically register debug function
-    static Modbus::Debug::PrintFunctionSetter func(Arduino_LogPrint);
+    int Modbus::Debug::printLog(const char* msg, size_t len) {
+        return Arduino_LogPrint(msg, len);
+    }
 #endif
 
 // Configuration WiFi
