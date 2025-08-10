@@ -238,6 +238,7 @@ RTU::Result RTU::sendFrame(const Modbus::Frame& frame, TxResultCallback txCallba
     if (xQueueSend(_txRequestQueue, &signal_ptr, 0) != pdTRUE) {
         _txResultCallback = nullptr;
         _txCallbackCtx = nullptr;
+        _txBuffer.clear(); // Don't leave the buffer in an invalid state
         if (txCallback) txCallback(ERR_SEND_FAILED, ctx);
         return Error(ERR_SEND_FAILED, "failed to put encoded frame into TX queue");
     }
@@ -374,7 +375,7 @@ RTU::Result RTU::updateUartIdleDetection() {
  */
 inline void RTU::notifyTxResult(Result res) {
     if (_txResultCallback) {
-        _txResultCallback(res, _txCallbackCtx);
+        _txResultCallback(res, const_cast<void*>(_txCallbackCtx));
     }
 }
 

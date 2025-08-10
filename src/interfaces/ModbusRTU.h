@@ -106,8 +106,8 @@ private:
     std::array<uint8_t, ModbusCodec::RTU::MAX_FRAME_SIZE> _txBuf;
     ByteBuffer _txBuffer; // Linked to _txBuf
     Mutex _txMutex; // Protects access to _txBuffer
-    TxResultCallback _txResultCallback; // Stores callback to be called with TX result
-    void* _txCallbackCtx; // Stores context for TX callback
+    volatile TxResultCallback _txResultCallback; // Stores callback to be called with TX result
+    volatile void* _txCallbackCtx; // Stores context for TX callback
     
     // Data processing
     // _rxEventQueue: receives RX events from HAL (only the handle, belongs to HAL layer)
