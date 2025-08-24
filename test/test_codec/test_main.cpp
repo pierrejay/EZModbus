@@ -3,6 +3,9 @@
 #include <string>
 #include <cmath>
 #include <cstring>
+#include <cfloat>
+#include <climits>
+#include <cstdint>
 
 #include "core/ModbusCodec.hpp"
 
@@ -1350,6 +1353,209 @@ void test_conversion_overwrite_scenarios() {
     TEST_ASSERT_EQUAL_MESSAGE(6, frame.regCount, "regCount should remain 6");
 }
 
+void test_conversion_extreme_values() {
+    using namespace Modbus;
+    
+    Frame frame;
+    frame.clearData();
+    
+    // Float extremes
+    TEST_ASSERT_EQUAL_MESSAGE(2, frame.setFloat(FLT_MAX, 0), "Should handle FLT_MAX");
+    TEST_ASSERT_EQUAL_MESSAGE(2, frame.setFloat(FLT_MIN, 2), "Should handle FLT_MIN");
+    TEST_ASSERT_EQUAL_MESSAGE(2, frame.setFloat(-FLT_MAX, 4), "Should handle -FLT_MAX");
+    
+    // NaN and infinity
+    TEST_ASSERT_EQUAL_MESSAGE(2, frame.setFloat(NAN, 6), "Should handle NaN");
+    TEST_ASSERT_EQUAL_MESSAGE(2, frame.setFloat(INFINITY, 8), "Should handle INFINITY");
+    TEST_ASSERT_EQUAL_MESSAGE(2, frame.setFloat(-INFINITY, 10), "Should handle -INFINITY");
+    
+    // Integer extremes
+    TEST_ASSERT_EQUAL_MESSAGE(2, frame.setUint32(UINT32_MAX, 12), "Should handle UINT32_MAX");
+    TEST_ASSERT_EQUAL_MESSAGE(2, frame.setInt32(INT32_MIN, 14), "Should handle INT32_MIN");
+    TEST_ASSERT_EQUAL_MESSAGE(2, frame.setInt32(INT32_MAX, 16), "Should handle INT32_MAX");
+    TEST_ASSERT_EQUAL_MESSAGE(1, frame.setUint16(UINT16_MAX, 18), "Should handle UINT16_MAX");
+    TEST_ASSERT_EQUAL_MESSAGE(1, frame.setInt16(INT16_MIN, 19), "Should handle INT16_MIN");
+    TEST_ASSERT_EQUAL_MESSAGE(1, frame.setInt16(INT16_MAX, 20), "Should handle INT16_MAX");
+    
+    // Verify we can read back the values
+    float floatResult;
+    uint32_t uint32Result;
+    int32_t int32Result;
+    uint16_t uint16Result;
+    int16_t int16Result;
+    
+    TEST_ASSERT_TRUE_MESSAGE(frame.getFloat(floatResult, 0), "Should read FLT_MAX");
+    TEST_ASSERT_EQUAL_FLOAT_MESSAGE(FLT_MAX, floatResult, "FLT_MAX should match");
+    
+    TEST_ASSERT_TRUE_MESSAGE(frame.getUint32(uint32Result, 12), "Should read UINT32_MAX");
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(UINT32_MAX, uint32Result, "UINT32_MAX should match");
+    
+    TEST_ASSERT_TRUE_MESSAGE(frame.getInt16(int16Result, 20), "Should read INT16_MAX");
+    TEST_ASSERT_EQUAL_MESSAGE(INT16_MAX, int16Result, "INT16_MAX should match");
+}
+
+void test_conversion_invalid_parameters() {
+    using namespace Modbus;
+    
+    Frame frame;
+    frame.clearData();
+    
+    // Invalid ByteOrder values (cast from invalid integers)
+    TEST_ASSERT_EQUAL_MESSAGE(0, frame.setFloat(123.45f, 0, static_cast<ByteOrder>(99)), "Should reject invalid ByteOrder");
+    TEST_ASSERT_EQUAL_MESSAGE(0, frame.setUint32(12345, 0, static_cast<ByteOrder>(-1)), "Should reject negative ByteOrder");
+    TEST_ASSERT_EQUAL_MESSAGE(0, frame.setUint16(100, 0, static_cast<ByteOrder>(50)), "Should reject invalid 16-bit ByteOrder");
+    
+    // Invalid reading with bad ByteOrder
+    float floatResult;
+    uint32_t uint32Result;
+    uint16_t uint16Result;
+    
+    TEST_ASSERT_FALSE_MESSAGE(frame.getFloat(floatResult, 0, static_cast<ByteOrder>(99)), "Should reject invalid ByteOrder for getFloat");
+    TEST_ASSERT_FALSE_MESSAGE(frame.getUint32(uint32Result, 0, static_cast<ByteOrder>(-1)), "Should reject invalid ByteOrder for getUint32");
+    TEST_ASSERT_FALSE_MESSAGE(frame.getUint16(uint16Result, 0, static_cast<ByteOrder>(50)), "Should reject invalid ByteOrder for getUint16");
+}
+
+void test_conversion_endianness_consistency() {
+    using namespace Modbus;
+    
+    // Test that set + get with same ByteOrder is consistent
+    Frame frame;
+    
+    // Test all valid ByteOrder values for 32-bit types
+    ByteOrder orders32[] = {ByteOrder::ABCD, ByteOrder::CDAB, ByteOrder::BADC, ByteOrder::DCBA};
+    for (auto order : orders32) {
+        frame.clearData();
+        
+        // Float consistency
+        float originalFloat = 123.456789f;
+        if (frame.setFloat(originalFloat, 0, order) == 2) {
+            float readFloat;
+            TEST_ASSERT_TRUE_MESSAGE(frame.getFloat(readFloat, 0, order), "Should read back float with same endianness");
+            TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.001f, originalFloat, readFloat, "Float roundtrip should be accurate");
+        }
+        
+        // uint32_t consistency
+        uint32_t originalUint32 = 0x12345678;
+        if (frame.setUint32(originalUint32, 2, order) == 2) {
+            uint32_t readUint32;
+            TEST_ASSERT_TRUE_MESSAGE(frame.getUint32(readUint32, 2, order), "Should read back uint32 with same endianness");
+            TEST_ASSERT_EQUAL_HEX32_MESSAGE(originalUint32, readUint32, "uint32 roundtrip should be exact");
+        }
+        
+        // int32_t consistency
+        int32_t originalInt32 = -0x12345678;
+        if (frame.setInt32(originalInt32, 4, order) == 2) {
+            int32_t readInt32;
+            TEST_ASSERT_TRUE_MESSAGE(frame.getInt32(readInt32, 4, order), "Should read back int32 with same endianness");
+            TEST_ASSERT_EQUAL_MESSAGE(originalInt32, readInt32, "int32 roundtrip should be exact");
+        }
+    }
+    
+    // Test 16-bit types
+    ByteOrder orders16[] = {ByteOrder::AB, ByteOrder::BA};
+    for (auto order : orders16) {
+        frame.clearData();
+        
+        uint16_t originalUint16 = 0x1234;
+        if (frame.setUint16(originalUint16, 0, order) == 1) {
+            uint16_t readUint16;
+            TEST_ASSERT_TRUE_MESSAGE(frame.getUint16(readUint16, 0, order), "Should read back uint16 with same endianness");
+            TEST_ASSERT_EQUAL_HEX16_MESSAGE(originalUint16, readUint16, "uint16 roundtrip should be exact");
+        }
+        
+        int16_t originalInt16 = -0x1234;
+        if (frame.setInt16(originalInt16, 1, order) == 1) {
+            int16_t readInt16;
+            TEST_ASSERT_TRUE_MESSAGE(frame.getInt16(readInt16, 1, order), "Should read back int16 with same endianness");
+            TEST_ASSERT_EQUAL_MESSAGE(originalInt16, readInt16, "int16 roundtrip should be exact");
+        }
+    }
+}
+
+void test_conversion_capacity_limits() {
+    using namespace Modbus;
+    
+    Frame frame;
+    frame.clearData();
+    
+    const size_t maxRegs = 125; // FRAME_DATASIZE
+    
+    // Test at exact limit
+    TEST_ASSERT_EQUAL_MESSAGE(2, frame.setFloat(1.0f, maxRegs-2), "Should set float at position 123-124");
+    TEST_ASSERT_EQUAL_MESSAGE(0, frame.setFloat(2.0f, maxRegs-1), "Should reject float at position 124-125 (overflows)");
+    TEST_ASSERT_EQUAL_MESSAGE(0, frame.setUint32(123, maxRegs), "Should reject uint32 at position 125+ (out of bounds)");
+    TEST_ASSERT_EQUAL_MESSAGE(0, frame.setUint32(456, maxRegs+10), "Should reject uint32 way out of bounds");
+    
+    // Test 16-bit types at limit
+    TEST_ASSERT_EQUAL_MESSAGE(1, frame.setUint16(100, maxRegs-1), "Should set uint16 at last position");
+    TEST_ASSERT_EQUAL_MESSAGE(0, frame.setUint16(200, maxRegs), "Should reject uint16 past end");
+    
+    // Verify reading at limits
+    float floatResult;
+    uint16_t uint16Result;
+    TEST_ASSERT_TRUE_MESSAGE(frame.getFloat(floatResult, maxRegs-2), "Should read float at limit");
+    TEST_ASSERT_TRUE_MESSAGE(frame.getUint16(uint16Result, maxRegs-1), "Should read uint16 at limit");
+    TEST_ASSERT_FALSE_MESSAGE(frame.getFloat(floatResult, maxRegs-1), "Should reject reading float past limit");
+    TEST_ASSERT_FALSE_MESSAGE(frame.getUint16(uint16Result, maxRegs), "Should reject reading uint16 past limit");
+}
+
+void test_conversion_insufficient_data() {
+    using namespace Modbus;
+    
+    Frame frame;
+    frame.clearData();
+    frame.regCount = 3; // Only 3 registers of data
+    
+    float floatResult;
+    uint32_t uint32Result;
+    uint16_t uint16Result;
+    
+    // Attempts to read beyond available data
+    TEST_ASSERT_FALSE_MESSAGE(frame.getFloat(floatResult, 2), "Should reject float at reg 2-3 with regCount=3");
+    TEST_ASSERT_FALSE_MESSAGE(frame.getUint32(uint32Result, 2), "Should reject uint32 at reg 2-3 with regCount=3");
+    TEST_ASSERT_TRUE_MESSAGE(frame.getUint16(uint16Result, 2), "Should accept uint16 at reg 2 with regCount=3");
+    TEST_ASSERT_FALSE_MESSAGE(frame.getUint16(uint16Result, 3), "Should reject uint16 at reg 3 with regCount=3");
+    
+    // Test with regCount = 0
+    frame.regCount = 0;
+    TEST_ASSERT_FALSE_MESSAGE(frame.getFloat(floatResult, 0), "Should reject any read with regCount=0");
+    TEST_ASSERT_FALSE_MESSAGE(frame.getUint16(uint16Result, 0), "Should reject any read with regCount=0");
+}
+
+void test_conversion_mixed_with_raw_api() {
+    using namespace Modbus;
+    
+    Frame frame;
+    frame.clearData();
+    
+    // Set raw registers first
+    std::vector<uint16_t> rawData = {0x1234, 0x5678, 0xABCD, 0xEF01};
+    frame.setRegisters(rawData);
+    
+    // Read with conversion API
+    uint32_t value;
+    TEST_ASSERT_TRUE_MESSAGE(frame.getUint32(value, 0, ByteOrder::ABCD), "Should read raw data with conversion API");
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(0x12345678, value, "Should get correct ABCD conversion");
+    
+    TEST_ASSERT_TRUE_MESSAGE(frame.getUint32(value, 0, ByteOrder::CDAB), "Should read raw data with word swap");
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(0x56781234, value, "Should get correct CDAB conversion");
+    
+    // Overwrite with conversion API
+    TEST_ASSERT_EQUAL_MESSAGE(2, frame.setFloat(999.0f, 2, ByteOrder::CDAB), "Should overwrite with conversion API");
+    
+    // Verify that first two registers are intact
+    TEST_ASSERT_TRUE_MESSAGE(frame.getUint32(value, 0, ByteOrder::ABCD), "Should still read first registers");
+    TEST_ASSERT_EQUAL_HEX32_MESSAGE(0x12345678, value, "First registers should be unchanged");
+    
+    // Verify mixed access works
+    uint16_t rawReg = frame.getRegister(0);
+    TEST_ASSERT_EQUAL_HEX16_MESSAGE(0x1234, rawReg, "Raw register access should work after conversion operations");
+    
+    float floatResult;
+    TEST_ASSERT_TRUE_MESSAGE(frame.getFloat(floatResult, 2, ByteOrder::CDAB), "Should read back converted float");
+    TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.1f, 999.0f, floatResult, "Float should be accurate");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_codec_rtu);
@@ -1363,5 +1569,11 @@ int main(void) {
     RUN_TEST(test_conversion_boundary_conditions);
     RUN_TEST(test_conversion_mixed_data_types);
     RUN_TEST(test_conversion_overwrite_scenarios);
+    RUN_TEST(test_conversion_extreme_values);
+    RUN_TEST(test_conversion_invalid_parameters);
+    RUN_TEST(test_conversion_endianness_consistency);
+    RUN_TEST(test_conversion_capacity_limits);
+    RUN_TEST(test_conversion_insufficient_data);
+    RUN_TEST(test_conversion_mixed_with_raw_api);
     UNITY_END();
 }
