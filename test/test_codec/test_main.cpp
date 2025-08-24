@@ -106,7 +106,7 @@ Modbus::Frame makeFrame(const Case& C) {
         return F;
     }
     F.exceptionCode = NULL_EXCEPTION;
-    F.clearData();  // On s'assure que data est propre
+    F.clearData(false);  // On s'assure que data est propre
 
     // Remplissage des data
     if (C.type == REQUEST) {
@@ -467,7 +467,7 @@ void test_codec_rtu() {
             F.slaveId = 1;
             F.regAddress = 0;
             F.regCount = 0;
-            F.clearData();  // Utilisation de clearData() au lieu de clear()
+            F.clearData(false);  // Utilisation de clearData() au lieu de clear()
             uint8_t _raw[256];
             ByteBuffer raw(_raw, sizeof(_raw));
             auto r = ModbusCodec::RTU::encode(F, raw);
@@ -482,7 +482,7 @@ void test_codec_rtu() {
             F.slaveId = 1;
             F.regAddress = 0;
             F.regCount = 2;
-            F.clearData();  // Utilisation de clearData() au lieu de clear()
+            F.clearData(false);  // Utilisation de clearData() au lieu de clear()
             uint8_t _raw[256];
             ByteBuffer raw(_raw, sizeof(_raw));
             auto r = ModbusCodec::RTU::encode(F, raw);

@@ -45,7 +45,7 @@ struct Frame {
 
     // Clear functions
     void clear();
-    void clearData();
+    void clearData(bool resetRegCount = true);
 
     // Getter functions for frame data
     uint16_t getRegister(size_t index) const;
@@ -286,10 +286,12 @@ inline void Frame::clear() {
 }
 
 /* @brief Clear the data of the frame.
+    * @param resetRegCount Whether to reset the regCount (default: true)
     * @note This function clears the data of the frame to its default state.
     */
-inline void Frame::clearData() {
+inline void Frame::clearData(bool resetRegCount) {
     data.fill(0);
+    if (resetRegCount) regCount = 0;
 }
 
 /* @brief Get a register value from frame data.
