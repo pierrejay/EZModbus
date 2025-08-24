@@ -79,11 +79,11 @@ struct Frame {
     size_t setInt16(int16_t value, size_t regIndex, ByteOrder order = ByteOrder::AB);
     
     // Type conversion getters with endianness support
-    bool getFloat(float& result, size_t regIndex, ByteOrder order = ByteOrder::ABCD) const;
-    bool getUint32(uint32_t& result, size_t regIndex, ByteOrder order = ByteOrder::ABCD) const;
-    bool getInt32(int32_t& result, size_t regIndex, ByteOrder order = ByteOrder::ABCD) const;
-    bool getUint16(uint16_t& result, size_t regIndex, ByteOrder order = ByteOrder::AB) const;
-    bool getInt16(int16_t& result, size_t regIndex, ByteOrder order = ByteOrder::AB) const;
+    bool getFloat(float& target, size_t regIndex, ByteOrder order = ByteOrder::ABCD) const;
+    bool getUint32(uint32_t& target, size_t regIndex, ByteOrder order = ByteOrder::ABCD) const;
+    bool getInt32(int32_t& target, size_t regIndex, ByteOrder order = ByteOrder::ABCD) const;
+    bool getUint16(uint16_t& target, size_t regIndex, ByteOrder order = ByteOrder::AB) const;
+    bool getInt16(int16_t& target, size_t regIndex, ByteOrder order = ByteOrder::AB) const;
 
 private:
     // Helper function to validate data bounds for getters/setters
@@ -726,12 +726,12 @@ inline size_t Modbus::Frame::setInt16(int16_t value, size_t regIndex, ByteOrder 
 }
 
 /* @brief Get a float value from specified register index with endianness support
-    * @param result Reference to store the result
+    * @param target Reference to store the result
     * @param regIndex Starting register index (0-based)
     * @param order Byte order for the value
     * @return true if successful, false if index out of bounds
     */
-inline bool Modbus::Frame::getFloat(float& result, size_t regIndex, ByteOrder order) const {
+inline bool Modbus::Frame::getFloat(float& target, size_t regIndex, ByteOrder order) const {
     // Check bounds
     if (!checkDataBounds(regIndex, 2)) return false;
     if (regIndex + 2 > regCount) return false;
@@ -759,17 +759,17 @@ inline bool Modbus::Frame::getFloat(float& result, size_t regIndex, ByteOrder or
     }
     
     // Convert uint32_t to float
-    memcpy(&result, &uintValue, sizeof(float));
+    memcpy(&target, &uintValue, sizeof(float));
     return true;
 }
 
 /* @brief Get a uint32_t value from specified register index with endianness support
-    * @param result Reference to store the result
+    * @param target Reference to store the result
     * @param regIndex Starting register index (0-based)
     * @param order Byte order for the value
     * @return true if successful, false if index out of bounds
     */
-inline bool Modbus::Frame::getUint32(uint32_t& result, size_t regIndex, ByteOrder order) const {
+inline bool Modbus::Frame::getUint32(uint32_t& target, size_t regIndex, ByteOrder order) const {
     // Check bounds
     if (!checkDataBounds(regIndex, 2)) return false;
     if (regIndex + 2 > regCount) return false;
@@ -781,16 +781,16 @@ inline bool Modbus::Frame::getUint32(uint32_t& result, size_t regIndex, ByteOrde
     // Convert endianness
     switch (order) {
         case ByteOrder::ABCD:
-            result = (static_cast<uint32_t>(word1) << 16) | word2;
+            target = (static_cast<uint32_t>(word1) << 16) | word2;
             break;
         case ByteOrder::CDAB:
-            result = (static_cast<uint32_t>(word2) << 16) | word1;
+            target = (static_cast<uint32_t>(word2) << 16) | word1;
             break;
         case ByteOrder::BADC:
-            result = (static_cast<uint32_t>(__builtin_bswap16(word1)) << 16) | __builtin_bswap16(word2);
+            target = (static_cast<uint32_t>(__builtin_bswap16(word1)) << 16) | __builtin_bswap16(word2);
             break;
         case ByteOrder::DCBA:
-            result = (static_cast<uint32_t>(__builtin_bswap16(word2)) << 16) | __builtin_bswap16(word1);
+            target = (static_cast<uint32_t>(__builtin_bswap16(word2)) << 16) | __builtin_bswap16(word1);
             break;
         default: return false;
     }
@@ -799,25 +799,25 @@ inline bool Modbus::Frame::getUint32(uint32_t& result, size_t regIndex, ByteOrde
 }
 
 /* @brief Get an int32_t value from specified register index with endianness support
-    * @param result Reference to store the result
+    * @param target Reference to store the result
     * @param regIndex Starting register index (0-based)
     * @param order Byte order for the value
     * @return true if successful, false if index out of bounds
     */
-inline bool Modbus::Frame::getInt32(int32_t& result, size_t regIndex, ByteOrder order) const {
+inline bool Modbus::Frame::getInt32(int32_t& target, size_t regIndex, ByteOrder order) const {
     uint32_t uintResult;
     if (!getUint32(uintResult, regIndex, order)) return false;
-    result = static_cast<int32_t>(uintResult);
+    target = static_cast<int32_t>(uintResult);
     return true;
 }
 
 /* @brief Get a uint16_t value from specified register index with endianness support
-    * @param result Reference to store the result
+    * @param target Reference to store the result
     * @param regIndex Register index (0-based)
     * @param order Byte order for the value
     * @return true if successful, false if index out of bounds
     */
-inline bool Modbus::Frame::getUint16(uint16_t& result, size_t regIndex, ByteOrder order) const {
+inline bool Modbus::Frame::getUint16(uint16_t& target, size_t regIndex, ByteOrder order) const {
     // Check bounds
     if (!checkDataBounds(regIndex, 1)) return false;
     if (regIndex >= regCount) return false;
@@ -828,10 +828,10 @@ inline bool Modbus::Frame::getUint16(uint16_t& result, size_t regIndex, ByteOrde
     // Convert endianness
     switch (order) {
         case ByteOrder::AB:
-            result = word;
+            target = word;
             break;
         case ByteOrder::BA:
-            result = __builtin_bswap16(word);
+            target = __builtin_bswap16(word);
             break;
         default: return false;
     }
@@ -840,15 +840,15 @@ inline bool Modbus::Frame::getUint16(uint16_t& result, size_t regIndex, ByteOrde
 }
 
 /* @brief Get an int16_t value from specified register index with endianness support
-    * @param result Reference to store the result
+    * @param target Reference to store the result
     * @param regIndex Register index (0-based)
     * @param order Byte order for the value
     * @return true if successful, false if index out of bounds
     */
-inline bool Modbus::Frame::getInt16(int16_t& result, size_t regIndex, ByteOrder order) const {
+inline bool Modbus::Frame::getInt16(int16_t& target, size_t regIndex, ByteOrder order) const {
     uint16_t uintResult;
     if (!getUint16(uintResult, regIndex, order)) return false;
-    result = static_cast<int16_t>(uintResult);
+    target = static_cast<int16_t>(uintResult);
     return true;
 }
 

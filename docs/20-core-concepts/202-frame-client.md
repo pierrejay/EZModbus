@@ -156,21 +156,168 @@ size_t copied = coilResponse.getCoils(buffer, (sizeof(buffer) / sizeof(buffer[0]
 !!! note
     Technically, for registers it is possible to read/write the `data` field directly since they are not packed, but using those methods for both registers & coils will guarantee 100% validity of the data stored in the `Frame`, so they are recommended in all cases.
 
-### Unit conversion
+## Frame data conversion (since v1.1.5)
 
-EZModbus offers in the `ModbusCodec` namespace, two conversion functions to convert a `float` from/to a pair of registers encoded in IEEE 754 format.  It follows the "big-endian word, little-endian byte" (3-2-1-0) convention.
+In addition to the raw register manipulation methods described above, EZModbus now provides high-level data conversion utilities that handle endianness and multi-word data types transparently. These are the **recommended** approach for working with complex data types.
+
+### Overview
+
+The conversion API allows you to work directly with common data types (`float`, `uint32_t`, `int32_t`, `uint16_t`, `int16_t`) without manually handling byte ordering or register splitting. This is especially useful when communicating with devices that store data in different endianness formats.
 
 ```cpp
-Modbus::Frame frame; // The request/response frame
-float floatVal;      // Your source/target float value
-
-// Encode a float to Modbus registers & set request frame data
+// Before: Manual approach with raw registers
 uint16_t buffer[2];
-ModbusCodec::floatToRegisters(floatVal, buffer);
-frame.setCoils(buffer, 2);
+ModbusCodec::floatToRegisters(123.45f, buffer);  // Legacy approach
+frame.setRegisters(buffer, 2);
 
-// Extract values from response frame & parse float value 
-uint16_t buffer[2];
-size_t copied = frame.getCoils(buffer, 2);
-if (copied == 2) floatVal = ModbusCodec::registersToFloat(buffer);
+// After: Direct conversion with endianness control
+frame.clearData();  // Always clear before building a new frame
+frame.setFloat(123.45f, 0, Modbus::ByteOrder::CDAB);  // New approach since v1.1.5
 ```
+
+### Supported data types
+
+| Type | Size | Description |
+|------|------|-------------|
+| `float` | 32-bit (2 registers) | IEEE 754 floating point |
+| `uint32_t` | 32-bit (2 registers) | Unsigned integer |
+| `int32_t` | 32-bit (2 registers) | Signed integer |
+| `uint16_t` | 16-bit (1 register) | Unsigned short with endianness |
+| `int16_t` | 16-bit (1 register) | Signed short with endianness |
+
+### Byte ordering (Endianness)
+
+Different Modbus devices store multi-byte data in different orders within their register tables. EZModbus supports all common formats through the `ByteOrder` enum.
+
+**Understanding the notation:** Letters A, B, C, D represent bytes from the original value in order of significance, and the `ByteOrder` describes **how these bytes are arranged in the Modbus register table**.
+
+For example, the 32-bit value `0x12345678` contains these bytes:
+- A = `0x12` (most significant byte)  
+- B = `0x34`
+- C = `0x56` 
+- D = `0x78` (least significant byte)
+
+```cpp
+namespace Modbus {
+    enum class ByteOrder {
+        // 16-bit (1 register) - 2 bytes stored in Modbus table
+        AB,          // Modbus register = [A][B] - big endian storage (default)
+        BA,          // Modbus register = [B][A] - little endian storage
+        
+        // 32-bit (2 registers) - 4 bytes stored across 2 Modbus registers
+        ABCD,        // Modbus: Reg0=[A][B] Reg1=[C][D] - big endian storage (default)
+        CDAB,        // Modbus: Reg0=[C][D] Reg1=[A][B] - word swap (very common)
+        BADC,        // Modbus: Reg0=[B][A] Reg1=[D][C] - byte + word swap
+        DCBA         // Modbus: Reg0=[D][C] Reg1=[B][A] - little endian storage
+    };
+}
+```
+
+**Example:** The float value `123.45f` has hex representation `0x42F6E666` (A=0x42, B=0xF6, C=0xE6, D=0x66).
+This value would be **stored in the Modbus register table** as:
+- `ABCD`: Register 0 = `0x42F6`, Register 1 = `0xE666` (natural order)
+- `CDAB`: Register 0 = `0xE666`, Register 1 = `0x42F6` ← Very common
+- `BADC`: Register 0 = `0xF642`, Register 1 = `0x66E6` 
+- `DCBA`: Register 0 = `0x66E6`, Register 1 = `0xF642` (fully reversed)
+
+### Writing data with conversion
+
+#### Setter methods signatures
+
+```cpp
+// 32-bit setters (2 registers) - return number of registers written
+size_t Frame::setFloat(float value, size_t regIndex, ByteOrder order = ByteOrder::ABCD);
+size_t Frame::setUint32(uint32_t value, size_t regIndex, ByteOrder order = ByteOrder::ABCD);  
+size_t Frame::setInt32(int32_t value, size_t regIndex, ByteOrder order = ByteOrder::ABCD);
+
+// 16-bit setters (1 register with endianness) - return number of registers written  
+size_t Frame::setUint16(uint16_t value, size_t regIndex, ByteOrder order = ByteOrder::AB);
+size_t Frame::setInt16(int16_t value, size_t regIndex, ByteOrder order = ByteOrder::AB);
+```
+
+**Return value:** All setters return the number of registers successfully written:
+- `2` for 32-bit types (float, uint32_t, int32_t)
+- `1` for 16-bit types (uint16_t, int16_t) 
+- `0` if an error occurred (out of bounds, invalid parameters)
+
+#### Usage example
+
+```cpp
+Modbus::Frame request;
+request.clearData();  // ⚠️ Good practice: ALWAYS clear before setting data
+
+// Set different data types with appropriate byte ordering
+size_t regsUsed = 0;
+regsUsed += request.setFloat(123.45f, 0, Modbus::ByteOrder::CDAB);    // 2 registers
+regsUsed += request.setUint32(67890, 2, Modbus::ByteOrder::CDAB);     // 2 registers  
+regsUsed += request.setInt16(999, 4, Modbus::ByteOrder::AB);          // 1 register
+// Total: 5 registers used, regCount automatically set to 5
+
+if (regsUsed != 5) {
+    // Handle error - frame construction failed
+}
+```
+
+#### Important notes for setters
+
+- Good practice: **always call `clearData()` before setting data**
+- `regCount` is automatically updated to accommodate the data: `regCount = max(regCount, regIndex + nbRegisters)`
+- **Risk of overwriting**: If you call setters on overlapping register ranges, data may be overwritten silently
+
+### Reading data with conversion
+
+#### Getter methods signatures
+
+```cpp
+// 32-bit getters (2 registers) - return bool success, value by reference
+// order arg defaults to ByteOrder::ABCD
+bool Frame::getFloat(float& target, size_t regIndex, ByteOrder order) const;
+bool Frame::getUint32(uint32_t& target, size_t regIndex, ByteOrder order) const;
+bool Frame::getInt32(int32_t& target, size_t regIndex, ByteOrder order) const;
+
+// 16-bit getters (1 register with endianness) - return bool success, value by reference
+// order arg defaults to ByteOrder::AB
+bool Frame::getUint16(uint16_t& target, size_t regIndex, ByteOrder order) const;
+bool Frame::getInt16(int16_t& target, size_t regIndex, ByteOrder order) const;
+```
+
+**Return value:** All getters return a boolean indicating success:
+- `true`: Value successfully extracted and written to the `result` parameter
+- `false`: Error occurred (insufficient data, invalid register index, etc.)
+
+**Parameters:**
+- `target`: Reference to store the extracted value (only modified on success)
+- `regIndex`: Starting register index (0-based)
+- `order`: Byte ordering format (defaults to big endian)
+
+#### Usage example
+
+```cpp
+Modbus::Frame response; // Received from server
+
+float voltage;
+uint32_t current;
+int16_t status;
+
+// Extract data with proper byte ordering
+bool success = true;
+success &= response.getFloat(voltage, 0, Modbus::ByteOrder::CDAB);
+success &= response.getUint32(current, 2, Modbus::ByteOrder::CDAB);
+success &= response.getInt16(status, 4, Modbus::ByteOrder::AB);
+
+if (success) {
+    // All values extracted successfully
+    processData(voltage, current, status);
+} else {
+    // Parsing error - insufficient data or invalid register indices
+}
+```
+
+### Relationship with raw data methods
+
+The conversion API complements but doesn't replace the raw `Modbus::Frame` data read/write methods:
+
+- **Use raw methods** (`setRegisters`, `getRegisters`, etc.) for raw register manipulation with default Modbus endianness (usually OK in most cases where you are dealing with individual registers)
+- **Use conversion API** (`setFloat`, `getUint32`, etc.) when working with typed data and known endianness
+
+It's best to avoid mixing both approaches, but if needed, start by using the raw methods first, then override the desired registers sets with the conversion API.
