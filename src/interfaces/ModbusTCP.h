@@ -55,7 +55,7 @@ public:
         uint16_t tid = 0;
 
         void set(int socketNum, uint16_t tid) { active=true; startMs=TIME_MS(); this->socketNum=socketNum; this->tid=tid; }
-        void clear() { active=false; startMs=0; socketNum=-1; tid=0; }
+        void clear() { socketNum=-1; startMs=0; tid=0; active=false; }
     };
 
     /* @brief Stores the current transmission data context
@@ -110,7 +110,7 @@ private:
     Mutex _txMutex; // Protects access to _txBuffer & _txCtx
 
     // Transaction management
-    TransactionCtx _currentTransaction; // IMPORTANT: must ONLY be accessed from rxTxTask context!
+    TransactionCtx _currentTransaction; // IMPORTANT: must ONLY be written from rxTxTask context!
 
     // Data processing
     // _rxEventQueue: receives RX events from HAL (only the handle, belongs to HAL layer)
