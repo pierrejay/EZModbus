@@ -110,8 +110,7 @@ private:
     Mutex _txMutex; // Protects access to _txBuffer & _txCtx
 
     // Transaction management
-    TransactionCtx _currentTransaction;
-    Mutex _transactionMutex;
+    TransactionCtx _currentTransaction; // IMPORTANT: must ONLY be accessed from rxTxTask context!
 
     // Data processing
     // _rxEventQueue: receives RX events from HAL (only the handle, belongs to HAL layer)
@@ -121,7 +120,11 @@ private:
     StaticQueue_t _txRequestQueueBuffer;
     alignas(4) uint8_t _txRequestQueueStorage[1 * sizeof(void*)];
     QueueHandle_t _txRequestQueue = nullptr;
-    // _eventQueueSet: Combines RX event queue + HAL event queue
+    // _txnControlQueue: only rxTxTask terminates transaction through this queue
+    StaticQueue_t _txnControlQueueBuffer;
+    alignas(4) uint8_t _txnControlQueueStorage[1 * sizeof(void*)];
+    QueueHandle_t _txnControlQueue = nullptr;
+    // _eventQueueSet: Combines TX event queue + HAL event queue + Txn control queue
     QueueSetHandle_t _eventQueueSet = nullptr;
 
     // ===================================================================================

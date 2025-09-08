@@ -82,8 +82,15 @@ TCP::Result TCP::begin() {
         return Error(ERR_INIT_FAILED, "failed to create TX queue");
     }
 
+    // Create Txn control queue (size 1)
+    _txnControlQueue = xQueueCreateStatic(1, sizeof(void*), _txnControlQueueStorage, &_txnControlQueueBuffer);
+    if (!_txnControlQueue) {
+        _rxEventQueue = nullptr;
+        return Error(ERR_INIT_FAILED, "failed to create Txn control queue");
+    }
+
     // Create QueueSet
-    size_t setSize = 1 + ModbusHAL::TCP::RX_QUEUE_SIZE;
+    size_t setSize = ModbusHAL::TCP::RX_QUEUE_SIZE + 1 + 1;
     _eventQueueSet = xQueueCreateSet(setSize);
     if (!_eventQueueSet) {
         beginCleanup();
@@ -91,13 +98,17 @@ TCP::Result TCP::begin() {
     }
 
     // Add queues to QueueSet
+    if (xQueueAddToSet(_rxEventQueue, _eventQueueSet) != pdPASS) {
+        beginCleanup();
+        return Error(ERR_INIT_FAILED, "failed to add HAL RX queue to set");
+    }
     if (xQueueAddToSet(_txRequestQueue, _eventQueueSet) != pdPASS) {
         beginCleanup();
         return Error(ERR_INIT_FAILED, "failed to add TX queue to set");
     }
-    if (xQueueAddToSet(_rxEventQueue, _eventQueueSet) != pdPASS) {
+    if (xQueueAddToSet(_txnControlQueue, _eventQueueSet) != pdPASS) {
         beginCleanup();
-        return Error(ERR_INIT_FAILED, "failed to add HAL RX queue to set");
+        return Error(ERR_INIT_FAILED, "failed to add Txn control queue to set");
     }
 
     // Clear buffers
@@ -203,13 +214,13 @@ bool TCP::isReady() {
 
 /* @brief Abort current transaction (cleanup hint from client)
  * @note Called when client times out to allow immediate cleanup
+ * @note Safe to be called from outside (signals to txnControlQueue, managed by rxTxTask)
  */
 void TCP::abortCurrentTransaction() {
-    Lock guard(_transactionMutex, 0); // Try-lock no wait
-    if (guard.isLocked() && _currentTransaction.active) {
-        Modbus::Debug::LOG_MSG("Client timeout - aborting TCP transaction");
-        endTransaction();
-    }
+    if (!_isInitialized || !_txnControlQueue) return;
+    // Send a dummy signal, rxTxTask will take care of aborting the txn
+    void* dummy = this;
+    (void)xQueueSend(_txnControlQueue, &dummy, 0);
 }
 
 /* @brief Get the handle of the poll task.
@@ -230,8 +241,9 @@ TaskHandle_t TCP::getRxTxTaskHandle() {
 void TCP::beginCleanup() {
     // Clean up resources in reverse order of creation
     if (_eventQueueSet) {
-        if (_rxEventQueue) xQueueRemoveFromSet(_rxEventQueue, _eventQueueSet);
+        if (_txnControlQueue) xQueueRemoveFromSet(_txnControlQueue, _eventQueueSet);
         if (_txRequestQueue) xQueueRemoveFromSet(_txRequestQueue, _eventQueueSet);
+        if (_rxEventQueue) xQueueRemoveFromSet(_rxEventQueue, _eventQueueSet);
         vQueueDelete(_eventQueueSet);
         _eventQueueSet = nullptr;
     }
@@ -239,6 +251,11 @@ void TCP::beginCleanup() {
     if (_txRequestQueue) {
         vQueueDelete(_txRequestQueue);
         _txRequestQueue = nullptr;
+    }
+
+    if (_txnControlQueue) {
+        vQueueDelete(_txnControlQueue);
+        _txnControlQueue = nullptr;
     }
     
     // Do not delete HAL RX queue as it belongs to _tcpHAL
@@ -525,28 +542,21 @@ uint16_t TCP::getNextOutgoingTransactionId() {
  * @param socketNum The socket number associated with this transaction.
  * @param transactionId The transaction ID for this transaction.
  * @return True if the transaction was started, false otherwise (e.g., mutex lock failed, already in transaction for a client).
+ * @note IMPORTANT: must ONLY be called from rxTxTask context!
  */
 bool TCP::beginTransaction(int socketNum, uint16_t transactionId) {
-    Lock guard(_transactionMutex, 0);  // Try-lock
-    if (!guard.isLocked() || _currentTransaction.active) {
-        Modbus::Debug::LOG_MSG("transaction already in progress");
-        return false;
-    }
-
     _currentTransaction.set(socketNum, transactionId);
     Modbus::Debug::LOG_MSGF("Transaction started on socket: %d with TID: %d", socketNum, transactionId);
     return true;
 }
 
 /* @brief Mark the _currentTransaction.active flag to false at the end of a Modbus transaction.
+ * @note IMPORTANT: must ONLY be called from rxTxTask context!
  */
 void TCP::endTransaction() {
-    Lock guard(_transactionMutex); // Wait for lock
     if (_currentTransaction.active) {
         Modbus::Debug::LOG_MSGF("Transaction ended on socket: %d with TID: %d", _currentTransaction.socketNum, _currentTransaction.tid);
         _currentTransaction.clear();
-    } else {
-        // Modbus::Debug::LOG_MSG("endTransaction called but not in transaction.");
     }
 }
 
@@ -559,6 +569,7 @@ void TCP::endTransaction() {
  */
 void TCP::rxTxTask(void* tcp) {
     TCP* self = static_cast<TCP*>(tcp);
+    bool cleanupTxnFlag = false; // For Txn control queue
 
     while (self->_isInitialized) {
         // Select one of the queues (TX or RX) or timeout 100 ms
@@ -591,14 +602,24 @@ void TCP::rxTxTask(void* tcp) {
                     self->_rxBuffer.clear(); // reset for next iteration
                 }
             }
+        } else if (member == self->_txnControlQueue) {
+            void* dummy;
+            if (xQueueReceive(self->_txnControlQueue, &dummy, 0) == pdTRUE) {
+                cleanupTxnFlag = true;
+                // Txn will be closed in default case (timeout)
+            }
         }
 
         // ----------- Transaction timeout -----------
         if (self->_currentTransaction.active) {
             uint32_t now = TIME_MS();
-            if (now - self->_currentTransaction.startMs > TCP_TRANSACTION_SAFETY_TIMEOUT_MS) {
-                Modbus::Debug::LOG_MSGF("Transaction timeout on socket %d TID: %d", self->_currentTransaction.socketNum, self->_currentTransaction.tid);
+            if (now - self->_currentTransaction.startMs > TCP_TRANSACTION_SAFETY_TIMEOUT_MS
+                || cleanupTxnFlag) {
+                Modbus::Debug::LOG_MSGF("Transaction %s on socket %d TID: %d",
+                    cleanupTxnFlag ? "aborted" : "timeout",
+                    self->_currentTransaction.socketNum, self->_currentTransaction.tid);
                 self->endTransaction();
+                cleanupTxnFlag = false;
             }
         }
 
