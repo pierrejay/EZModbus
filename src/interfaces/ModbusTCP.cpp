@@ -545,6 +545,10 @@ uint16_t TCP::getNextOutgoingTransactionId() {
  * @note IMPORTANT: must ONLY be called from rxTxTask context!
  */
 bool TCP::beginTransaction(int socketNum, uint16_t transactionId) {
+    if (_currentTransaction.active) {
+        Modbus::Debug::LOG_MSG("Transaction already in progress");
+        return false;
+    }
     _currentTransaction.set(socketNum, transactionId);
     Modbus::Debug::LOG_MSGF("Transaction started on socket: %d with TID: %d", socketNum, transactionId);
     return true;
