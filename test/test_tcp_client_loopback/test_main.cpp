@@ -1105,6 +1105,75 @@ void test_request_timeout() {
     vTaskDelay(pdMS_TO_TICKS(Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS + 200));
 }
 
+void test_server_drops_response() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_SERVER_DROPS_RESPONSE - Server receives but doesn't respond");
+    
+    // Temporarily suspend the server's TX processing to simulate no response
+    // The server will receive the request but won't be able to send response
+    TaskHandle_t serverTaskHandle = mbt.getRxTxTaskHandle();
+    
+    // Send a read request
+    Modbus::Frame readRequest = {
+        .type = Modbus::REQUEST,
+        .fc = Modbus::READ_HOLDING_REGISTERS,
+        .slaveId = TEST_SLAVE_ID,
+        .regAddress = 0,
+        .regCount = 1,
+        .exceptionCode = Modbus::NULL_EXCEPTION
+    };
+    Modbus::Frame readResponse;
+    
+    // Use async mode to track timeout
+    Modbus::Client::Result tracker = Modbus::Client::NODATA;
+    auto result = client.sendRequest(readRequest, readResponse, &tracker);
+    
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result); // Request sent successfully
+    
+    // Now suspend server to prevent response
+    vTaskSuspend(serverTaskHandle);
+    
+    // Wait for client timeout
+    uint32_t startTime = TIME_MS();
+    uint32_t timeoutDuration = Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS + 200; // Add margin
+    while (TIME_MS() - startTime < timeoutDuration) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        if (tracker != Modbus::Client::NODATA) break;
+    }
+    
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, tracker, 
+        "Client should timeout when server doesn't respond");
+    
+    // Resume server
+    vTaskResume(serverTaskHandle);
+    vTaskDelay(pdMS_TO_TICKS(100)); // Let server recover
+    
+    // Verify transaction was properly cleaned up via abortCurrentTransaction
+    // Send another request to verify we're not stuck
+    Modbus::Frame testRequest = {
+        .type = Modbus::REQUEST,
+        .fc = Modbus::READ_HOLDING_REGISTERS,
+        .slaveId = TEST_SLAVE_ID,
+        .regAddress = 0,
+        .regCount = 1,
+        .exceptionCode = Modbus::NULL_EXCEPTION
+    };
+    Modbus::Frame testResponse;
+    
+    result = client.sendRequest(testRequest, testResponse, nullptr); // Sync mode
+    
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, result, 
+        "Client should be able to send new requests after timeout cleanup");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::NULL_EXCEPTION, testResponse.exceptionCode,
+        "Response should be valid after recovery");
+    
+    Modbus::Logger::logln("TEST_SERVER_DROPS_RESPONSE - Transaction cleanup verified");
+    Modbus::Logger::logln();
+}
+
 void test_modbus_exceptions() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_MODBUS_EXCEPTIONS - CASE 1: READ EXCEPTION (ILLEGAL DATA ADDRESS)");
@@ -1692,6 +1761,7 @@ void setup() {
     #undef X
     
     RUN_TEST(test_request_timeout);
+    RUN_TEST(test_server_drops_response);
     RUN_TEST(test_modbus_exceptions);
     RUN_TEST(test_invalid_parameters);
     RUN_TEST(test_broadcast_read_rejected);
