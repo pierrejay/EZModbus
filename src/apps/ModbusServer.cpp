@@ -134,7 +134,7 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
     _responseBuffer.slaveId = request.slaveId;
     _responseBuffer.regAddress = request.regAddress;
     _responseBuffer.regCount = request.regCount;
-    _responseBuffer.clearData();
+    _responseBuffer.clearData(false);
     _responseBuffer.exceptionCode = Modbus::NULL_EXCEPTION;
 
     // Check that the function code is valid, return an exception if not
@@ -166,7 +166,7 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
  * @return The result of the request
  */
 Server::Result Server::handleRead(const Modbus::Frame& request, Modbus::Frame& response) {
-    response.clearData();
+    response.clearData(false);
 
     // Step 1: Basic request validation
     if (request.regCount > 0 && request.regAddress > (Modbus::MAX_REG_ADDR - request.regCount + 1)) {
@@ -270,7 +270,7 @@ Server::Result Server::handleRead(const Modbus::Frame& request, Modbus::Frame& r
         
         // Step 5: Check handler result and abort on error
         if (handlerResult != Modbus::NULL_EXCEPTION) {
-            response.clearData();  // Clear partial response
+            response.clearData(false);  // Clear partial response
             response.exceptionCode = handlerResult;
             return Error(Server::ERR_RCV_SLAVE_DEVICE_FAILURE, "Word read handler failed");
         }
@@ -279,7 +279,7 @@ Server::Result Server::handleRead(const Modbus::Frame& request, Modbus::Frame& r
         if (request.fc == Modbus::READ_HOLDING_REGISTERS || request.fc == Modbus::READ_INPUT_REGISTERS) {
             // Write registers directly to response at calculated position
             if (!response.setRegisters(_wordBuffer, wordEntry->nbRegs, responseIndex)) {
-                response.clearData();
+                response.clearData(false);
                 response.exceptionCode = Modbus::SLAVE_DEVICE_FAILURE;
                 return Error(Server::ERR_RCV_SLAVE_DEVICE_FAILURE, "Failed to write registers to response");
             }
@@ -289,7 +289,7 @@ Server::Result Server::handleRead(const Modbus::Frame& request, Modbus::Frame& r
             for (uint16_t i = 0; i < wordEntry->nbRegs; ++i) {
                 bool coilValue = (_wordBuffer[i] != 0);
                 if (!response.setCoils(&coilValue, 1, responseIndex + i)) {
-                    response.clearData();
+                    response.clearData(false);
                     response.exceptionCode = Modbus::SLAVE_DEVICE_FAILURE;
                     return Error(Server::ERR_RCV_SLAVE_DEVICE_FAILURE, "Failed to write coil to response");
                 }

@@ -447,7 +447,7 @@ public:
         _txFrame.slaveId = slaveId;
         _txFrame.regAddress = address;
         _txFrame.regCount = quantity;
-        _txFrame.clearData();
+        _txFrame.clearData(false);
         _txFrame.exceptionCode = Modbus::NULL_EXCEPTION;
         _txValues.clear();
 

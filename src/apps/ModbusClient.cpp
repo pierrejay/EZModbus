@@ -513,7 +513,7 @@ void Client::staticHandleTxResult(ModbusInterface::IInterface::Result result, vo
         client->_responseBuffer = client->_pendingRequest.getRequestMetadata();
         client->_responseBuffer.type = Modbus::RESPONSE;
         client->_responseBuffer.exceptionCode = Modbus::NULL_EXCEPTION;
-        client->_responseBuffer.clearData();
+        client->_responseBuffer.clearData(false);
         client->_pendingRequest.setResponse(client->_responseBuffer, true);
         return;
     }

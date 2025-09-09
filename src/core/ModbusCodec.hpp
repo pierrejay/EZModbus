@@ -302,7 +302,7 @@ class PDU {
                     if (bytes.size() != byteCount + 2) return HandleError(pdu, ERR_INVALID_LEN);
                     if (byteCount % 2 != 0) return HandleError(pdu, ERR_INVALID_BYTE_COUNT);
                     
-                    pdu.clearData();
+                    pdu.clearData(false);
                     for (uint8_t i = 0; i < byteCount; i += 2) {
                         uint16_t value = (bytes[2 + i] << 8) | bytes[2 + i + 1];
                         pdu.data[i/2] = value;  // Diviser par 2 pour avoir le bon index
@@ -364,7 +364,7 @@ class PDU {
                     if (bytes.size() != byteCount + 6) return HandleError(pdu, ERR_INVALID_LEN);
                     if (byteCount != pdu.regCount * 2) return HandleError(pdu, ERR_INVALID_BYTE_COUNT);
                     
-                    pdu.clearData();
+                    pdu.clearData(false);
                     for (uint8_t i = 0; i < byteCount; i += 2) {
                         uint16_t value = (bytes[6 + i] << 8) | bytes[6 + i + 1];
                         pdu.data[i/2] = value;

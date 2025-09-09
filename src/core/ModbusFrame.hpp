@@ -10,6 +10,23 @@
 namespace Modbus {
 
 // ===================================================================================
+// BYTE ORDER ENUM FOR TYPE CONVERSION ENDIANNESS
+// ===================================================================================
+
+enum class ByteOrder {
+    // 16-bit (1 register)
+    AB,          // Big endian (default)
+    BA,          // Little endian
+    
+    // 32-bit (2 registers)  
+    ABCD,        // Big endian (default)
+    CDAB,        // Word swap (very common in Modbus)
+    BADC,        // Byte + word swap
+    DCBA         // Little endian
+};
+
+
+// ===================================================================================
 // MODBUS FRAME HEADER
 // ===================================================================================
 
@@ -28,7 +45,7 @@ struct Frame {
 
     // Clear functions
     void clear();
-    void clearData();
+    void clearData(bool resetRegCount = true);
 
     // Getter functions for frame data
     uint16_t getRegister(size_t index) const;
@@ -53,20 +70,25 @@ struct Frame {
     bool setRegisters(const uint16_t* src, size_t len, size_t startRegIndex);
     bool setCoils(const std::vector<bool>& src, size_t startCoilIndex);
     bool setCoils(const bool* src, size_t len, size_t startCoilIndex);
-};
+    
+    // Type conversion setters with endianness support
+    size_t setFloat(float value, size_t regIndex, ByteOrder order = ByteOrder::ABCD);
+    size_t setUint32(uint32_t value, size_t regIndex, ByteOrder order = ByteOrder::ABCD);
+    size_t setInt32(int32_t value, size_t regIndex, ByteOrder order = ByteOrder::ABCD);
+    size_t setUint16(uint16_t value, size_t regIndex, ByteOrder order = ByteOrder::AB);
+    size_t setInt16(int16_t value, size_t regIndex, ByteOrder order = ByteOrder::AB);
+    
+    // Type conversion getters with endianness support
+    bool getFloat(float& target, size_t regIndex, ByteOrder order = ByteOrder::ABCD) const;
+    bool getUint32(uint32_t& target, size_t regIndex, ByteOrder order = ByteOrder::ABCD) const;
+    bool getInt32(int32_t& target, size_t regIndex, ByteOrder order = ByteOrder::ABCD) const;
+    bool getUint16(uint16_t& target, size_t regIndex, ByteOrder order = ByteOrder::AB) const;
+    bool getInt16(int16_t& target, size_t regIndex, ByteOrder order = ByteOrder::AB) const;
 
-/* @brief Clear the frame.
-    * @note This function clears the frame to its default state.
-    */
-inline void Frame::clear() {
-    type = NULL_MSG;
-    fc = NULL_FC;
-    slaveId = 0;
-    regAddress = 0;
-    regCount = 0;
-    data.fill(0);
-    exceptionCode = NULL_EXCEPTION;
-}
+private:
+    // Helper function to validate data bounds for getters/setters
+    bool checkDataBounds(size_t startIdx, size_t count) const;
+};
 
 // ===================================================================================
 // INLINE FUNCTIONS - IN-PLACE DATA PACKING/UNPACKING IN MODBUS::FRAME
@@ -245,15 +267,31 @@ inline std::array<uint16_t, FRAME_DATASIZE> packCoils(const uint16_t* src, size_
     return result;
 }
 
+
 // ===================================================================================
-// MODBUS FRAME IMPLEMENTATION
+// MODBUS FRAME METHODS IMPLEMENTATION
 // ===================================================================================
 
+/* @brief Clear the frame.
+    * @note This function clears the frame to its default state.
+    */
+inline void Frame::clear() {
+    type = NULL_MSG;
+    fc = NULL_FC;
+    slaveId = 0;
+    regAddress = 0;
+    regCount = 0;
+    data.fill(0);
+    exceptionCode = NULL_EXCEPTION;
+}
+
 /* @brief Clear the data of the frame.
+    * @param resetRegCount Whether to reset the regCount (default: true)
     * @note This function clears the data of the frame to its default state.
     */
-inline void Frame::clearData() {
+inline void Frame::clearData(bool resetRegCount) {
     data.fill(0);
+    if (resetRegCount) regCount = 0;
 }
 
 /* @brief Get a register value from frame data.
@@ -533,7 +571,286 @@ inline bool Modbus::Frame::setCoils(const bool* src, size_t len, size_t startCoi
 }
 
 
+// ===================================================================================
+// TYPE CONVERSION SUPPORT IMPLEMENTATION
+// ===================================================================================
 
+/* @brief Validate if register range is within bounds
+    * @param startReg Starting register index
+    * @param count Number of registers to check
+    * @return true if range is within bounds, false otherwise
+    */
+inline bool Modbus::Frame::checkDataBounds(size_t startIdx, size_t count) const {
+    return startIdx + count <= FRAME_DATASIZE;
+}
+
+/* @brief Set a float value at specified register index with endianness support
+    * @param value The float value to set
+    * @param regIndex Starting register index (0-based)
+    * @param order Byte order for the value
+    * @return Number of registers set (2 on success, 0 on error)
+    */
+inline size_t Modbus::Frame::setFloat(float value, size_t regIndex, ByteOrder order) {
+    // Check bounds
+    if (!checkDataBounds(regIndex, 2)) return 0;
+    
+    // Convert float to uint32_t for bit manipulation
+    uint32_t uintValue;
+    memcpy(&uintValue, &value, sizeof(float));
+    
+    // Convert endianness
+    uint16_t word1, word2;
+    switch (order) {
+        case ByteOrder::ABCD:
+            word1 = (uintValue >> 16) & 0xFFFF;
+            word2 = uintValue & 0xFFFF;
+            break;
+        case ByteOrder::CDAB:
+            word1 = uintValue & 0xFFFF;
+            word2 = (uintValue >> 16) & 0xFFFF;
+            break;
+        case ByteOrder::BADC:
+            word1 = __builtin_bswap16((uintValue >> 16) & 0xFFFF);
+            word2 = __builtin_bswap16(uintValue & 0xFFFF);
+            break;
+        case ByteOrder::DCBA:
+            word1 = __builtin_bswap16(uintValue & 0xFFFF);
+            word2 = __builtin_bswap16((uintValue >> 16) & 0xFFFF);
+            break;
+        default: return 0;
+    }
+    
+    // Store in data array
+    data[regIndex] = word1;
+    data[regIndex + 1] = word2;
+    
+    // Auto-increment regCount
+    regCount = std::max(regCount, uint16_t(regIndex + 2));
+    
+    return 2;
+}
+
+/* @brief Set a uint32_t value at specified register index with endianness support
+    * @param value The uint32_t value to set
+    * @param regIndex Starting register index (0-based)
+    * @param order Byte order for the value
+    * @return Number of registers set (2 on success, 0 on error)
+    */
+inline size_t Modbus::Frame::setUint32(uint32_t value, size_t regIndex, ByteOrder order) {
+    // Check bounds
+    if (!checkDataBounds(regIndex, 2)) return 0;
+    
+    // Convert endianness
+    uint16_t word1, word2;
+    switch (order) {
+        case ByteOrder::ABCD:
+            word1 = (value >> 16) & 0xFFFF;
+            word2 = value & 0xFFFF;
+            break;
+        case ByteOrder::CDAB:
+            word1 = value & 0xFFFF;
+            word2 = (value >> 16) & 0xFFFF;
+            break;
+        case ByteOrder::BADC:
+            word1 = __builtin_bswap16((value >> 16) & 0xFFFF);
+            word2 = __builtin_bswap16(value & 0xFFFF);
+            break;
+        case ByteOrder::DCBA:
+            word1 = __builtin_bswap16(value & 0xFFFF);
+            word2 = __builtin_bswap16((value >> 16) & 0xFFFF);
+            break;
+        default: return 0;
+    }
+    
+    // Store in data array
+    data[regIndex] = word1;
+    data[regIndex + 1] = word2;
+    
+    // Auto-increment regCount
+    regCount = std::max(regCount, uint16_t(regIndex + 2));
+    
+    return 2;
+}
+
+/* @brief Set an int32_t value at specified register index with endianness support
+    * @param value The int32_t value to set
+    * @param regIndex Starting register index (0-based)
+    * @param order Byte order for the value
+    * @return Number of registers set (2 on success, 0 on error)
+    */
+inline size_t Modbus::Frame::setInt32(int32_t value, size_t regIndex, ByteOrder order) {
+    // Convert to unsigned and use setUint32
+    return setUint32(static_cast<uint32_t>(value), regIndex, order);
+}
+
+/* @brief Set a uint16_t value at specified register index with endianness support
+    * @param value The uint16_t value to set
+    * @param regIndex Register index (0-based)
+    * @param order Byte order for the value
+    * @return Number of registers set (1 on success, 0 on error)
+    */
+inline size_t Modbus::Frame::setUint16(uint16_t value, size_t regIndex, ByteOrder order) {
+    // Check bounds
+    if (!checkDataBounds(regIndex, 1)) return 0;
+    
+    // Convert endianness
+    uint16_t word;
+    switch (order) {
+        case ByteOrder::AB:
+            word = value;
+            break;
+        case ByteOrder::BA:
+            word = __builtin_bswap16(value);
+            break;
+        default: return 0;
+    }
+    
+    // Store in data array
+    data[regIndex] = word;
+    
+    // Auto-increment regCount
+    regCount = std::max(regCount, uint16_t(regIndex + 1));
+    
+    return 1;
+}
+
+/* @brief Set an int16_t value at specified register index with endianness support
+    * @param value The int16_t value to set
+    * @param regIndex Register index (0-based)
+    * @param order Byte order for the value
+    * @return Number of registers set (1 on success, 0 on error)
+    */
+inline size_t Modbus::Frame::setInt16(int16_t value, size_t regIndex, ByteOrder order) {
+    // Convert to unsigned and use setUint16
+    return setUint16(static_cast<uint16_t>(value), regIndex, order);
+}
+
+/* @brief Get a float value from specified register index with endianness support
+    * @param target Reference to store the result
+    * @param regIndex Starting register index (0-based)
+    * @param order Byte order for the value
+    * @return true if successful, false if index out of bounds
+    */
+inline bool Modbus::Frame::getFloat(float& target, size_t regIndex, ByteOrder order) const {
+    // Check bounds
+    if (!checkDataBounds(regIndex, 2)) return false;
+    if (regIndex + 2 > regCount) return false;
+    
+    // Get the two words
+    uint16_t word1 = data[regIndex];
+    uint16_t word2 = data[regIndex + 1];
+    
+    // Convert endianness
+    uint32_t uintValue;
+    switch (order) {
+        case ByteOrder::ABCD:
+            uintValue = (static_cast<uint32_t>(word1) << 16) | word2;
+            break;
+        case ByteOrder::CDAB:
+            uintValue = (static_cast<uint32_t>(word2) << 16) | word1;
+            break;
+        case ByteOrder::BADC:
+            uintValue = (static_cast<uint32_t>(__builtin_bswap16(word1)) << 16) | __builtin_bswap16(word2);
+            break;
+        case ByteOrder::DCBA:
+            uintValue = (static_cast<uint32_t>(__builtin_bswap16(word2)) << 16) | __builtin_bswap16(word1);
+            break;
+        default: return false;
+    }
+    
+    // Convert uint32_t to float
+    memcpy(&target, &uintValue, sizeof(float));
+    return true;
+}
+
+/* @brief Get a uint32_t value from specified register index with endianness support
+    * @param target Reference to store the result
+    * @param regIndex Starting register index (0-based)
+    * @param order Byte order for the value
+    * @return true if successful, false if index out of bounds
+    */
+inline bool Modbus::Frame::getUint32(uint32_t& target, size_t regIndex, ByteOrder order) const {
+    // Check bounds
+    if (!checkDataBounds(regIndex, 2)) return false;
+    if (regIndex + 2 > regCount) return false;
+    
+    // Get the two words
+    uint16_t word1 = data[regIndex];
+    uint16_t word2 = data[regIndex + 1];
+    
+    // Convert endianness
+    switch (order) {
+        case ByteOrder::ABCD:
+            target = (static_cast<uint32_t>(word1) << 16) | word2;
+            break;
+        case ByteOrder::CDAB:
+            target = (static_cast<uint32_t>(word2) << 16) | word1;
+            break;
+        case ByteOrder::BADC:
+            target = (static_cast<uint32_t>(__builtin_bswap16(word1)) << 16) | __builtin_bswap16(word2);
+            break;
+        case ByteOrder::DCBA:
+            target = (static_cast<uint32_t>(__builtin_bswap16(word2)) << 16) | __builtin_bswap16(word1);
+            break;
+        default: return false;
+    }
+    
+    return true;
+}
+
+/* @brief Get an int32_t value from specified register index with endianness support
+    * @param target Reference to store the result
+    * @param regIndex Starting register index (0-based)
+    * @param order Byte order for the value
+    * @return true if successful, false if index out of bounds
+    */
+inline bool Modbus::Frame::getInt32(int32_t& target, size_t regIndex, ByteOrder order) const {
+    uint32_t uintResult;
+    if (!getUint32(uintResult, regIndex, order)) return false;
+    target = static_cast<int32_t>(uintResult);
+    return true;
+}
+
+/* @brief Get a uint16_t value from specified register index with endianness support
+    * @param target Reference to store the result
+    * @param regIndex Register index (0-based)
+    * @param order Byte order for the value
+    * @return true if successful, false if index out of bounds
+    */
+inline bool Modbus::Frame::getUint16(uint16_t& target, size_t regIndex, ByteOrder order) const {
+    // Check bounds
+    if (!checkDataBounds(regIndex, 1)) return false;
+    if (regIndex >= regCount) return false;
+    
+    // Get the word
+    uint16_t word = data[regIndex];
+    
+    // Convert endianness
+    switch (order) {
+        case ByteOrder::AB:
+            target = word;
+            break;
+        case ByteOrder::BA:
+            target = __builtin_bswap16(word);
+            break;
+        default: return false;
+    }
+    
+    return true;
+}
+
+/* @brief Get an int16_t value from specified register index with endianness support
+    * @param target Reference to store the result
+    * @param regIndex Register index (0-based)
+    * @param order Byte order for the value
+    * @return true if successful, false if index out of bounds
+    */
+inline bool Modbus::Frame::getInt16(int16_t& target, size_t regIndex, ByteOrder order) const {
+    uint16_t uintResult;
+    if (!getUint16(uintResult, regIndex, order)) return false;
+    target = static_cast<int16_t>(uintResult);
+    return true;
+}
 
 
 // ===================================================================================

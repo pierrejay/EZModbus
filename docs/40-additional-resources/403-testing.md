@@ -2,7 +2,7 @@
 
 EZModbus includes a comprehensive suite of `Unity`-based unit and integration tests that run on both native environments and real ESP32 hardware. The testing approach follows a progressive validation strategy:
 
-1. **Codec Tests (native)** - Validate encoding/decoding functions in a desktop environment
+1. **Codec Tests (native)** - Validate encoding/decoding & frame data conversion functions in a desktop environment
 2. **Server Tests with Mock client (Arduino ESP32)** - Validate register storage and request handling
 3. **Full Client/Server Tests (Arduino ESP32)** - Complete full round-trip tests with the actual EZModbus classes
 
@@ -18,8 +18,8 @@ Each test category ensures key functionality works as expected:
 
 **Codec tests:**
 
-* Encoding/decoding for all function codes
-* CRC, MBAP, error handling
+* Encoding/decoding for all function codes + frame data conversion
+* CRC, MBAP, reg count, error handling
 * ~1500 frame tests
 
 **Server tests:**
