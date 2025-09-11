@@ -5,3 +5,4 @@ CMakeCache.txt
 CMakeFiles
 external
 examples/pico-sdk
+dist
