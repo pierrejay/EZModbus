@@ -16,9 +16,14 @@ build_flags = -D EZMODBUS_DEBUG
 
 Or add `EZMODBUS_DEBUG` to the `target_compile_definitions` of your main project's `CMakeLists.txt` file.
 
-Due to the multi-threaded nature of the library, EZModbus uses a custom thread-safe log sink (`Modbus::Logger`) internally, through log helpers defined in an utility file (`ModbusDebug.h`). When debug is disabled, the methods are all neutralized by the define flags, in order to completely remove any overhead (even evaluating strings in `LOG_X()` arguments). This was chosen instead of the native ESP logging system due to its blocking nature, it is anyway not required in production as you can implement your own logs based on the error returns from the library.
+Due to the multi-threaded nature of the library, EZModbus uses a custom thread-safe log sink (`Modbus::Logger`) internally, through log helpers defined in an utility file (`ModbusDebug.h`). When debug is disabled, the methods are all neutralized by the define flags, in order to completely remove any overhead (even evaluating strings in `LOG_X()` arguments).
 
-By default, logs are printed to the default Serial port on Arduino (`Serial`, usually USB CDC on most ESP32 boards) or `UART_NUM_0` port for ESP-IDF. You can redirect them with the `EZMODBUS_LOG_OUTPUT` flag:
+Default outputs
+
+- Arduino: logs go to `Serial` (USB CDC on most ESP32 boards). You can redirect to another `HardwareSerial` with `EZMODBUS_LOG_OUTPUT`.
+- ESP-IDF: logs go to the IDF console (`printf` to stdout). The console destination is configured in menuconfig: `ESP System Settings → Channel for console output` (USB CDC/JTAG or UART). No direct UART driver handling is performed by EZModbus anymore since v1.1.5.
+
+Arduino redirection example with `EZMODBUS_LOG_OUTPUT`:
 
 ```cpp
 // In your code:
@@ -30,5 +35,5 @@ By default, logs are printed to the default Serial port on Arduino (`Serial`, us
 ; In your platformio.ini:
 build_flags = 
   -D EZMODBUS_DEBUG ; Enables debug
-  -D EZMODBUS_LOG_OUTPUT=Serial1 ; Prints logs to Serial1
+  -D EZMODBUS_LOG_OUTPUT=Serial1 ; Prints logs to Serial1 (Arduino only)
 ```

@@ -102,5 +102,5 @@ target_compile_definitions(EZModbus PUBLIC
     * Stack size of Log task (bytes)
     * Default: 4096
 * **`EZMODBUS_LOG_OUTPUT`**
-    * Log output pipe (Serial port)
-    * Default: `Serial` on Arduino, `UART_NUM_0` on ESP-IDF
+    * Log output pipe (Arduino only)
+    * Default: `Serial` on Arduino. On ESP-IDF logs go to the IDF console (stdout) configured in menuconfig.
