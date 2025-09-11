@@ -22,5 +22,5 @@ This documentation covers most aspects of the library from installation to advan
 ## Repository & release version
 
 * Repository URL : [https://github.com/pierrejay/EZModbus/](https://github.com/pierrejay/EZModbus/)
-* Release version : `v1.1.4`
+* Release version : `v1.1.5`
 
