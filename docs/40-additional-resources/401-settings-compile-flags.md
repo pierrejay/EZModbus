@@ -16,23 +16,31 @@ framework = arduino
 
 build_flags =
     -DEZMODBUS_DEBUG                    ; Enable debug output
-    -DEZMODBUS_EVENTBUS                 ; Enable EventBus system
     -DEZMODBUS_CLIENT_REQ_TIMEOUT=2000  ; Custom client timeout (2s)
     -DEZMODBUS_TCP_TXN_SAFETY_TIMEOUT=10000  ; Custom TCP safety timeout (10s)
 ```
 
 ### ESP-IDF (CMake)
 
-Add to your project's main `CMakeLists.txt` or component file, **after** including EZModbus:
+Add compile definitions in your **project root's** `CMakeLists.txt`:
 
 ```cmake
-# In your main CMakeLists.txt or component CMakeLists.txt
-target_compile_definitions(EZModbus PUBLIC
+# The following lines of boilerplate have to be in your project's
+# CMakeLists in this exact order for cmake to work correctly
+cmake_minimum_required(VERSION 3.16)
+
+# -> Add this section HERE (not after include/project)
+add_compile_definitions(
     EZMODBUS_DEBUG                      # Enable debug output
-    EZMODBUS_EVENTBUS                   # Enable EventBus system
     EZMODBUS_CLIENT_REQ_TIMEOUT=2000    # Custom client timeout (2s)
+    ...                                 # Other flags
 )
+
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(hello_world)
 ```
+
+For now, EZModbus doesn't provide config items editable directly via IDF's `menuconfig`.
 
 ## Settings per file
 
