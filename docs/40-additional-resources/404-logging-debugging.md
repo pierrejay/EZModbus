@@ -21,7 +21,7 @@ Example of log messages:
 > Data           : 0x0000 
 ```
 
-Due to the multi-threaded nature of the library, EZModbus uses a custom thread-safe log sink (`Modbus::Logger`) internally, through log helpers defined in an utility file (`ModbusDebug.h`). When debug is disabled, the methods are all neutralized by the define flags, in order to completely remove any overhead (even evaluating strings in `LOG_X()` arguments).
+Due to the multi-threaded nature of the library, EZModbus uses a custom thread-safe log sink (`Modbus::Logger`) internally, through log helpers defined in an utility file (`ModbusDebug.hpp`). When debug is disabled, the methods are all neutralized by the define flags, in order to completely remove any overhead (even evaluating strings in `LOG_X()` arguments).
 
 ## Enable debug logging
 
