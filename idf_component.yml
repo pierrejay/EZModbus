@@ -1,5 +1,5 @@
 ## IDF Component Manager Manifest File
-version: "1.1.4"
+version: "1.1.5"
 description: "EZModbus - C++ FreeRTOS Modbus library for ESP32"
 license: "MIT"
 url: "https://github.com/pierrejay/EZModbus/"

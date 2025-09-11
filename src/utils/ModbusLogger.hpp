@@ -20,8 +20,6 @@
 // Driver includes for log output
 #ifdef ARDUINO
     #include <Arduino.h>
-#elif defined(ESP_IDF_VERSION)
-    #include <driver/uart.h>
 #endif
 
 #ifndef EZMODBUS_LOG_Q_SIZE // Log queue size (# of messages)
@@ -46,8 +44,6 @@
 #ifndef EZMODBUS_LOG_OUTPUT
     #ifdef ARDUINO
         #define EZMODBUS_LOG_OUTPUT Serial
-    #elif defined(ESP_IDF_VERSION)
-        #define EZMODBUS_LOG_OUTPUT UART_NUM_0
     #endif
 #endif
 
@@ -55,8 +51,6 @@
 #ifndef EZMODBUS_LOG_CHUNK_SIZE
     #ifdef ARDUINO
         #define EZMODBUS_LOG_CHUNK_SIZE 64
-    #elif defined(ESP_IDF_VERSION)
-        #define EZMODBUS_LOG_CHUNK_SIZE 128
     #endif
 #endif
 
@@ -65,7 +59,9 @@
     #ifdef ARDUINO
         #define EZMODBUS_LOG_FLUSH() EZMODBUS_LOG_OUTPUT.flush()
     #elif defined(ESP_IDF_VERSION)
-        #define EZMODBUS_LOG_FLUSH() uart_wait_tx_done(EZMODBUS_LOG_OUTPUT, pdMS_TO_TICKS(500))
+        #define EZMODBUS_LOG_FLUSH() fflush(stdout)
+    #else
+        #define EZMODBUS_LOG_FLUSH() fflush(stdout)
     #endif
 #endif
 
@@ -248,31 +244,6 @@ private:
             vTaskDelay(pdMS_TO_TICKS(5)); // Wait for the buffer to be flushed
         }
         
-    #elif defined(ESP_IDF_VERSION)
-        static void writeOutput(const char* data, size_t len) {
-            const char* ptr = data;
-            size_t remaining = len;
-            
-            while (remaining > 0) {
-                size_t chunk = (remaining > EZMODBUS_LOG_CHUNK_SIZE) ? EZMODBUS_LOG_CHUNK_SIZE : remaining;
-                int written = uart_write_bytes(EZMODBUS_LOG_OUTPUT, ptr, chunk);
-                
-                if (written <= 0) {
-                    vTaskDelay(pdMS_TO_TICKS(5)); // Wait for the buffer to be flushed
-                    continue;
-                }
-                
-                ptr += written;
-                remaining -= written;
-                
-                if (remaining > 0) {
-                    vTaskDelay(pdMS_TO_TICKS(1)); // Yield before next chunk
-                }
-            }
-            
-            vTaskDelay(pdMS_TO_TICKS(5)); // Wait for the buffer to be flushed
-        }
-
     #else
         // Use printf by default
         static void writeOutput(const char* data, size_t len) {
