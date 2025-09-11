@@ -19,8 +19,7 @@ This documentation covers most aspects of the library from installation to advan
 - Server allows safe advertising of data encoded on several registers (e.g. IEEE 754 floats)
 - Comprehensive Unity test suite running on real hardware
 
-## Repository & release version
+## GitHub repository
 
-* Repository URL : [https://github.com/pierrejay/EZModbus/](https://github.com/pierrejay/EZModbus/)
-* Release version : `v1.1.5`
+Repository URL : [https://github.com/pierrejay/EZModbus/](https://github.com/pierrejay/EZModbus/)
 
