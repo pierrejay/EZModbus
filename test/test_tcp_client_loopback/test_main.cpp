@@ -182,6 +182,17 @@ void setUp() {
 }
 
 void tearDown() {
+    slowMode = false; // Disable slow mode if enabled
+
+    // Re-enable disabled client/server tasks if disabled
+    // (avoids timeouting next tests if we fail during
+    // a test that disables them)
+    TaskHandle_t ht;
+    ht = mbt.getRxTxTaskHandle();
+    if (ht && eTaskGetState(ht) == eSuspended) vTaskResume(ht);
+    ht = ezm.getRxTxTaskHandle();
+    if (ht && eTaskGetState(ht) == eSuspended) vTaskResume(ht);
+
     Serial.flush(); // Make sure all Unity logs are printed
 }
 
@@ -988,12 +999,12 @@ void test_write_max_##Name() { \
 WRITE_TESTS
 #undef X
 
-void test_request_timeout() {
+void test_timeout_client_interface() {
     Modbus::Logger::logln();
-    Modbus::Logger::logln("TEST_REQUEST_TIMEOUT - CASE 1: TIMEOUT ON READ REQUEST");
+    Modbus::Logger::logln("TEST_TIMEOUT_CLIENT_INTERFACE - CASE 1: TIMEOUT ON READ REQUEST");
     
-    // Temporarily disable the Modbus test server's RX task processing new requests.
-    // The goal is to make the server unresponsive. Suspending its poll task or RX task is one way.
+    // Temporarily disable the Modbus client interface task.
+    // The goal is to make the client interface unresponsive.
     TaskHandle_t rxTxTaskHandle = ezm.getRxTxTaskHandle(); // Get the TCP poll task handle
     vTaskSuspend(rxTxTaskHandle);
     vTaskDelay(pdMS_TO_TICKS(100)); // Give time for suspension to take effect
@@ -1037,7 +1048,7 @@ void test_request_timeout() {
     vTaskResume(rxTxTaskHandle);
     vTaskDelay(pdMS_TO_TICKS(100)); // Allow client's RX task to run
     
-    Modbus::Logger::logln("TEST_REQUEST_TIMEOUT - CASE 2: TIMEOUT ON WRITE REQUEST (SYNC)");
+    Modbus::Logger::logln("TEST_TIMEOUT_CLIENT_INTERFACE - CASE 2: TIMEOUT ON WRITE REQUEST (SYNC)");
     
     // Temporarily disable the client's RX task again
     vTaskSuspend(rxTxTaskHandle);
@@ -1072,7 +1083,7 @@ void test_request_timeout() {
     vTaskResume(rxTxTaskHandle);
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    Modbus::Logger::logln("TEST_REQUEST_TIMEOUT - CASE 2: TIMEOUT ON WRITE REQUEST (ASYNC)");
+    Modbus::Logger::logln("TEST_TIMEOUT_CLIENT_INTERFACE - CASE 2: TIMEOUT ON WRITE REQUEST (ASYNC)");
 
     // Temporarily disable the client's RX task again
     vTaskSuspend(rxTxTaskHandle);
@@ -1103,6 +1114,80 @@ void test_request_timeout() {
     // Wait for the server to be ready if any pending operations due to client being unresponsive
     // This delay might be important if the server tried to send something the client missed.
     vTaskDelay(pdMS_TO_TICKS(Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS + 200));
+}
+
+void test_timeout_server() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_TIMEOUT_SERVER - Server receives but doesn't respond");
+    
+    // Enable slow mode on the server
+    slowMode = true;
+
+    // Temporarily suspend the server's TX processing to simulate no response
+    // The server will receive the request but won't be able to send response
+    TaskHandle_t serverTaskHandle = mbt.getRxTxTaskHandle();
+    
+    // Send a read request
+    Modbus::Frame readRequest = {
+        .type = Modbus::REQUEST,
+        .fc = Modbus::READ_HOLDING_REGISTERS,
+        .slaveId = TEST_SLAVE_ID,
+        .regAddress = 0,
+        .regCount = 1,
+        .exceptionCode = Modbus::NULL_EXCEPTION
+    };
+    Modbus::Frame readResponse;
+    
+    // Use async mode to track timeout
+    Modbus::Client::Result tracker = Modbus::Client::NODATA;
+    auto result = client.sendRequest(readRequest, readResponse, &tracker);
+    
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result); // Request sent successfully
+    
+    // Let the request reach the server, then suspend its task before it sends its response
+    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskSuspend(serverTaskHandle);
+    
+    // Wait for client timeout
+    uint32_t startTime = TIME_MS();
+    uint32_t timeoutDuration = Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS + 200; // Add margin
+    while (TIME_MS() - startTime < timeoutDuration) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+        if (tracker != Modbus::Client::NODATA) break;
+    }
+    
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, tracker, 
+        "Client should timeout when server doesn't respond");
+    
+    // Resume server
+    vTaskResume(serverTaskHandle);
+    slowMode = false;
+    vTaskDelay(pdMS_TO_TICKS(100)); // Let server recover
+    
+    // Verify transaction was properly cleaned up via abortCurrentTransaction
+    // Send another request to verify we're not stuck
+    Modbus::Frame testRequest = {
+        .type = Modbus::REQUEST,
+        .fc = Modbus::READ_HOLDING_REGISTERS,
+        .slaveId = TEST_SLAVE_ID,
+        .regAddress = 0,
+        .regCount = 1,
+        .exceptionCode = Modbus::NULL_EXCEPTION
+    };
+    Modbus::Frame testResponse;
+    
+    result = client.sendRequest(testRequest, testResponse, nullptr); // Sync mode
+    
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, result, 
+        "Client should be able to send new requests after timeout cleanup");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::NULL_EXCEPTION, testResponse.exceptionCode,
+        "Response should be valid after recovery");
+    
+    Modbus::Logger::logln("TEST_TIMEOUT_SERVER - Transaction cleanup verified");
+    Modbus::Logger::logln();
 }
 
 void test_modbus_exceptions() {
@@ -1691,7 +1776,8 @@ void setup() {
     WRITE_TESTS
     #undef X
     
-    RUN_TEST(test_request_timeout);
+    RUN_TEST(test_timeout_client_interface);
+    RUN_TEST(test_timeout_server);
     RUN_TEST(test_modbus_exceptions);
     RUN_TEST(test_invalid_parameters);
     RUN_TEST(test_broadcast_read_rejected);
