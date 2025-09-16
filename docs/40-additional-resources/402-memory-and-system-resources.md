@@ -51,7 +51,7 @@ Stats from IDF ELF size analysis, per full Modbus stack (Client/Server app + RTU
     * ~10KB of Flash for both Modbus RTU & TCP
 * RAM usage (`.bss`):
     * ~4KB for Modbus RTU
-    * ~10KB for Modbus TCP (includes 1KB TCP buffer per socket, default setting : max 4 active sockets)
+    * ~10KB for Modbus TCP
 
 This includes all tasks' stacks as they are allocated statically, but does not include :
 

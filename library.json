@@ -24,7 +24,7 @@
   "export": {
     "include": [
       "src/*",
-      "examples/*",
+      "examples/platformio/*",
       "README.md",
       "library.json"
     ]

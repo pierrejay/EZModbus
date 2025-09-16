@@ -192,6 +192,7 @@ Different Modbus devices store multi-byte data in different orders within their 
 **Understanding the notation:** Letters A, B, C, D represent bytes from the original value in order of significance, and the `ByteOrder` describes **how these bytes are arranged in the Modbus register table**.
 
 For example, the 32-bit value `0x12345678` contains these bytes:
+
 - A = `0x12` (most significant byte)  
 - B = `0x34`
 - C = `0x56` 
@@ -215,6 +216,7 @@ namespace Modbus {
 
 **Example:** The float value `123.45f` has hex representation `0x42F6E666` (A=0x42, B=0xF6, C=0xE6, D=0x66).
 This value would be **stored in the Modbus register table** as:
+
 - `ABCD`: Register 0 = `0x42F6`, Register 1 = `0xE666` (natural order)
 - `CDAB`: Register 0 = `0xE666`, Register 1 = `0x42F6` ← Very common
 - `BADC`: Register 0 = `0xF642`, Register 1 = `0x66E6` 
@@ -236,6 +238,7 @@ size_t Frame::setInt16(int16_t value, size_t regIndex, ByteOrder order = ByteOrd
 ```
 
 **Return value:** All setters return the number of registers successfully written:
+
 - `2` for 32-bit types (float, uint32_t, int32_t)
 - `1` for 16-bit types (uint16_t, int16_t) 
 - `0` if an error occurred (out of bounds, invalid parameters)
@@ -282,10 +285,12 @@ bool Frame::getInt16(int16_t& target, size_t regIndex, ByteOrder order) const;
 ```
 
 **Return value:** All getters return a boolean indicating success:
+
 - `true`: Value successfully extracted and written to the `result` parameter
 - `false`: Error occurred (insufficient data, invalid register index, etc.)
 
 **Parameters:**
+
 - `target`: Reference to store the extracted value (only modified on success)
 - `regIndex`: Starting register index (0-based)
 - `order`: Byte ordering format (defaults to big endian)

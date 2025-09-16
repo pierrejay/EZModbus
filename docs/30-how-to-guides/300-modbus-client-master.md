@@ -27,7 +27,7 @@ if (result == Modbus::Client::SUCCESS) {
 `sendRequest()` does not _really_ block execution as it uses a FreeRTOS event notification internally. It's actually pretty efficient when called from a dedicated task: instead of wasting CPU clocks by continuously polling for the request status, it will totally yield while waiting ; if you have other tasks running in parallel, they will run uninterrupted.
 
 !!! note "Note on memory footprint"
-    The two request/response frames have a total memory overhead of 536 bytes. If you create them inside a FreeRTOS task, make sure to have enough stack, or declare them `static`. If doing successive requests, it is possible to reuse the same request & response Frames between different calls to `sendRequest()`. 
+    The two request/response frames have a total memory overhead of 536 bytes. If you create them inside a FreeRTOS task, make sure to have enough stack, or declare them `static`. When doing successive requests, it is possible to reuse the same request & response Frames between different calls to `sendRequest()`. 
     
     A "clever" trick to reduce memory usage, is to use the same `Frame` object for both request and response: internally, the Frame metadata & payload are stored before being sent on the bus so there is no race condition between reading your request and writing back the response.
 
@@ -301,12 +301,14 @@ The client is designed to work with multiple slave devices on the same bus:
 The client provides several tools for effective error handling:
 
 1. **Result Enum** - From synchronous calls, stored in the result tracker or returned by the callback:
+
    * `SUCCESS` - Operation completed successfully
    * `ERR_INVALID_FRAME` - Request was malformed or invalid
    * `ERR_BUSY` - Another transaction is in progress
    * `ERR_TX_FAILED` - Failed to transmit request
    * `ERR_TIMEOUT` - No response received within timeout
    * `ERR_INVALID_RESPONSE` - Received response was invalid
+
 2.  **Exception Detection** - Modbus protocol exceptions from the slave can be easily decoded with the `toString` method:
 
     ```cpp
@@ -315,6 +317,7 @@ The client provides several tools for effective error handling:
                      Modbus::toString(response.exceptionCode));
     }
     ```
+
 3. **Debug Mode** - When `EZMODBUS_DEBUG` is defined, detailed logs show frame contents and round-trip timing.
 
 ## Handling broadcast requests
