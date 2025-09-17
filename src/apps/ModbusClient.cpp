@@ -34,8 +34,9 @@ void Client::PendingRequest::timeoutCallback(TimerHandle_t timer) {
  */
 bool Client::PendingRequest::set(const Modbus::Frame& request, Modbus::Frame* response, 
                                  Result* tracker, uint32_t timeoutMs) {
-    if (isActive()) return false; // The pending request must be cleared first
+    if (isActive()) return false; // Fail-fast if pending request already active
     Lock guard(_mutex);
+    if (isActive()) return false; // Avoid corruption if another set() call won the lock race
     _reqMetadata.fc = request.fc;
     _reqMetadata.slaveId = request.slaveId;
     _reqMetadata.regAddress = request.regAddress;
@@ -79,8 +80,9 @@ bool Client::PendingRequest::set(const Modbus::Frame& request, Modbus::Frame* re
  */
 bool Client::PendingRequest::set(const Modbus::Frame& request, Client::ResponseCallback cb,
                                  void* userCtx, uint32_t timeoutMs) {
-    if (isActive()) return false;
+    if (isActive()) return false; // Fail-fast if pending request already active
     Lock guard(_mutex);
+    if (isActive()) return false; // Avoid corruption if another set() call won the lock race
     _reqMetadata.fc = request.fc;
     _reqMetadata.slaveId = request.slaveId;
     _reqMetadata.regAddress = request.regAddress;
@@ -161,6 +163,7 @@ void Client::PendingRequest::setResult(Result result, bool finalize) {
     // Handle result & tracker under critical section
     { 
         Lock guard(_mutex);
+        if (!isActive()) return; // Exit if already cleared
         if (_tracker) *_tracker = result;
         cbSnapshot = _cb;
         ctxSnapshot = _cbCtx;
@@ -186,6 +189,7 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
     // Handle response & tracker under critical section
     {
         Lock guard(_mutex);
+        if (!isActive()) return; // Exit if already cleared
         if (_pResponse) *_pResponse = response;
         if (_tracker) *_tracker = SUCCESS;
         cbSnapshot = _cb;
