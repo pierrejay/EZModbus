@@ -12,17 +12,37 @@ namespace Modbus {
 // ===================================================================================
 
 /* @brief Timeout callback for pending request
- * @param timer The timer handle
+ * @param timer The timer handle containing TimerTag
+ *
+ * This callback filters out late/obsolete timeout events using epoch comparison.
+ * Only timeouts matching the current active transaction epoch are processed.
  */
 void Client::PendingRequest::timeoutCallback(TimerHandle_t timer) {
-    auto* pendingReq = static_cast<PendingRequest*>(pvTimerGetTimerID(timer));
-    if (pendingReq && pendingReq->isActive()) {
-        // Signal transport to cleanup transaction
-        pendingReq->_client->_interface.abortCurrentTransaction();
-        
-        pendingReq->setResult(ERR_TIMEOUT, true);
-        Modbus::Debug::LOG_MSG("Request timed out via timer");
+    auto* tag = static_cast<TimerTag*>(pvTimerGetTimerID(timer));
+    if (!tag || !tag->self) {
+        return; // Invalid timer tag
     }
+
+    auto* pendingReq = tag->self;
+
+    // Race protection: Filter by epoch + active state
+    {
+        Lock guard(pendingReq->_mutex);
+        if (!pendingReq->_active) {
+            Modbus::Debug::LOG_MSG("Timeout callback: request already inactive, ignoring");
+            return;
+        }
+        if (tag->gen != pendingReq->_timGen) {
+            Modbus::Debug::LOG_MSGF("Timeout callback: epoch mismatch (timer=%u, current=%u), ignoring late timeout",
+                                  tag->gen, pendingReq->_timGen);
+            return;
+        }
+    }
+
+    // Valid timeout for current transaction
+    pendingReq->_client->_interface.abortCurrentTransaction();
+    pendingReq->setResult(ERR_TIMEOUT, true, true);
+    Modbus::Debug::LOG_MSGF("Request timed out via timer (epoch %u)", tag->gen);
 }
 
 /* @brief Set the pending request (response & tracker version)
@@ -48,24 +68,31 @@ bool Client::PendingRequest::set(const Modbus::Frame& request, Modbus::Frame* re
     _timestampMs = TIME_MS();
     _syncEventGroup = nullptr; // Start from clean slate
     _active = true;
-    
-    // Create and start timeout timer
-    if (!_timeoutTimer) {
-        _timeoutTimer = xTimerCreateStatic(
+
+    // Timer race protection
+    ++_timGen;                        // Increment current generation
+    _timIdx = ++_timIdx % TIM_SLOTS;  // Alternate between timer slots (0...TIM_SLOTS-1)
+
+    // Create timer for current slot if needed
+    if (!_tim[_timIdx]) {
+        _tim[_timIdx] = xTimerCreateStatic(
             "ModbusTimeout",
             pdMS_TO_TICKS(timeoutMs),
             pdFALSE,  // one-shot
-            this,     // timer ID = this PendingRequest
+            &_timTag[_timIdx],  // timer ID points to tag (will be updated below)
             timeoutCallback,
-            &_timeoutTimerBuf
+            &_timBuf[_timIdx]
         );
-    } else {
-        // Update timer period and restart
-        xTimerChangePeriod(_timeoutTimer, pdMS_TO_TICKS(timeoutMs), 0);
     }
-    
-    if (_timeoutTimer) {
-        xTimerStart(_timeoutTimer, 0);
+
+    // Set immutable tag for this transaction (epoch + self pointer)
+    _timTag[_timIdx] = { this, _timGen };
+    vTimerSetTimerID(_tim[_timIdx], &_timTag[_timIdx]);
+
+    // Configure and start timer
+    if (_tim[_timIdx]) {
+        xTimerChangePeriod(_tim[_timIdx], pdMS_TO_TICKS(timeoutMs), 0);
+        xTimerStart(_tim[_timIdx], 0);
     }
     
     return true;
@@ -94,42 +121,53 @@ bool Client::PendingRequest::set(const Modbus::Frame& request, Client::ResponseC
     _timestampMs = TIME_MS();
     _active = true;
 
-    // Create / restart timeout timer
-    if (!_timeoutTimer) {
-        _timeoutTimer = xTimerCreateStatic(
+    // Race protection: increment epoch & toggle timer handle
+    ++_timGen;
+    _timIdx ^= 1;  // Alternate between timer slots (0 <-> 1)
+
+    // Create timer for current slot if needed
+    if (!_tim[_timIdx]) {
+        _tim[_timIdx] = xTimerCreateStatic(
             "ModbusTimeout",
             pdMS_TO_TICKS(timeoutMs),
-            pdFALSE,
-            this,
+            pdFALSE,  // one-shot
+            &_timTag[_timIdx],  // timer ID points to tag (will be updated below)
             timeoutCallback,
-            &_timeoutTimerBuf);
-    } else {
-        xTimerChangePeriod(_timeoutTimer, pdMS_TO_TICKS(timeoutMs), 0);
+            &_timBuf[_timIdx]
+        );
     }
-    if (_timeoutTimer) {
-        xTimerStart(_timeoutTimer, 0);
+
+    // Set immutable tag for this transaction (epoch + self pointer)
+    _timTag[_timIdx] = { this, _timGen };
+    vTimerSetTimerID(_tim[_timIdx], &_timTag[_timIdx]);
+
+    // Configure and start timer
+    if (_tim[_timIdx]) {
+        xTimerChangePeriod(_tim[_timIdx], pdMS_TO_TICKS(timeoutMs), 0);
+        xTimerStart(_tim[_timIdx], 0);
     }
     return true;
 }
 
 /* @brief Clear the pending request
  */
-void Client::PendingRequest::clear() {
-    Lock guard(_mutex);
-    
-    // Stop timeout timer
-    if (_timeoutTimer) {
-        xTimerStop(_timeoutTimer, 0);
+void Client::PendingRequest::clear() {  
+    TimerHandle_t timerToStop = nullptr;  
+    {
+        Lock guard(_mutex);
+        if (!_active) return;
+        timerToStop = currentTimer();
+        _reqMetadata.clear();
+        _tracker = nullptr;
+        _pResponse = nullptr;
+        _timestampMs = 0;
+        _syncEventGroup = nullptr; // Clear sync waiter
+        _cb = nullptr;
+        _cbCtx = nullptr;
+        _active = false; // Disarms any remaining timeout callbacks
     }
-    
-    _reqMetadata.clear();
-    _tracker = nullptr;
-    _pResponse = nullptr;
-    _timestampMs = 0;
-    _syncEventGroup = nullptr; // Clear sync waiter
-    _cb = nullptr;
-    _cbCtx = nullptr;
-    _active = false;
+
+    if (timerToStop) xTimerStop(timerToStop,0);
 }
 
 /* @brief Check if the pending request is active
@@ -155,10 +193,10 @@ const Modbus::Frame& Client::PendingRequest::getRequestMetadata() const { return
 /* @brief Update the pending request result tracker
  * @param result The result to set
  */
-void Client::PendingRequest::setResult(Result result, bool finalize) {
-    // Initialize callback variables to null
+void Client::PendingRequest::setResult(Result result, bool finalize, bool fromTimer) {
     Client::ResponseCallback cbSnapshot = nullptr;
     void* ctxSnapshot = nullptr;
+    TimerHandle_t timerToStop = nullptr;
 
     // Handle result & tracker under critical section
     { 
@@ -168,23 +206,25 @@ void Client::PendingRequest::setResult(Result result, bool finalize) {
         cbSnapshot = _cb;
         ctxSnapshot = _cbCtx;
         if (finalize) {
+            if (!fromTimer) timerToStop = currentTimer();
             resetUnsafe(); // also sets _active=false
         }
         notifySyncWaiterUnsafe(); // still inside mutex
-        if (!cbSnapshot) return; // if no callback registered, exit now
     }
 
-    // Invoke callback outside of critical section
+    // Kill timer (best-effort) & invoke callback outside of critical section
+    if (timerToStop) xTimerStop(timerToStop, 0);
     // Since we don't expect a response (failure or broadcast), we pass nullptr as response
-    cbSnapshot(result, nullptr, ctxSnapshot);
+    if (cbSnapshot) cbSnapshot(result, nullptr, ctxSnapshot);
 }
 
 /* @brief Set the response for the pending request & update the result tracker
  * @param response The response to set
  */
-void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool finalize) {
+void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool finalize, bool fromTimer) {
     Client::ResponseCallback cbSnapshot = nullptr;
     void* ctxSnapshot = nullptr;
+    TimerHandle_t timerToStop = nullptr;
 
     // Handle response & tracker under critical section
     {
@@ -195,15 +235,15 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
         cbSnapshot = _cb;
         ctxSnapshot = _cbCtx;
         if (finalize) {
+            if (!fromTimer) timerToStop = currentTimer();
             resetUnsafe(); // also sets _active=false
         }
         notifySyncWaiterUnsafe(); // still inside mutex
     }
 
-    // Invoke callback outside of critical section
-    if (cbSnapshot) {
-        cbSnapshot(SUCCESS, &response, ctxSnapshot);
-    }
+    // Kill timer (best-effort) & invoke callback outside of critical section
+    if (timerToStop) xTimerStop(timerToStop, 0);
+    if (cbSnapshot) cbSnapshot(SUCCESS, &response, ctxSnapshot);
 }
 
 /* @brief Set the event group for synchronous waiting
@@ -225,21 +265,31 @@ void Client::PendingRequest::notifySyncWaiterUnsafe() {
     }
 }
 
-/* @brief Stop the timeout timer
- * @note Called to neutralize timer when response received
+/* @brief Snapshot request metadata if still active (thread-safe)
+ * @param out Output structure to fill with metadata snapshot
+ * @return true if request was active and snapshot captured, false otherwise
+ *
+ * This provides a lock-free way for handleResponse to validate responses
+ * without holding the mutex during the entire validation process.
  */
-void Client::PendingRequest::stopTimer() {
-    if (_timeoutTimer) {
-        xTimerStop(_timeoutTimer, 0);
+bool Client::PendingRequest::snapshotIfActive(PendingSnapshot& out) {
+    Lock guard(_mutex);
+    if (!_active) {
+        return false;
     }
+    out.reqMetadata = _reqMetadata;
+    return true;
 }
 
-/* @brief Destructor for PendingRequest - cleanup timer
+/* @brief Destructor for PendingRequest - cleanup both timers
  */
 Client::PendingRequest::~PendingRequest() {
-    if (_timeoutTimer) {
-        xTimerDelete(_timeoutTimer, 0);
-        _timeoutTimer = nullptr;
+    // Clean up both timer slots
+    for (int i = 0; i < 2; ++i) {
+        if (_tim[i]) {
+            xTimerDelete(_tim[i], 0);
+            _tim[i] = nullptr;
+        }
     }
 }
 
@@ -248,18 +298,13 @@ Client::PendingRequest::~PendingRequest() {
  * @note This method MUST be called while holding _mutex to ensure atomicity
  */
 void Client::PendingRequest::resetUnsafe() {
-    // Stop timeout timer
-    if (_timeoutTimer) {
-        xTimerStop(_timeoutTimer, 0);
-    }
-
     _reqMetadata.clear();
     _tracker = nullptr;
     _pResponse = nullptr;
     _timestampMs = 0;
     _cb = nullptr;
     _cbCtx = nullptr;
-    _active = false;
+    _active = false; // This disarms any remaining timeout callbacks
 }
 
 // ===================================================================================
@@ -442,41 +487,41 @@ Client::Result Client::sendRequest(const Modbus::Frame& request,
 
 /* @brief Handle a response from the interface
  * @param response The response to handle
+ *
+ * Uses snapshot approach to avoid holding mutex during validation.
+ * No timer stop synchronization needed - epoch guards provide safety.
  */
 Client::Result Client::handleResponse(const Modbus::Frame& response)
 {
-    // TAKE CONTROL: Stop timer to prevent race condition
-    _pendingRequest.stopTimer();
-    
-    // Check if request was still active (timer might have won)
-    if (!_pendingRequest.isActive()) {
+    // Timer race protection: take atomic snapshot
+    PendingRequest::PendingSnapshot snapshot;
+    if (!_pendingRequest.snapshotIfActive(snapshot)) {
         return Error(ERR_INVALID_RESPONSE, "no request in progress");
     }
 
     // Reject any response to a broadcast request (safety check, probably unnecessary
     // as the request will be closed before any chance for the slave to respond)
-    if (Modbus::isBroadcastId(_pendingRequest.getRequestMetadata().slaveId)) {
+    if (Modbus::isBroadcastId(snapshot.reqMetadata.slaveId)) {
         return Error(ERR_INVALID_RESPONSE, "response to broadcast");
     }
 
     // Check if the response is from the right slave (unless catch-all is enabled)
-    if (!_interface.checkCatchAllSlaveIds() 
-        && response.slaveId != _pendingRequest.getRequestMetadata().slaveId) {
+    if (!_interface.checkCatchAllSlaveIds()
+        && response.slaveId != snapshot.reqMetadata.slaveId) {
         return Error(ERR_INVALID_RESPONSE, "response from wrong slave");
     }
 
     // Check if response matches the expected FC
     if (response.type != Modbus::RESPONSE ||
-        response.fc   != _pendingRequest.getRequestMetadata().fc) {
+        response.fc   != snapshot.reqMetadata.fc) {
         return Error(ERR_INVALID_RESPONSE, "unexpected frame");
     }
 
     // Copy the response and re-inject the original metadata
     _responseBuffer.clear();
     _responseBuffer = response;
-    const Modbus::Frame& req = _pendingRequest.getRequestMetadata();
-    _responseBuffer.regAddress = req.regAddress;   // <- original address
-    _responseBuffer.regCount   = req.regCount;     // <- actual number of registers / coils
+    _responseBuffer.regAddress = snapshot.reqMetadata.regAddress;   // <- original address
+    _responseBuffer.regCount   = snapshot.reqMetadata.regCount;     // <- actual number of registers / coils
 
     // Propagate the response to the user and clean up the state
     _pendingRequest.setResponse(_responseBuffer, true);
@@ -494,34 +539,35 @@ Client::Result Client::handleResponse(const Modbus::Frame& response)
  */
 void Client::staticHandleTxResult(ModbusInterface::IInterface::Result result, void* pClient) {
     Client* client = static_cast<Client*>(pClient);
-    
-    // Ignore TX result if no request is active (might happen on late callbacks after timeout)
-    if (!client->_pendingRequest.isActive()) {
+
+    // Timer race protection: take atomic snapshot
+    PendingRequest::PendingSnapshot snapshot;
+    if (!client->_pendingRequest.snapshotIfActive(snapshot)) {
         Modbus::Debug::LOG_MSG("Received TX result while no request in progress, ignoring");
         return;
     }
 
     // If the TX failed, it's an error - SUCCESS will be set by handleResponse()
     if (result != ModbusInterface::IInterface::SUCCESS) {
-        // Something went wrong at the interface/queue/encoding step
+        // Something went wrong at the interface/queue/encoding step: finalize request
         client->_pendingRequest.setResult(ERR_TX_FAILED, true);
+        Modbus::Debug::LOG_MSG("Received TX error");
         return;
     }
-    
+
     // For broadcast successful TX, we create a dummy response and complete the request
     // (no response is expected for broadcasts)
-    if (Modbus::isBroadcastId(client->_pendingRequest.getRequestMetadata().slaveId)) {
-        // Use the shared response buffer rather than a local stack frame
-        // (safe thanks to timing + safety checks in handleResponse())
+    if (Modbus::isBroadcastId(snapshot.reqMetadata.slaveId)) {
+        // Use the shared response buffer with snapshot data (thread-safe)
         client->_responseBuffer.clear();
-        client->_responseBuffer = client->_pendingRequest.getRequestMetadata();
+        client->_responseBuffer = snapshot.reqMetadata;  // Based on safe snapshot
         client->_responseBuffer.type = Modbus::RESPONSE;
         client->_responseBuffer.exceptionCode = Modbus::NULL_EXCEPTION;
         client->_responseBuffer.clearData(false);
         client->_pendingRequest.setResponse(client->_responseBuffer, true);
         return;
     }
-    
+
     // For non-broadcast successful TX, we just wait for the response in handleResponse()
 }
 

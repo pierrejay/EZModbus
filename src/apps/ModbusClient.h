@@ -121,22 +121,57 @@ private:
     // ===================================================================================
     
     /* @brief Encapsulates the management of a pending request lifecycle with a thread-safe API
+     *
      * @note PendingRequest can only be set() if inactive (clear() must be called first)
+     *
+     * Timer Race Protection Design:
+     * This class uses a double-buffer timer approach with epoch guards to prevent
+     * race conditions between timer callbacks and response handling.
+     *
+     * Problem: xTimerStop() is asynchronous - it queues a command to the Timer
+     * Service Task rather than stopping immediately. This creates races where:
+     * 1. A late STOP from request N can kill the timer already restarted for N+1
+     * 2. A late timeout callback from N can close request N+1 if not filtered
+     *
+     * Solution:
+     * - Multiple timers: several timer handles alternate (_tim[0], _tim[1]...)
+     *   so old STOP commands cannot affect the new timer (different handle)
+     * - Epoch guards: Each request gets a unique _timGen ID copied into the
+     *   timer's ID field. Late timeout callbacks are ignored if epoch mismatches
+     * - No blocking stops: No xTimerStop() synchronization needed in response
+     *   handling - safety is guaranteed by epochs, not by stopping timers
+     * 
+     * Key Invariants:
+     * - Only one request active at a time (_active flag)
+     * - Each transaction identified by unique epoch
+     * - No blocking timer synchronization in critical paths
+     * - Late callbacks filtered by epoch mismatch and _active state
      */
     class PendingRequest {
     private:
-        Client* _client;                         // Pointer to parent Client for transport access in timeout callback
-        Modbus::Frame _reqMetadata; // Does not store request data (only fc, slaveId, regAddress, regCount)
-        Modbus::Frame* _pResponse = nullptr;     // Pointer to response buffer (using sync or async w/ tracker)
-        Result* _tracker = nullptr;              // Pointer to user tracker (using async w/ tracker)
-        ResponseCallback _cb = nullptr;          // Pointer to user callback (using async w/ callback)
-        void* _cbCtx = nullptr;                  // Pointer to user context (using async w/ callback)
-        uint32_t _timestampMs = 0;               // Timestamp of request creation
-        volatile bool _active = false;           // Whether the request is active
-        Mutex _mutex;                            // Mutex to protect the pending request data
-        StaticTimer_t _timeoutTimerBuf;          // Timer buffer for request timeout
-        TimerHandle_t _timeoutTimer = nullptr;   // Timer handle for request timeout
+        // Pending Request state variables
+        Client* _client;                              // Pointer to parent Client for transport access in timeout callback
+        Modbus::Frame _reqMetadata;                   // Does not store request data (only fc, slaveId, regAddress, regCount)
+        Modbus::Frame* _pResponse = nullptr;          // Pointer to response buffer (using sync or async w/ tracker)
+        Result* _tracker = nullptr;                   // Pointer to user tracker (using async w/ tracker)
+        ResponseCallback _cb = nullptr;               // Pointer to user callback (using async w/ callback)
+        void* _cbCtx = nullptr;                       // Pointer to user context (using async w/ callback)
+        uint32_t _timestampMs = 0;                    // Timestamp of request creation
+        volatile bool _active = false;                // Whether the request is active
+        Mutex _mutex;                                 // Mutex to protect the pending request data
         EventGroupHandle_t _syncEventGroup = nullptr; // Event group handle for synchronous wait (sync mode)
+
+        // Timer management
+        struct TimerTag {
+            PendingRequest* self;                     // Pointer to this PendingRequest instance
+            uint32_t gen;                             // Transaction epoch for late callback filtering
+        };
+        static constexpr size_t TIM_SLOTS = 2;        // Number of timer slots (2 or 3 should be enough)
+        StaticTimer_t _timBuf[TIM_SLOTS];             // Static timer buffers
+        TimerHandle_t _tim[TIM_SLOTS] = {nullptr};    // Timer handles
+        TimerTag _timTag[TIM_SLOTS];                  // Timer tags with epoch info
+        size_t _timIdx = 0;                           // Current timer index (0...TIM_SLOTS-1)
+        uint32_t _timGen = 0;                         // Current transaction epoch (monotonic)
 
     public:
         // Constructor
@@ -154,10 +189,18 @@ private:
         uint32_t getTimestampMs() const;
         const Modbus::Frame& getRequestMetadata() const;
         // Locked methods
-        void setResult(Result result, bool finalize);
-        void setResponse(const Modbus::Frame& response, bool finalize);
+        void setResult(Result result, bool finalize, bool fromTimer = false);
+        void setResponse(const Modbus::Frame& response, bool finalize, bool fromTimer = false);
         void setSyncEventGroup(EventGroupHandle_t group);
-        void stopTimer();
+
+        // Snapshot helper for lock-free validation in handleResponse
+        struct PendingSnapshot {
+            Modbus::Frame reqMetadata;
+        };
+        bool snapshotIfActive(PendingSnapshot& out);
+
+        // Timer helper
+        inline TimerHandle_t currentTimer() const { return _tim[_timIdx]; }
         // Usafe methods (to be called in mutex)
         inline void notifySyncWaiterUnsafe();
         inline void resetUnsafe();
