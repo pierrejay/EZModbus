@@ -63,9 +63,6 @@ bool Client::PendingRequest::killTimer(TickType_t maxWaitTicks) {
 
 /* @brief Timeout callback for pending request
  * @param timer The timer handle containing TimerTag
- *
- * This callback filters out late/obsolete timeout events using epoch comparison.
- * Only timeouts matching the current active transaction epoch are processed.
  */
 void Client::PendingRequest::timeoutCallback(TimerHandle_t timer) {
     if (!timer) return;
@@ -103,6 +100,7 @@ bool Client::PendingRequest::set(const Modbus::Frame& request, Modbus::Frame* re
 
     if (isActive()) return false; // Avoid corruption if another set() call won the lock race
 
+    _reqMetadata.type = Modbus::REQUEST;
     _reqMetadata.fc = request.fc;
     _reqMetadata.slaveId = request.slaveId;
     _reqMetadata.regAddress = request.regAddress;
@@ -156,6 +154,7 @@ bool Client::PendingRequest::set(const Modbus::Frame& request, Client::ResponseC
     
     if (isActive()) return false; // Avoid corruption if another set() call won the lock race
 
+    _reqMetadata.type = Modbus::REQUEST;
     _reqMetadata.fc = request.fc;
     _reqMetadata.slaveId = request.slaveId;
     _reqMetadata.regAddress = request.regAddress;
@@ -227,7 +226,7 @@ uint32_t Client::PendingRequest::getTimestampMs() const { return _timestampMs; }
 /* @brief Get the pending request
  * @return Copy of the pending request
  */
-const Modbus::Frame& Client::PendingRequest::getRequestMetadata() const { return _reqMetadata; }
+const Modbus::FrameMeta& Client::PendingRequest::getRequestMetadata() const { return _reqMetadata; }
 
 /* @brief Update the pending request result tracker
  * @param result The result to set
@@ -509,48 +508,43 @@ Client::Result Client::sendRequest(const Modbus::Frame& request,
 
 /* @brief Handle a response from the interface
  * @param response The response to handle
- *
- * Uses snapshot approach to avoid holding mutex during validation.
- * No timer stop synchronization needed - epoch guards provide safety.
  */
 Client::Result Client::handleResponse(const Modbus::Frame& response)
 {
-    // Neutralize pending timer
-    if (!_pendingRequest.killTimer(TIMER_CMD_TOUT_TICKS)) {
-        return Error(ERR_TIMER_FAILURE, "cannot stop timer");
-        // Timer will clean up the request
-    };
-
-    // Le reste de la fonction est maintenant sûr.
-    if (!_pendingRequest.isActive()) {
+    // Capture pending request metadata
+    PendingRequest::PendingSnapshot snapshot;
+    if (!_pendingRequest.snapshotIfActive(snapshot)) {
         return Error(ERR_INVALID_RESPONSE, "no request in progress");
     }
+    Modbus::FrameMeta reqSnapshot = snapshot.reqMetadata;
 
-    // Reject any response to a broadcast request (safety check, probably unnecessary
-    // as the request will be closed before any chance for the slave to respond)
-    if (Modbus::isBroadcastId(_pendingRequest.getRequestMetadata().slaveId)) {
+    // Neutralize timer OUTSIDE mutex (avoids deadlock)
+    _pendingRequest.killTimer(TIMER_CMD_TOUT_TICKS);
+
+    // Build the response
+
+    // Reject any response to a broadcast request
+    if (Modbus::isBroadcastId(reqSnapshot.slaveId)) {
         return Error(ERR_INVALID_RESPONSE, "response to broadcast");
     }
 
     // Check if the response is from the right slave (unless catch-all is enabled)
-    if (!_interface.checkCatchAllSlaveIds()
-        && response.slaveId != _pendingRequest.getRequestMetadata().slaveId) {
+    if (!_interface.checkCatchAllSlaveIds() && response.slaveId != reqSnapshot.slaveId) {
         return Error(ERR_INVALID_RESPONSE, "response from wrong slave");
     }
 
     // Check if response matches the expected FC
-    if (response.type != Modbus::RESPONSE ||
-        response.fc   != _pendingRequest.getRequestMetadata().fc) {
+    if (response.type != Modbus::RESPONSE || response.fc != reqSnapshot.fc) {
         return Error(ERR_INVALID_RESPONSE, "unexpected frame");
     }
 
-    // Copy the response and re-inject the original metadata
+    // Copy the response and re-inject the original metadata using snapshot
     _responseBuffer.clear();
     _responseBuffer = response;
-    _responseBuffer.regAddress = _pendingRequest.getRequestMetadata().regAddress;   // <- original address
-    _responseBuffer.regCount   = _pendingRequest.getRequestMetadata().regCount;     // <- actual number of registers / coils
+    _responseBuffer.regAddress = reqSnapshot.regAddress;   // <- original address from snapshot
+    _responseBuffer.regCount   = reqSnapshot.regCount;     // <- actual number of registers / coils from snapshot
 
-    // Propagate the response to the user and clean up the state
+    // Complete the response: setResponse() handles potential conflicts with timer
     _pendingRequest.setResponse(_responseBuffer, true);
 
     return Success();
@@ -567,20 +561,28 @@ Client::Result Client::handleResponse(const Modbus::Frame& response)
 void Client::staticHandleTxResult(ModbusInterface::IInterface::Result result, void* pClient) {
     Client* client = static_cast<Client*>(pClient);
 
-    if (result != ModbusInterface::IInterface::SUCCESS || Modbus::isBroadcastId(client->_pendingRequest.getRequestMetadata().slaveId)) {
-        // Neutralize pending timer
-        if (!client->_pendingRequest.killTimer(TIMER_CMD_TOUT_TICKS)) {
-            // Failed to disarm timer: we log & let the timer timeout the request
-            Modbus::Debug::LOG_MSG("Failed to kill timer"); return;
-        };
+    // Capture metadata using existing API (fast, thread-safe)
+    PendingRequest::PendingSnapshot snapshot;
+    if (!client->_pendingRequest.snapshotIfActive(snapshot)) {
+        return; // No active request, nothing to do
+    }
+    Modbus::FrameMeta reqSnapshot = snapshot.reqMetadata;
 
-        // Maintenant que le timer est neutralisé, on peut finaliser.
+    // Check if this requires finalization (error or broadcast)
+    if (result != ModbusInterface::IInterface::SUCCESS || Modbus::isBroadcastId(reqSnapshot.slaveId)) {
+        // Neutralize timer OUTSIDE mutex (no deadlock possible)
+        client->_pendingRequest.killTimer(TIMER_CMD_TOUT_TICKS);
+
+        // Finalize based on result
         if (result != ModbusInterface::IInterface::SUCCESS) {
             client->_pendingRequest.setResult(ERR_TX_FAILED, true);
-        } else { // C'est un broadcast réussi
+        } else { // Successful broadcast
             client->_responseBuffer.clear();
-            client->_responseBuffer = client->_pendingRequest.getRequestMetadata();  // Utiliser le snapshot thread-safe
             client->_responseBuffer.type = Modbus::RESPONSE;
+            client->_responseBuffer.fc = reqSnapshot.fc;
+            client->_responseBuffer.slaveId = reqSnapshot.slaveId;
+            client->_responseBuffer.regAddress = reqSnapshot.regAddress;
+            client->_responseBuffer.regCount = reqSnapshot.regCount;
             client->_responseBuffer.exceptionCode = Modbus::NULL_EXCEPTION;
             client->_responseBuffer.clearData(false);
             client->_pendingRequest.setResponse(client->_responseBuffer, true);

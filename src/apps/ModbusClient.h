@@ -174,7 +174,7 @@ private:
     private:
         // Pending Request state variables
         Client* _client;                              // Pointer to parent Client for transport access in timeout callback
-        Modbus::Frame _reqMetadata;                   // Does not store request data (only fc, slaveId, regAddress, regCount)
+        Modbus::FrameMeta _reqMetadata;               // Lightweight metadata without data payload (~240 bytes saved)
         Modbus::Frame* _pResponse = nullptr;          // Pointer to response buffer (using sync or async w/ tracker)
         Result* _tracker = nullptr;                   // Pointer to user tracker (using async w/ tracker)
         ResponseCallback _cb = nullptr;               // Pointer to user callback (using async w/ callback)
@@ -203,7 +203,7 @@ private:
         bool isActive() const;
         bool hasResponse() const;
         uint32_t getTimestampMs() const;
-        const Modbus::Frame& getRequestMetadata() const;
+        const Modbus::FrameMeta& getRequestMetadata() const;
         // Locked methods
         void setResult(Result result, bool finalize, bool fromTimer = false);
         void setResponse(const Modbus::Frame& response, bool finalize, bool fromTimer = false);
@@ -211,7 +211,7 @@ private:
 
         // Snapshot helper for lock-free validation in handleResponse
         struct PendingSnapshot {
-            Modbus::Frame reqMetadata;
+            Modbus::FrameMeta reqMetadata;
         };
         bool snapshotIfActive(PendingSnapshot& out);
 
