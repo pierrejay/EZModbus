@@ -123,52 +123,126 @@ private:
     // PRIVATE DATA STRUCTURES
     // ===================================================================================
     
-    /* @brief Encapsulates the management of a pending request lifecycle with a thread-safe API
+    /*
+    * @class Modbus::Client::PendingRequest
+    * @brief Lifecycle of a single in-flight request with bulletproof timer-race handling.
     *
-    * @note PendingRequest can only be set() if inactive (clear() must be called first).
+    * This class coordinates a request/response transaction driven by a FreeRTOS one-shot timer,
+    * while preventing all practical race conditions between:
+    * - the normal path (response or TX-result completion),
+    * - and the timeout callback (Timer Service Task).
     *
-    * Timer Race Protection – Current Design:
-    *   FreeRTOS xTimerStop() is asynchronous: the STOP command is enqueued and executed
-    *   later by the Timer Service Task. Without precautions, a timeout “in flight” could
-    *   fire while we are handling a response, or just after cleanup, and accidentally
-    *   close a new request.
+    * The design is deliberately epoch-free and single-timer (no rotating pools).
+    * It relies on four layers of defense that together close every realistic race window.
     *
-    *   To avoid that, the timer is explicitly neutralized BEFORE finalizing a request,
-    *   using a bounded sequence that never blocks the daemon:
+    * Four Lines of Defense
+    * ---------------------
+    * 
+    * 1. Close Gates (two atomics)
+    * Two atomic flags prevent a new request from being armed while the previous one is closing:
+    * - _respClosing - set by the normal path before attempting to neutralize the timer;
+    * - _timerClosing - set by the timeout callback at entry.
     *
-    *     killTimer(maxWaitTicks):
-    *       1) xTimerStop(timer, ≤maxWaitTicks) – posts the stop command into the daemon queue.
-    *       2) Fence via xTimerPendFunctionCall(...) – when the Timer Service Task processes
-    *          the fence, it ACKs us (semaphore) ⇒ guarantees that all pending commands have
-    *          been flushed and no further timeout callback can arrive.
-    *       3) Fallback if the fence cannot be posted: poll xTimerIsTimerActive() for
-    *          ≤maxWaitTicks to detect that the timer has no further expiry scheduled
-    *          (STOP processed OR callback already executed). Bounded wait with vTaskDelay(1).
+    * set() accepts only if !_active && !_respClosing && !_timerClosing
+    * (checked once pre-mutex and again under _mutex to remove TOCTOU).
     *
-    *   If killTimer() fails (returns false), the function exits EARLY WITHOUT finalizing
-    *   the request: the Timer Service Task will then complete it by timeout. This is rare
-    *   and only results in a transient ERR_BUSY, without leaving inconsistent state.
+    * 2. Physical Neutralization (killTimer)
+    * Before normal-path finalization, we try to stop the timer and fence-ACK the daemon queue:
+    * 
+    * enum class KillOutcome { KILLED, FAILED, STOPPED_NOACK };
+    * - KILLED         - STOP posted and fence ACK'd -> no future timeout.
+    * - FAILED         - couldn't post STOP -> do not finalize here; timer will finish.
+    * - STOPPED_NOACK  - STOP posted but no fence ACK within budget -> indeterminate.
     *
-    * Integration points:
-    *   - handleResponse() and staticHandleTxResult() always call killTimer() before any
-    *     cleanup (setResponse / setResult). On failure, they return early without finalizing.
-    *   - timeoutCallback() calls setResult(ERR_TIMEOUT,finalize=true,fromTimer=true)
-    *     and does not perform heavy synchronization: it is the natural “timer wins” path.
-    *   - clear() calls killTimer() first, then resets state under the mutex.
+    * 3. Logical Disarm (disarmTimerCb / rearmTimerCb)
+    * If STOPPED_NOACK, we disarm the timeout callback.
+    * The callback checks isTimerCbDisarmed() before any lock/abort and becomes a no-op immediately.
+    * This guarantees that a late timeout cannot touch current or future requests.
     *
-    * FreeRTOS API notes:
-    *   - On creation: xTimerStart() is called once.
-    *   - To (re)arm an existing timer in set(): xTimerChangePeriod(...). If the timer was
-    *     dormant, the call updates expiry and (re)starts it; if it was active, it is
-    *     re-evaluated and restarted with the new period.
-    *   - killTimer() must never be called from within the Timer Service Task context.
+    * 4. Mutual Exclusion (single _mutex)
+    * All state mutations occur under _mutex in setResult(), setResponse(), clear() (via resetUnsafe()),
+    * preventing double-finalization of the same request and ensuring atomic signaling of waiters.
     *
-    * Invariants:
-    *   - Only one request active at a time (_active).
-    *   - No epoch, no multiple timers: a single timer handle, neutralized properly at
-    *     termination points.
-    *   - All request state modifications are protected by _mutex.
-    *   - User callbacks are always invoked outside of critical sections.
+    * Centralization (single point of truth)
+    * --------------------------------------
+    *
+    * Call sites never manage timers directly. They only:
+    * - take a read-only snapshot for validation (to avoid long critical sections),
+    * - then call one of:
+    *   - setResponse(frame, finalize, fromTimer=false)
+    *   - setResult(result, finalize, fromTimer=false)
+    *
+    * These methods internally:
+    * 1. set _respClosing=true,
+    * 2. run killTimer(),
+    *    - on FAILED: clear _respClosing and return (timer will finalize),
+    *    - on STOPPED_NOACK: disarmTimerCb() (logical neutralization),
+    * 3. finalize under _mutex (write tracker/response, _active=false, signal waiters),
+    * 4. clear both gates in resetUnsafe().
+    * The timeout path calls setResult(..., fromTimer=true) and does not invoke killTimer() nor disarm.
+    *
+    * Execution Paths (precise order)
+    * -------------------------------
+    *
+    * 1. Normal response (handleResponse)
+    * 1.1. Snapshot request metadata (no locks held during validation).
+    * 1.2. setResponse(..., finalize=true, fromTimer=false) -> triggers 4-layer policy above.
+    *
+    * 2. TX result (staticHandleTxResult)
+    * 2.1. On TX error or broadcast success: setResult(..., finalize=true, fromTimer=false).
+    * 2.2. On TX success (non-broadcast): wait for response.
+    *
+    * 3. Early fail in sendRequest()
+    * If sendFrame() fails: setResult(ERR_TX_FAILED, finalize=true, fromTimer=false).
+    *
+    * 4. Timeout callback (timeoutCallback)
+    * 4.1. _timerClosing = true (atomic),
+    * 4.2. if isCallbackDisabled() -> _timerClosing=false; return;,
+    * 4.3. lock _mutex; if !_active -> _timerClosing=false; return;,
+    * 4.4. abort transport (abortCurrentTransaction()),
+    * 4.5. setResult(ERR_TIMEOUT, true, fromTimer=true) -> resetUnsafe() clears gates.
+    *
+    * 5. Synchronous wait
+    * The EventGroup handle is registered inside set(...) (or just before arming) to avoid a small 
+    * window where completion arrives before the waiter is installed.
+    *
+    * Invariants & Guarantees
+    * -----------------------
+    * 
+    * - Single in-flight: at most one active request (_active==true) at a time.
+    * - No phantom timeout: a late timeout cannot affect a future request:
+    *   - either timer is physically killed (KILLED), or
+    *   - callback is logically disarmed (STOPPED_NOACK), or
+    *   - timer is the sole finalizer (FAILED).
+    * - No double-finalization of the same request (guarded by _mutex).
+    * - No new request during closure (gated by _respClosing/_timerClosing).
+    * - Callbacks invoked outside critical sections.
+    * - No epochs, no timer pools; a single timer handle is reused safely.
+    *
+    * Corner Cases (exhaustive)
+    * -------------------------
+    *
+    * 1. Callback fires while normal path is killing timer
+    * - If fence ACK arrives (KILLED): callback either ran before (then _active=false, normal path 
+    *   no-ops) or cannot run after; safe.
+    * - If no ACK (STOPPED_NOACK): we disarmCallback() before finalizing; any late callback 
+    *   becomes a no-op.
+    *
+    * 2. Callback already past the disarm check and blocked on _mutex
+    * _normalClosing/_timerClosing prevent arming N+1 while N is closing.
+    * When the blocker releases the mutex:
+    * - if normal path already finalized N => _active=false -> callback exits,
+    * - otherwise timer finalizes N and clears both gates; only then can N+1 start.
+    *
+    * 3. STOP cannot be posted (FAILED)
+    * - Normal path must not finalize; returns early.
+    * - Timer will finalize (single-authority); gates are cleared in resetUnsafe().
+    *
+    * 4. Broadcast completion
+    * Treated as normal-path completion -> same centralization and defenses apply.
+    *
+    * 5. Synchronous path immediate completion
+    * EventGroup is set before arming; notifySyncWaiterUnsafe() signals atomically under _mutex.
     */
     class PendingRequest {
     private:
@@ -188,6 +262,12 @@ private:
         StaticTimer_t _timerBuf;                      // Static timer buffer
         TimerHandle_t _timer = nullptr;               // FreeRTOS timer handle
         BinarySemaphore _timerKillSem;                // Signals timer flush completion
+        std::atomic<uint32_t> _timerCbDisarmed;       // Flag to indicate whether the timer callback is disarmed
+
+        // Atomic gates for closing race protection
+        std::atomic<uint32_t> _respClosing;            // Indicates whether the request is being closed via the "normal" path
+        std::atomic<uint32_t> _timerClosing;          // Indicates whether the request is being closed via the "timeout callback" path
+
 
     public:
         // Constructor
@@ -215,8 +295,18 @@ private:
         };
         bool snapshotIfActive(PendingSnapshot& out);
 
-        // Timer neutralization method (used by Client)
-        bool killTimer(TickType_t maxWaitTicks);
+        // Timer neutralization methods (used by Client)
+        enum class KillOutcome { KILLED, FAILED, STOPPED_NOACK };
+        KillOutcome killTimer(TickType_t maxWaitTicks);
+        inline void disarmTimerCb()   { _timerCbDisarmed.store(1, std::memory_order_release); }
+        inline void rearmTimerCb()    { _timerCbDisarmed.store(0, std::memory_order_release); }
+        inline bool isTimerCbDisarmed() const { return _timerCbDisarmed.load(std::memory_order_acquire); }
+
+        // Atomic gates for closing race protection
+        inline void timerClosing(bool wip) { _timerClosing.store(wip ? 1 : 0, std::memory_order_release); }
+        inline void respClosing(bool wip) { _respClosing.store(wip ? 1 : 0, std::memory_order_release); }
+        inline bool closingInProgress() const { return _respClosing.load(std::memory_order_acquire) 
+                                                       || _timerClosing.load(std::memory_order_acquire); }
 
         // Destructor
         ~PendingRequest();

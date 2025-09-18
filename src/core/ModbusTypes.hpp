@@ -13,6 +13,7 @@
 #include <vector>
 #include <functional>
 #include <algorithm>
+#include <atomic>
 
 // Do not include timing macros & FreeRTOS types if NATIVE_TEST is defined
 #ifndef NATIVE_TEST
