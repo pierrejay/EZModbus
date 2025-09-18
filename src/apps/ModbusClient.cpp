@@ -160,12 +160,11 @@ bool Client::PendingRequest::set(const Modbus::Frame& request, Modbus::Frame* re
  */
 bool Client::PendingRequest::set(const Modbus::Frame& request, Client::ResponseCallback cb,
                                  void* userCtx, uint32_t timeoutMs) {
-    if (isActive()) return false; // Fail-fast if pending request already active
-    if (closingInProgress()) return false; // Fail if either path is currently closing a previous request
+    if (isActive() || closingInProgress()) return false; // Fail-fast
 
     Lock guard(_mutex);
     
-    if (isActive()) return false; // Avoid corruption if another set() call won the lock race
+    if (isActive() || closingInProgress()) return false; // Avoid corruption & timer/response race
 
     _reqMetadata.type = Modbus::REQUEST;
     _reqMetadata.fc = request.fc;

@@ -131,9 +131,24 @@ private:
     * while preventing all practical race conditions between:
     * - the normal path (response or TX-result completion),
     * - and the timeout callback (Timer Service Task).
+    * 
+    * The race window is extremely thin but nevertheless exists. The problematic situation is where
+    * a request is to be cleaned up by the timeout timer, and at the same time, a response arrives.
+    * The naive approach (implemented in earlier versions) cannot guarantee that, if the client is
+    * very fast, either the timer callback or the normal response path won't prematurely close a
+    * NEW request since from their own context, they have no clue about the "creation epoch" of
+    * this new request.
+    * 
+    * Rather than being satisfied with a solution that works 99.9% of the time and may cause bizarre
+    * behaviour (despite free of any data or memory corruption) every now and then, we decided to
+    * address all possile flaws, which makes up for a quite complex (but not complicated) solution
+    * given the absence of native FreeRTOS primitives capable to solve this specific case (except
+    * having a dedicated task to manage a Modbus::Client, which would be counter-productive in terms
+    * of memory resources & reactivity).)
     *
-    * The design is deliberately epoch-free and single-timer (no rotating pools).
-    * It relies on four layers of defense that together close every realistic race window.
+    * The design is deliberately epoch-free and single-timer (no rotating pools) to stay
+    * as simple as possible despite the apparent complexity. It relies on four layers of defense 
+    * that together close every realistic race window:
     *
     * Four Lines of Defense
     * ---------------------
@@ -142,17 +157,22 @@ private:
     * Two atomic flags prevent a new request from being armed while the previous one is closing:
     * - _respClosing - set by the normal path before attempting to neutralize the timer;
     * - _timerClosing - set by the timeout callback at entry.
-    *
-    * set() accepts only if !_active && !_respClosing && !_timerClosing
-    * (checked once pre-mutex and again under _mutex to remove TOCTOU).
+    * set() proceeds to start a new request only if !_active && !closingInProgress()
+    * (checked once pre-mutex for no-lock fail-fast and again under _mutex to remove TOCTOU).
     *
     * 2. Physical Neutralization (killTimer)
     * Before normal-path finalization, we try to stop the timer and fence-ACK the daemon queue:
-    * 
     * enum class KillOutcome { KILLED, FAILED, STOPPED_NOACK };
     * - KILLED         - STOP posted and fence ACK'd -> no future timeout.
     * - FAILED         - couldn't post STOP -> do not finalize here; timer will finish.
     * - STOPPED_NOACK  - STOP posted but no fence ACK within budget -> indeterminate.
+    * This is very important because contrary to what the name of the method suggests, xTimerStop()
+    * does not actually stop the timer immediately, but merely sends a message in the timer daemon
+    * control queue. The only way to make sure there won't be surprise invocation of the callback is
+    * to "force flush" this timer queue by using xTimerPendFunctionCall() with a signaling mechanism
+    * (in our case, a binary semaphore). Here, we use bounded waits in all blocking calls, i.e. a
+    * 5-tick timeout. In 99.9% of cases, the scheduler should switch smoothly so that not even one
+    * full tick elapses up to fully neutralizing the timer (-> 10 to 100µs-ish latency)
     *
     * 3. Logical Disarm (disarmTimerCb / rearmTimerCb)
     * If STOPPED_NOACK, we disarm the timeout callback.
