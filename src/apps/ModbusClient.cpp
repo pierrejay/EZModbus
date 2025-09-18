@@ -65,7 +65,6 @@ bool Client::PendingRequest::killTimer(TickType_t maxWaitTicks) {
  * @param timer The timer handle containing TimerTag
  */
 void Client::PendingRequest::timeoutCallback(TimerHandle_t timer) {
-    if (!timer) return;
     auto* pendingReq = static_cast<PendingRequest*>(pvTimerGetTimerID(timer));
     if (!pendingReq) return;
 
