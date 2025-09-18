@@ -161,17 +161,14 @@ private:
         Mutex _mutex;                                 // Mutex to protect the pending request data
         EventGroupHandle_t _syncEventGroup = nullptr; // Event group handle for synchronous wait (sync mode)
 
-        // Timer management
-        struct TimerTag {
-            PendingRequest* self;                     // Pointer to this PendingRequest instance
-            uint32_t gen;                             // Transaction epoch for late callback filtering
-        };
-        static constexpr size_t TIM_SLOTS = 2;        // Number of timer slots (2 or 3 should be enough)
-        StaticTimer_t _timBuf[TIM_SLOTS];             // Static timer buffers
-        TimerHandle_t _tim[TIM_SLOTS] = {nullptr};    // Timer handles
-        TimerTag _timTag[TIM_SLOTS];                  // Timer tags with epoch info
-        size_t _timIdx = 0;                           // Current timer index (0...TIM_SLOTS-1)
-        uint32_t _timGen = 0;                         // Current transaction epoch (monotonic)
+        // Request timeout cleanup timer management
+        StaticTimer_t _timerBuf;                      // Static timer buffer
+        TimerHandle_t _timer = nullptr;               // FreeRTOS timer handle
+        volatile bool _timerActive = false;           // Timer active flag
+        volatile uint32_t _timerStartMs = false;      // Start timestamp of last timer
+        BinarySemaphore _timerKillSem;                // Signals timer flush completion
+        static constexpr uint32_t TIMER_WAIT_MS = 5;  // Max wait time in timer ops path
+        static constexpr uint32_t TIMER_EXP_MS = 100; // Grace period after _requestTimeoutMs to safely declare last timer expired (last-resort mechanism)
 
     public:
         // Constructor
@@ -199,15 +196,19 @@ private:
         };
         bool snapshotIfActive(PendingSnapshot& out);
 
-        // Timer helper
-        inline TimerHandle_t currentTimer() const { return _tim[_timIdx]; }
-        // Usafe methods (to be called in mutex)
-        inline void notifySyncWaiterUnsafe();
-        inline void resetUnsafe();
-        // Timeout callback
-        static void timeoutCallback(TimerHandle_t timer);
+        // Timer neutralization method (used by Client)
+        bool killTimer();
+
         // Destructor
         ~PendingRequest();
+
+    private:
+        // Unsafe methods (to be called under mutex)
+        inline void notifySyncWaiterUnsafe();
+        inline void resetUnsafe();
+        // Timeout callback & helper
+        static void timeoutCallback(TimerHandle_t timer);
+        static inline bool inTimerDaemon();
     };
 
     // ===================================================================================
