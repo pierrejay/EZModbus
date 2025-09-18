@@ -91,6 +91,42 @@ private:
 };
 
 // ===================================================================================
+// FRAME METADATA STRUCTURE
+// ===================================================================================
+
+/* @brief Lightweight structure containing only frame metadata without data payload
+ * Used to store request/response information without the 250-byte data array
+ */
+struct FrameMeta {
+    MsgType type = NULL_MSG;
+    FunctionCode fc = NULL_FC;
+    uint8_t slaveId = 0;
+    uint16_t regAddress = 0;
+    uint16_t regCount = 0;
+    
+    // Default constructor
+    FrameMeta() = default;
+    
+    // Constructor from Frame
+    explicit FrameMeta(const Frame& frame) 
+        : type(frame.type), fc(frame.fc), slaveId(frame.slaveId), 
+          regAddress(frame.regAddress), regCount(frame.regCount) {}
+    
+    // Constructor with all fields
+    FrameMeta(MsgType msgType, FunctionCode funcCode, uint8_t slave, uint16_t addr, uint16_t count)
+        : type(msgType), fc(funcCode), slaveId(slave), regAddress(addr), regCount(count) {}
+    
+    // Clear function (same as Frame::clear but without data)
+    void clear() {
+        type = NULL_MSG;
+        fc = NULL_FC;
+        slaveId = 0;
+        regAddress = 0;
+        regCount = 0;
+    }
+};
+
+// ===================================================================================
 // INLINE FUNCTIONS - IN-PLACE DATA PACKING/UNPACKING IN MODBUS::FRAME
 // ===================================================================================
 
