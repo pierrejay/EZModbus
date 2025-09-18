@@ -285,7 +285,7 @@ private:
         std::atomic<uint32_t> _timerCbDisarmed;       // Flag to indicate whether the timer callback is disarmed
 
         // Atomic gates for closing race protection
-        std::atomic<uint32_t> _respClosing;            // Indicates whether the request is being closed via the "normal" path
+        std::atomic<uint32_t> _respClosing;           // Indicates whether the request is being closed via the "normal" path
         std::atomic<uint32_t> _timerClosing;          // Indicates whether the request is being closed via the "timeout callback" path
 
 
