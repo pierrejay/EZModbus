@@ -23,6 +23,7 @@ public:
 
     static constexpr uint32_t DEFAULT_REQUEST_TIMEOUT_MS = (uint32_t)EZMODBUS_CLIENT_REQ_TIMEOUT; // Max RTT before aborting the current request
     static constexpr EventBits_t SYNC_COMPLETION_BIT = 0x01; // Bitmask to set for sync path in sendRequest()
+    static constexpr TickType_t TIMER_CMD_TOUT_TICKS = pdMS_TO_TICKS(5); // Bounded wait for FreeRTOS timer commands
 
 
     // ===================================================================================
@@ -38,7 +39,8 @@ public:
         ERR_TIMEOUT,
         ERR_INVALID_RESPONSE,
         ERR_NOT_INITIALIZED,
-        ERR_INIT_FAILED
+        ERR_INIT_FAILED,
+        ERR_TIMER_FAILURE
     };
     static constexpr const char* toString(const Result result) {
         switch (result) {
@@ -51,6 +53,7 @@ public:
             case ERR_INVALID_RESPONSE: return "invalid response";
             case ERR_NOT_INITIALIZED: return "client not initialized";
             case ERR_INIT_FAILED: return "init failed";
+            case ERR_TIMER_FAILURE: return "FreeRTOS timer failure";
             default: return "unknown result";
         }
     }
@@ -121,32 +124,52 @@ private:
     // ===================================================================================
     
     /* @brief Encapsulates the management of a pending request lifecycle with a thread-safe API
-     *
-     * @note PendingRequest can only be set() if inactive (clear() must be called first)
-     *
-     * Timer Race Protection Design:
-     * This class uses a double-buffer timer approach with epoch guards to prevent
-     * race conditions between timer callbacks and response handling.
-     *
-     * Problem: xTimerStop() is asynchronous - it queues a command to the Timer
-     * Service Task rather than stopping immediately. This creates races where:
-     * 1. A late STOP from request N can kill the timer already restarted for N+1
-     * 2. A late timeout callback from N can close request N+1 if not filtered
-     *
-     * Solution:
-     * - Multiple timers: several timer handles alternate (_tim[0], _tim[1]...)
-     *   so old STOP commands cannot affect the new timer (different handle)
-     * - Epoch guards: Each request gets a unique _timGen ID copied into the
-     *   timer's ID field. Late timeout callbacks are ignored if epoch mismatches
-     * - No blocking stops: No xTimerStop() synchronization needed in response
-     *   handling - safety is guaranteed by epochs, not by stopping timers
-     * 
-     * Key Invariants:
-     * - Only one request active at a time (_active flag)
-     * - Each transaction identified by unique epoch
-     * - No blocking timer synchronization in critical paths
-     * - Late callbacks filtered by epoch mismatch and _active state
-     */
+    *
+    * @note PendingRequest can only be set() if inactive (clear() must be called first).
+    *
+    * Timer Race Protection – Current Design:
+    *   FreeRTOS xTimerStop() is asynchronous: the STOP command is enqueued and executed
+    *   later by the Timer Service Task. Without precautions, a timeout “in flight” could
+    *   fire while we are handling a response, or just after cleanup, and accidentally
+    *   close a new request.
+    *
+    *   To avoid that, the timer is explicitly neutralized BEFORE finalizing a request,
+    *   using a bounded sequence that never blocks the daemon:
+    *
+    *     killTimer(maxWaitTicks):
+    *       1) xTimerStop(timer, ≤maxWaitTicks) – posts the stop command into the daemon queue.
+    *       2) Fence via xTimerPendFunctionCall(...) – when the Timer Service Task processes
+    *          the fence, it ACKs us (semaphore) ⇒ guarantees that all pending commands have
+    *          been flushed and no further timeout callback can arrive.
+    *       3) Fallback if the fence cannot be posted: poll xTimerIsTimerActive() for
+    *          ≤maxWaitTicks to detect that the timer has no further expiry scheduled
+    *          (STOP processed OR callback already executed). Bounded wait with vTaskDelay(1).
+    *
+    *   If killTimer() fails (returns false), the function exits EARLY WITHOUT finalizing
+    *   the request: the Timer Service Task will then complete it by timeout. This is rare
+    *   and only results in a transient ERR_BUSY, without leaving inconsistent state.
+    *
+    * Integration points:
+    *   - handleResponse() and staticHandleTxResult() always call killTimer() before any
+    *     cleanup (setResponse / setResult). On failure, they return early without finalizing.
+    *   - timeoutCallback() calls setResult(ERR_TIMEOUT,finalize=true,fromTimer=true)
+    *     and does not perform heavy synchronization: it is the natural “timer wins” path.
+    *   - clear() calls killTimer() first, then resets state under the mutex.
+    *
+    * FreeRTOS API notes:
+    *   - On creation: xTimerStart() is called once.
+    *   - To (re)arm an existing timer in set(): xTimerChangePeriod(...). If the timer was
+    *     dormant, the call updates expiry and (re)starts it; if it was active, it is
+    *     re-evaluated and restarted with the new period.
+    *   - killTimer() must never be called from within the Timer Service Task context.
+    *
+    * Invariants:
+    *   - Only one request active at a time (_active).
+    *   - No epoch, no multiple timers: a single timer handle, neutralized properly at
+    *     termination points.
+    *   - All request state modifications are protected by _mutex.
+    *   - User callbacks are always invoked outside of critical sections.
+    */
     class PendingRequest {
     private:
         // Pending Request state variables
@@ -164,11 +187,7 @@ private:
         // Request timeout cleanup timer management
         StaticTimer_t _timerBuf;                      // Static timer buffer
         TimerHandle_t _timer = nullptr;               // FreeRTOS timer handle
-        volatile bool _timerActive = false;           // Timer active flag
-        volatile uint32_t _timerStartMs = false;      // Start timestamp of last timer
         BinarySemaphore _timerKillSem;                // Signals timer flush completion
-        static constexpr uint32_t TIMER_WAIT_MS = 5;  // Max wait time in timer ops path
-        static constexpr uint32_t TIMER_EXP_MS = 100; // Grace period after _requestTimeoutMs to safely declare last timer expired (last-resort mechanism)
 
     public:
         // Constructor
@@ -197,7 +216,7 @@ private:
         bool snapshotIfActive(PendingSnapshot& out);
 
         // Timer neutralization method (used by Client)
-        bool killTimer(TickType_t maxWaitTicks = pdMS_TO_TICKS(TIMER_WAIT_MS));
+        bool killTimer(TickType_t maxWaitTicks);
 
         // Destructor
         ~PendingRequest();
@@ -208,7 +227,6 @@ private:
         inline void resetUnsafe();
         // Timeout callback & helper
         static void timeoutCallback(TimerHandle_t timer);
-        static inline bool inTimerDaemon();
     };
 
     // ===================================================================================

@@ -11,56 +11,54 @@ namespace Modbus {
 // DATA STRUCTURES METHODS
 // ===================================================================================
 
-bool Client::PendingRequest::inTimerDaemon() {
-    return xTaskGetCurrentTaskHandle() == xTimerGetTimerDaemonTaskHandle();
-}
-
+/* @brief Tries to kill the current timer
+ * @param maxWaitTicks Max wait time at each operation
+ * @return true if the timer is stopped (won't hit afterwards), false if queuing command failed
+ */
 bool Client::PendingRequest::killTimer(TickType_t maxWaitTicks) {
-    if (!_timer || !_timerActive) return true;
-    if (inTimerDaemon()) {
+
+    // Early return if no timer or already stopped
+    if (!_timer) return true;
+    if (xTimerIsTimerActive(_timer) == pdFALSE) {
+        Modbus::Debug::LOG_MSG("Timer already inactive, OK");
+        return true;
+    }
+
+    // Abort if we're in timer task
+    if (xTaskGetCurrentTaskHandle() == xTimerGetTimerDaemonTaskHandle()) {
         Modbus::Debug::LOG_MSG("killTimer() called from timer daemon — forbidden");
         return false;
     }
 
-    // 1) STOP avec petit délai (évite l'échec "file pleine à t0")
-    if (xTimerStop(_timer, maxWaitTicks) != pdPASS) {
-        Modbus::Debug::LOG_MSG("xTimerStop enqueue failed");
-        return false; // rien posté => on ne sait rien => mieux vaut échouer
+    // STOP with non-null delay
+    const TickType_t stopWait = (maxWaitTicks ? maxWaitTicks : 1);
+    if (xTimerStop(_timer, stopWait) != pdPASS) {
+        Modbus::Debug::LOG_MSG("xTimerStop enqueue failed, failed to kill timer");
+        return false; // Nothing queued -> no guarantee, timer will clean up the request
     }
 
-    // 2) Fence : tente de la poster avec délai
-    while (_timerKillSem.tryTake()) {} // purge
+    while (_timerKillSem.tryTake()) {} // purge the semaphore
+
+    // Function executed in timer daemon
     auto fenceFn = [](void* ctx, uint32_t){
         auto* pr = static_cast<PendingRequest*>(ctx);
-        pr->_timerActive = false;
-        pr->_timerKillSem.giveForce(); // exécuté dans le Timer Daemon
+        pr->_timerKillSem.giveForce();
     };
 
-    if (xTimerPendFunctionCall(fenceFn, this, 0, maxWaitTicks) == pdPASS) {
-        // 2a) Attente bornée de l'ACK fence
-        if (_timerKillSem.take(TIMER_WAIT_MS)) {
+    // Try & post the fence w/ non-null delay (best-effort)
+    const TickType_t fenceWait = (maxWaitTicks ? maxWaitTicks : 1);
+    if (xTimerPendFunctionCall(fenceFn, this, 0, fenceWait) == pdPASS) {
+        // Bounded wait for confirmation
+        if (_timerKillSem.take(maxWaitTicks ? maxWaitTicks : 1)) {
             Modbus::Debug::LOG_MSG("Timer successfully killed (fence)");
             return true;
         }
-        Modbus::Debug::LOG_MSG("Fence posted but no ACK yet, fallback to poll");
+        Modbus::Debug::LOG_MSG("Fence posted but no ACK yet");
     } else {
-        Modbus::Debug::LOG_MSG("Fence enqueue failed, fallback to poll");
+        Modbus::Debug::LOG_MSG("Fence enqueue failed");
     }
 
-    // 3) FALLBACK: poll l'état réel du timer
-    //    Si inactif => STOP traité ou callback exécutée => plus de risque.
-    TickType_t deadline = xTaskGetTickCount() + maxWaitTicks;
-    do {
-        if (xTimerIsTimerActive(_timer) == pdFALSE) {
-            _timerActive = false;
-            Modbus::Debug::LOG_MSG("Timer successfully killed (poll inactive)");
-            return true;
-        }
-        vTaskDelay(1);
-    } while ((int)(deadline - xTaskGetTickCount()) > 0);
-
-    Modbus::Debug::LOG_MSG("Timer kill attempt timed out");
-    return false;
+    return true;
 }
 
 /* @brief Timeout callback for pending request
@@ -70,6 +68,7 @@ bool Client::PendingRequest::killTimer(TickType_t maxWaitTicks) {
  * Only timeouts matching the current active transaction epoch are processed.
  */
 void Client::PendingRequest::timeoutCallback(TimerHandle_t timer) {
+    if (!timer) return;
     auto* pendingReq = static_cast<PendingRequest*>(pvTimerGetTimerID(timer));
     if (!pendingReq) return;
 
@@ -119,20 +118,25 @@ bool Client::PendingRequest::set(const Modbus::Frame& request, Modbus::Frame* re
     // Create timer if necessary
     if (!_timer) {
         _timer = xTimerCreateStatic(
-            "ModbusTimeout", 
-            pdMS_TO_TICKS(timeoutMs), 
+            "ModbusTimeout",
+            pdMS_TO_TICKS(timeoutMs),
             pdFALSE,
-            this, 
-            timeoutCallback, 
+            this,
+            timeoutCallback,
             &_timerBuf
         );
+        // Check if creation succeeded, and if Start command was sent to timer Q
+        if (!_timer || xTimerStart(_timer, TIMER_CMD_TOUT_TICKS) != pdTRUE) {
+            _active = false;
+            return false;
+        }
+    } else {
+        // Check if ChangePeriod command was sent to timer Q (will rearm the timer)
+        if (xTimerChangePeriod(_timer, pdMS_TO_TICKS(timeoutMs), TIMER_CMD_TOUT_TICKS) != pdTRUE) {
+            _active = false;
+            return false;
+        };
     }
-
-    // (Re)launch the timer
-    xTimerChangePeriod(_timer, pdMS_TO_TICKS(timeoutMs), 0);
-    xTimerStart(_timer, 0);
-    _timerActive = true;
-    _timerStartMs = TIME_MS();
     
     return true;
 }
@@ -166,20 +170,25 @@ bool Client::PendingRequest::set(const Modbus::Frame& request, Client::ResponseC
     // Create timer if necessary
     if (!_timer) {
         _timer = xTimerCreateStatic(
-            "ModbusTimeout", 
-            pdMS_TO_TICKS(timeoutMs), 
+            "ModbusTimeout",
+            pdMS_TO_TICKS(timeoutMs),
             pdFALSE,
-            this, 
-            timeoutCallback, 
+            this,
+            timeoutCallback,
             &_timerBuf
         );
+        // Check if creation succeeded, and if Start command was sent to timer Q
+        if (!_timer || xTimerStart(_timer, TIMER_CMD_TOUT_TICKS) != pdTRUE) {
+            _active = false;
+            return false;
+        }
+    } else {
+        // Check if ChangePeriod command was sent to timer Q (will rearm the timer)
+        if (xTimerChangePeriod(_timer, pdMS_TO_TICKS(timeoutMs), TIMER_CMD_TOUT_TICKS) != pdTRUE) {
+            _active = false;
+            return false;
+        };
     }
-
-    // (Re)launch the timer
-    xTimerChangePeriod(_timer, pdMS_TO_TICKS(timeoutMs), 0);
-    xTimerStart(_timer, 0);
-    _timerActive = true;
-    _timerStartMs = TIME_MS();
     
     return true;
 }
@@ -187,7 +196,7 @@ bool Client::PendingRequest::set(const Modbus::Frame& request, Client::ResponseC
 /* @brief Clear the pending request
  */
 void Client::PendingRequest::clear() {
-    killTimer();
+    killTimer(portMAX_DELAY); // Only called in DTOR: wait indefinitely
     Lock guard(_mutex);
     if (!_active) return;
     _reqMetadata.clear();
@@ -229,9 +238,9 @@ void Client::PendingRequest::setResult(Result result, bool finalize, bool fromTi
 
     // Kill timer first
     if (!fromTimer) {
-        if (!killTimer(pdMS_TO_TICKS(5))) {
-            return;
-        }
+        // The result doesn't really matter here since we'll reset the timer
+        // when sending the next request anyway
+        killTimer(TIMER_CMD_TOUT_TICKS);
     }
 
     // Handle result & tracker under critical section
@@ -242,7 +251,6 @@ void Client::PendingRequest::setResult(Result result, bool finalize, bool fromTi
         cbSnapshot = _cb;
         ctxSnapshot = _cbCtx;
         if (finalize) resetUnsafe(); // also sets _active=false
-        if (fromTimer) _timerActive = false;
         notifySyncWaiterUnsafe(); // still inside mutex
     }
 
@@ -259,9 +267,9 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
 
     // Kill timer first
     if (!fromTimer) {
-        if (!killTimer(pdMS_TO_TICKS(5))) {
-            return;
-        }
+        // The result doesn't really matter here since we'll reset the timer
+        // when sending the next request anyway
+        killTimer(TIMER_CMD_TOUT_TICKS);
     } 
 
     // Handle response & tracker under critical section
@@ -273,7 +281,6 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
         cbSnapshot = _cb;
         ctxSnapshot = _cbCtx;
         if (finalize) resetUnsafe(); // also sets _active=false
-        if (fromTimer) _timerActive = false;
         notifySyncWaiterUnsafe(); // still inside mutex
     }
 
@@ -508,10 +515,11 @@ Client::Result Client::sendRequest(const Modbus::Frame& request,
  */
 Client::Result Client::handleResponse(const Modbus::Frame& response)
 {
-    // Neutralize pending timer. Exit, but do not clean up request
-    if (!_pendingRequest.killTimer(pdMS_TO_TICKS(5))) {
-        return Error(ERR_BUSY, "Timer service unresponsive");
-    }
+    // Neutralize pending timer
+    if (!_pendingRequest.killTimer(TIMER_CMD_TOUT_TICKS)) {
+        return Error(ERR_TIMER_FAILURE, "cannot stop timer");
+        // Timer will clean up the request
+    };
 
     // Le reste de la fonction est maintenant sûr.
     if (!_pendingRequest.isActive()) {
@@ -560,12 +568,11 @@ void Client::staticHandleTxResult(ModbusInterface::IInterface::Result result, vo
     Client* client = static_cast<Client*>(pClient);
 
     if (result != ModbusInterface::IInterface::SUCCESS || Modbus::isBroadcastId(client->_pendingRequest.getRequestMetadata().slaveId)) {
-        // C'est un chemin de terminaison, on neutralise le timer.
-        if (!client->_pendingRequest.killTimer(pdMS_TO_TICKS(5))) {
-            // On ne finalise PAS la requête => pas d'état incohérent
-            // ERR_BUSY sera retourné (rare), on retentera la neutralisation plus tard
-            return;
-        }
+        // Neutralize pending timer
+        if (!client->_pendingRequest.killTimer(TIMER_CMD_TOUT_TICKS)) {
+            // Failed to disarm timer: we log & let the timer timeout the request
+            Modbus::Debug::LOG_MSG("Failed to kill timer"); return;
+        };
 
         // Maintenant que le timer est neutralisé, on peut finaliser.
         if (result != ModbusInterface::IInterface::SUCCESS) {
