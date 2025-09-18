@@ -197,7 +197,7 @@ private:
         bool snapshotIfActive(PendingSnapshot& out);
 
         // Timer neutralization method (used by Client)
-        bool killTimer();
+        bool killTimer(TickType_t maxWaitTicks = pdMS_TO_TICKS(TIMER_WAIT_MS));
 
         // Destructor
         ~PendingRequest();
