@@ -134,11 +134,11 @@ private:
     * 
     * Concurrency challenge
     * ─────────────────────
-    * The challenges lies in that a FreeRTOS timer is managed asynchronously. Despite what the
+    * The challenge lies in that a FreeRTOS timer is managed asynchronously. Despite what the
     * name of the API methods suggest (xTimerStop, xTimerReset, etc.), timers are controlled by
     * sending commands to the Timer Service Task (daemon) command queue. There is no guarantee
-    * that those commands have been executed! We can just be sure that if our command was queued,
-    * it may be executed at some point in the future.
+    * whether or when those commands execute! We can just be sure that if our command was queued,
+    * it will be executed at some point in the future.
     * 
     * The race window is extremely thin but nevertheless exists. The problematic situation is where
     * a request is to be cleaned up by the timeout timer, and at the same time, a response arrives.
@@ -161,47 +161,47 @@ private:
     * ─────────────────────
     * 1. Close Gates (two atomics)
     * Two atomic flags prevent a new request from being armed while the previous one is closing:
-    * - _respClosing - set by the normal path before attempting to neutralize the timer;
+    * - _respClosing - set by the response path before attempting to neutralize the timer;
     * - _timerClosing - set by the timeout callback at entry.
-    * set() proceeds to start a new request only if !_active && !closingInProgress()
-    * (checked once pre-mutex for no-lock fail-fast and again under _mutex to remove TOCTOU).
+    * set() proceeds to start a new request only if !_active && !_respClosing() && !_timerClosing.
+    * (checked once pre-mutex for no-lock fail-fast and again under _mutex to avoid TOCTOU).
     *
     * 2. Physical Neutralization (killTimer)
-    * Before normal-path finalization, we try to stop the timer and fence-ACK the daemon queue:
-    * enum class KillOutcome { KILLED, FAILED, STOPPED_NOACK };
-    * - KILLED         - STOP posted and fence ACK'd -> no future timeout.
-    * - FAILED         - couldn't post STOP -> do not finalize here; timer will finish.
-    * - STOPPED_NOACK  - STOP posted but no fence ACK within budget -> indeterminate.
-    * The only way to make sure there won't be surprise invocation of the callback is to "force flush" 
-    * the timer daemon command queue by using xTimerPendFunctionCall() with a signaling mechanism
-    * (in our case, a binary semaphore). Here, we use bounded waits in all blocking calls, i.e. a
-    * 5-tick timeout. In 99.9% of cases, the scheduler should switch smoothly so that not even one
-    * full tick elapses up to fully neutralizing the timer (-> 10 to 100µs-ish latency)
+    * Before response path finalization, we try to stop the timer and fence-ACK the daemon queue
+    * (bounded wait, max 5 ticks by default at each step) with 3 possible outcomes:
+    * - KILLED         -> STOP posted and fence ACK'd: guarantee of no future timeout.
+    * - FAILED         -> couldn't post STOP: do not finalize here, timer will finish.
+    * - STOPPED_NOACK  -> STOP posted but no fence ACK within budget: indeterminate.
+    * In 99.9% of cases, the scheduler will switch smoothly between timer daemon and request
+    * context, so that not even one full tick might elapse until the timer is fully neutralized
+    * (10 to 100µs-ish latency -> negligible impact on the real-time performance)
     *
     * 3. Logical Disarm (disarmTimerCb / rearmTimerCb)
-    * If STOPPED_NOACK, we disarm the timeout callback.
+    * If STOPPED_NOACK, we disarm the timeout callback to prevent any future surprise invocation.
     * The callback checks isTimerCbDisarmed() before any lock/abort and becomes a no-op immediately.
     * This guarantees that a late timeout cannot touch current or future requests.
     *
     * 4. Mutual Exclusion (single _mutex)
     * All state mutations occur under _mutex in setResult(), setResponse(), clear() (via resetUnsafe()),
     * preventing double-finalization of the same request and ensuring atomic signaling of waiters.
+    * Both setResult() and setResponse() use RAII closers to guarantee atomic gates are
+    * always cleared, even on early returns paths.
     *
     * Centralization (single point of truth)
     * ──────────────────────────────────────
     * Call sites never manage timers directly. They only:
-    * - take a read-only snapshot for validation (to avoid long critical sections),
+    * - take a read-only snapshot for validation (to avoid long critical sections or torn reads),
     * - then call one of:
     *   - setResponse(frame, finalize, fromTimer=false)
     *   - setResult(result, finalize, fromTimer=false)
     *
     * These methods internally:
-    * 1. set _respClosing=true,
+    * 1. set _respClosing=true (via RAII closer),
     * 2. run killTimer(),
-    *    - on FAILED: clear _respClosing and return (timer will finalize),
+    *    - on FAILED: return immediately (RAII clears _respClosing, timer will finalize),
     *    - on STOPPED_NOACK: disarmTimerCb() (logical neutralization),
     * 3. finalize under _mutex (write tracker/response, _active=false, signal waiters),
-    * 4. clear both gates in resetUnsafe().
+    * 4. resetUnsafe() clears _active (gates cleared by RAII automatically).
     * The timeout path calls setResult(..., fromTimer=true) and does not invoke killTimer() nor disarm.
     *
     * Execution Paths (precise order)
@@ -218,11 +218,11 @@ private:
     * If sendFrame() fails: setResult(ERR_TX_FAILED, finalize=true, fromTimer=false).
     *
     * 4. Timeout callback (timeoutCallback)
-    * 4.1. _timerClosing = true (atomic),
-    * 4.2. if isCallbackDisabled() -> _timerClosing=false; return;,
-    * 4.3. lock _mutex; if !_active -> _timerClosing=false; return;,
+    * 4.1. _timerClosing = true (atomic, with RAII closer),
+    * 4.2. if isTimerCbDisarmed() -> return (RAII clears _timerClosing),
+    * 4.3. lock _mutex; if !_active -> return (RAII clears _timerClosing),
     * 4.4. abort transport (abortCurrentTransaction()),
-    * 4.5. setResult(ERR_TIMEOUT, true, fromTimer=true) -> resetUnsafe() clears gates.
+    * 4.5. setResult(ERR_TIMEOUT, true, fromTimer=true) -> resetUnsafe() clears _active.
     *
     * 5. Synchronous wait
     * The EventGroup handle is registered inside set(...) (or just before arming) to avoid a small 
@@ -255,8 +255,8 @@ private:
     *   - otherwise timer finalizes N and clears both gates; only then can N+1 start.
     *
     * 3. STOP cannot be posted (FAILED)
-    * - Normal path must not finalize; returns early.
-    * - Timer will finalize (single-authority); gates are cleared in resetUnsafe().
+    * - Normal path must not finalize; returns early (RAII clears _respClosing).
+    * - Timer will finalize (single-authority); gates cleared by respective RAII closers.
     *
     * 4. Broadcast completion
     * Treated as normal-path completion -> same centralization and defenses apply.
@@ -266,10 +266,9 @@ private:
     * 
     * Alternative Approaches Considered
     * ─────────────────────────────────
-    * 1. Timer pools with epochs → More memory, complex lifecycle
+    * 1. Timer pool with epochs → More memory, complex lifecycle
     * 2. Dedicated timer task → Extra task overhead, worse latency  
     * 3. Delegate timeout management to interface → architectural mismatch, logic duplication
-    * 4. Lock-free only → Cannot solve all race windows reliably
     * Current solution balances correctness, performance, and maintainability.
     */
     class PendingRequest {
