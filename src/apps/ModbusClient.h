@@ -144,7 +144,7 @@ private:
     * address all possile flaws, which makes up for a quite complex (but not complicated) solution
     * given the absence of native FreeRTOS primitives capable to solve this specific case (except
     * having a dedicated task to manage a Modbus::Client, which would be counter-productive in terms
-    * of memory resources & reactivity).)
+    * of memory resources & responsiveness).
     *
     * The design is deliberately epoch-free and single-timer (no rotating pools) to stay
     * as simple as possible despite the apparent complexity. It relies on four layers of defense 

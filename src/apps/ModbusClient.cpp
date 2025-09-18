@@ -323,7 +323,7 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
         cbSnapshot = _cb;
         ctxSnapshot = _cbCtx;
         if (finalize) {
-            resetUnsafe(); // also sets _active=false & calls _respClosing(false)
+            resetUnsafe(); // also sets _active=false
             respClosing(false);
         }
 
@@ -352,6 +352,22 @@ void Client::PendingRequest::notifySyncWaiterUnsafe() {
     }
 }
 
+/* @brief Snapshot request metadata if still active (thread-safe)
+ * @param out Output structure to fill with metadata snapshot
+ * @return true if request was active and snapshot captured, false otherwise
+ *
+ * This provides a lock-free way for handleResponse to validate responses
+ * without holding the mutex during the entire validation process.
+ */
+bool Client::PendingRequest::snapshotIfActive(PendingSnapshot& out) {
+    Lock guard(_mutex);
+    if (!_active) {
+        return false;
+    }
+    out.reqMetadata = _reqMetadata;
+    return true;
+}
+
 /* @brief Destructor for PendingRequest - cleanup timer
  */
 Client::PendingRequest::~PendingRequest() {
@@ -373,7 +389,6 @@ void Client::PendingRequest::resetUnsafe() {
     _cb = nullptr;
     _cbCtx = nullptr;
     _active = false;
-    _timer
 }
 
 // ===================================================================================
