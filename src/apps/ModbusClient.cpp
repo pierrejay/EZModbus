@@ -69,8 +69,9 @@ void Client::PendingRequest::timeoutCallback(TimerHandle_t timer) {
     if (!pendingReq) return;
 
     pendingReq->timerClosing(true);
-    // RAII guard: ensure we call timerClosing(false) in all return paths
-    struct _Closer { PendingRequest* p; ~_Closer(){ p->timerClosing(false);} } _closer{pendingReq};
+    // One-liner RAII closing guard: ensure we call timerClosing(false) in all return paths
+    struct Closer { PendingRequest* p; ~Closer(){ p->timerClosing(false);} }
+    closer{pendingReq};
 
     // Check if callback has been disabled by killTimer()
     if (pendingReq->isTimerCbDisarmed()) {
@@ -92,8 +93,6 @@ void Client::PendingRequest::timeoutCallback(TimerHandle_t timer) {
     // Do not manage sync here, setResult(...,fromTimer=true) will take care of it
     pendingReq->setResult(ERR_TIMEOUT, true, true);
     Modbus::Debug::LOG_MSG("Request timed out via timer");
-
-    pendingReq->timerClosing(false); // We leave closing operation
 }
 
 /* @brief Set the pending request (response & tracker version)
@@ -248,8 +247,12 @@ void Client::PendingRequest::setResult(Result result, bool finalize, bool fromTi
     Client::ResponseCallback cbSnapshot = nullptr;
     void* ctxSnapshot = nullptr;
 
-    // Atomic gate : we are closing the request if finalize is true
-    if (finalize) respClosing(true);
+    // Atomic gate : we are closing the request if finalize is true and call origins from response
+    if (finalize && !fromTimer) respClosing(true);
+
+    // One-liner RAII closing guard: ensure we call respClosing(false) in all return paths
+    struct Closer { PendingRequest* p; bool en; ~Closer(){ if (en) p->respClosing(false);} } 
+    closer{this, finalize && !fromTimer};
 
     // Kill timer first
     if (!fromTimer) {
@@ -275,10 +278,7 @@ void Client::PendingRequest::setResult(Result result, bool finalize, bool fromTi
         if (_tracker) *_tracker = result;
         cbSnapshot = _cb;
         ctxSnapshot = _cbCtx;
-        if (finalize) {
-            resetUnsafe(); // also sets _active=false
-            respClosing(false);
-        } 
+        if (finalize) resetUnsafe(); // also sets _active=false
 
         notifySyncWaiterUnsafe(); // still inside mutex
     }
@@ -294,8 +294,12 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
     Client::ResponseCallback cbSnapshot = nullptr;
     void* ctxSnapshot = nullptr;
 
-    // Atomic gate : we are closing the request if finalize is true
-    if (finalize) respClosing(true);
+    // Atomic gate : we are closing the request if finalize is true and call origins from response
+    if (finalize && !fromTimer) respClosing(true);
+    
+    // One-liner RAII closing guard: ensure we call respClosing(false) in all return paths
+    struct Closer { PendingRequest* p; bool en; ~Closer(){ if (en) p->respClosing(false);} } 
+    closer{this, finalize && !fromTimer};
 
     // Kill timer first
     if (!fromTimer) {
@@ -322,10 +326,7 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
         if (_tracker) *_tracker = SUCCESS;
         cbSnapshot = _cb;
         ctxSnapshot = _cbCtx;
-        if (finalize) {
-            resetUnsafe(); // also sets _active=false
-            respClosing(false);
-        }
+        if (finalize) resetUnsafe(); // also sets _active=false
 
         notifySyncWaiterUnsafe(); // still inside mutex
     }

@@ -125,12 +125,20 @@ private:
     
     /*
     * @class Modbus::Client::PendingRequest
-    * @brief Lifecycle of a single in-flight request with bulletproof timer-race handling.
+    * @brief Lifecycle of a single in-flight request with timeout management & race handling
     *
-    * This class coordinates a request/response transaction driven by a FreeRTOS one-shot timer,
-    * while preventing all practical race conditions between:
+    * This class coordinates a request/response transaction with timeout driven by a FreeRTOS 
+    * one-shot timer, while preventing all practical race conditions between:
     * - the normal path (response or TX-result completion),
     * - and the timeout callback (Timer Service Task).
+    * 
+    * Concurrency challenge
+    * ─────────────────────
+    * The challenges lies in that a FreeRTOS timer is managed asynchronously. Despite what the
+    * name of the API methods suggest (xTimerStop, xTimerReset, etc.), timers are controlled by
+    * sending commands to the Timer Service Task (daemon) command queue. There is no guarantee
+    * that those commands have been executed! We can just be sure that if our command was queued,
+    * it may be executed at some point in the future.
     * 
     * The race window is extremely thin but nevertheless exists. The problematic situation is where
     * a request is to be cleaned up by the timeout timer, and at the same time, a response arrives.
@@ -139,20 +147,18 @@ private:
     * NEW request since from their own context, they have no clue about the "creation epoch" of
     * this new request.
     * 
-    * Rather than being satisfied with a solution that works 99.9% of the time and may cause bizarre
-    * behaviour (despite free of any data or memory corruption) every now and then, we decided to
-    * address all possile flaws, which makes up for a quite complex (but not complicated) solution
-    * given the absence of native FreeRTOS primitives capable to solve this specific case (except
-    * having a dedicated task to manage a Modbus::Client, which would be counter-productive in terms
-    * of memory resources & responsiveness).
+    * Despite the naive implementation working well in 99.9% of cases, with very limited practical
+    * consequences in case of a race (no data or memory corruption, just a client request closed 
+    * too early), I wasn't confident with a solution that has conceptual flaws.
+    * I decided to address all possible "failure modes", which makes up for a quite sophisticated 
+    * solution (though not that complicated) given the absence of native FreeRTOS primitives capable 
+    * of solving this specific case - read further below for considered alternative approaches.
     *
-    * The design is deliberately epoch-free and single-timer (no rotating pools) to stay
-    * as simple as possible despite the apparent complexity. It relies on four layers of defense 
-    * that together close every realistic race window:
+    * The design is deliberately epoch-free and single-timer to stay as simple as possible.
+    * It relies on four layers of defense that together prevent every realistic race window:
     *
     * Four Lines of Defense
-    * ---------------------
-    * 
+    * ─────────────────────
     * 1. Close Gates (two atomics)
     * Two atomic flags prevent a new request from being armed while the previous one is closing:
     * - _respClosing - set by the normal path before attempting to neutralize the timer;
@@ -166,10 +172,8 @@ private:
     * - KILLED         - STOP posted and fence ACK'd -> no future timeout.
     * - FAILED         - couldn't post STOP -> do not finalize here; timer will finish.
     * - STOPPED_NOACK  - STOP posted but no fence ACK within budget -> indeterminate.
-    * This is very important because contrary to what the name of the method suggests, xTimerStop()
-    * does not actually stop the timer immediately, but merely sends a message in the timer daemon
-    * control queue. The only way to make sure there won't be surprise invocation of the callback is
-    * to "force flush" this timer queue by using xTimerPendFunctionCall() with a signaling mechanism
+    * The only way to make sure there won't be surprise invocation of the callback is to "force flush" 
+    * the timer daemon command queue by using xTimerPendFunctionCall() with a signaling mechanism
     * (in our case, a binary semaphore). Here, we use bounded waits in all blocking calls, i.e. a
     * 5-tick timeout. In 99.9% of cases, the scheduler should switch smoothly so that not even one
     * full tick elapses up to fully neutralizing the timer (-> 10 to 100µs-ish latency)
@@ -184,8 +188,7 @@ private:
     * preventing double-finalization of the same request and ensuring atomic signaling of waiters.
     *
     * Centralization (single point of truth)
-    * --------------------------------------
-    *
+    * ──────────────────────────────────────
     * Call sites never manage timers directly. They only:
     * - take a read-only snapshot for validation (to avoid long critical sections),
     * - then call one of:
@@ -202,8 +205,7 @@ private:
     * The timeout path calls setResult(..., fromTimer=true) and does not invoke killTimer() nor disarm.
     *
     * Execution Paths (precise order)
-    * -------------------------------
-    *
+    * ───────────────────────────────
     * 1. Normal response (handleResponse)
     * 1.1. Snapshot request metadata (no locks held during validation).
     * 1.2. setResponse(..., finalize=true, fromTimer=false) -> triggers 4-layer policy above.
@@ -227,8 +229,7 @@ private:
     * window where completion arrives before the waiter is installed.
     *
     * Invariants & Guarantees
-    * -----------------------
-    * 
+    * ───────────────────────
     * - Single in-flight: at most one active request (_active==true) at a time.
     * - No phantom timeout: a late timeout cannot affect a future request:
     *   - either timer is physically killed (KILLED), or
@@ -240,8 +241,7 @@ private:
     * - No epochs, no timer pools; a single timer handle is reused safely.
     *
     * Corner Cases (exhaustive)
-    * -------------------------
-    *
+    * ─────────────────────────
     * 1. Callback fires while normal path is killing timer
     * - If fence ACK arrives (KILLED): callback either ran before (then _active=false, normal path 
     *   no-ops) or cannot run after; safe.
@@ -249,10 +249,10 @@ private:
     *   becomes a no-op.
     *
     * 2. Callback already past the disarm check and blocked on _mutex
-    * _normalClosing/_timerClosing prevent arming N+1 while N is closing.
-    * When the blocker releases the mutex:
-    * - if normal path already finalized N => _active=false -> callback exits,
-    * - otherwise timer finalizes N and clears both gates; only then can N+1 start.
+    * - Atomic gates prevent arming N+1 while N is closing.
+    * - When the blocker releases the mutex:
+    *   - if normal path already finalized N => _active=false -> callback exits,
+    *   - otherwise timer finalizes N and clears both gates; only then can N+1 start.
     *
     * 3. STOP cannot be posted (FAILED)
     * - Normal path must not finalize; returns early.
@@ -263,6 +263,14 @@ private:
     *
     * 5. Synchronous path immediate completion
     * EventGroup is set before arming; notifySyncWaiterUnsafe() signals atomically under _mutex.
+    * 
+    * Alternative Approaches Considered
+    * ─────────────────────────────────
+    * 1. Timer pools with epochs → More memory, complex lifecycle
+    * 2. Dedicated timer task → Extra task overhead, worse latency  
+    * 3. Delegate timeout management to interface → architectural mismatch, logic duplication
+    * 4. Lock-free only → Cannot solve all race windows reliably
+    * Current solution balances correctness, performance, and maintainability.
     */
     class PendingRequest {
     private:
@@ -291,7 +299,7 @@ private:
 
     public:
         // Constructor
-        PendingRequest(Client* client) : _client(client) {}
+        PendingRequest(Client* client) : _client(client), _timerCbDisarmed(0), _respClosing(0), _timerClosing(0) {}
         
         // Helper methods
         bool set(const Modbus::Frame& request, Modbus::Frame* response, 
