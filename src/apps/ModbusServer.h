@@ -20,6 +20,10 @@
     #define EZMODBUS_SERVER_MAX_INTERFACES 2
 #endif
 
+#ifndef EZMODBUS_SERVER_REQ_MUTEX_TIMEOUT_MS // Server request mutex timeout (ms)
+    #define EZMODBUS_SERVER_REQ_MUTEX_TIMEOUT_MS UINT32_MAX // Infinite wait by default
+#endif
+
 
 namespace Modbus {
 
@@ -32,6 +36,7 @@ public:
     static constexpr uint32_t MAX_REGISTERS = 65535;
     static constexpr size_t MAX_WORD_SIZE = (size_t)EZMODBUS_SERVER_MAX_WORD_SIZE; // max no. registers per word
     static constexpr size_t MAX_INTERFACES = (size_t)EZMODBUS_SERVER_MAX_INTERFACES; // max simultaneous interfaces
+    static constexpr uint32_t REQUEST_MUTEX_TIMEOUT_MS = (uint32_t)EZMODBUS_SERVER_REQ_MUTEX_TIMEOUT_MS; // request mutex timeout
 
     // ===================================================================================
     // RESULT TYPES

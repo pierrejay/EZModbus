@@ -168,10 +168,14 @@ Server::Result Server::handleRequest(const Modbus::Frame& request,
     bool dropResponse = false;
 
     // Process request and send response atomically (request + response buffer + WordStore protected)
-    Lock guard(_serverMutex);
+    TickType_t mutexTimeout = (REQUEST_MUTEX_TIMEOUT_MS == UINT32_MAX)
+                             ? portMAX_DELAY
+                             : pdMS_TO_TICKS(REQUEST_MUTEX_TIMEOUT_MS);
+
+    Lock guard(_serverMutex, mutexTimeout);
     if (!guard.isLocked()) {
         // A request is already being processed, ignore this one
-        return Error(Server::ERR_RCV_BUSY);
+        return Error(Server::ERR_RCV_BUSY, "server busy processing another request");
     }
 
     _responseBuffer.clear();
