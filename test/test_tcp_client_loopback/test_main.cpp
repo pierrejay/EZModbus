@@ -1701,16 +1701,21 @@ void test_client_reconnect_on_first_request() {
     Modbus::Logger::logln("Client successfully reconnected on first request");
 }
 
+
+
+// Multi-interface test HAL instances (shared between tests)
+constexpr uint16_t MULTI_INTERFACE_PORT = MODBUS_PORT + 1;
+ModbusHAL::TCP multiInterfaceServerTcpHal(MULTI_INTERFACE_PORT);
+ModbusHAL::UART multiInterfaceServerRtuHal(UART_NUM_1, 9600, ModbusHAL::UART::CONFIG_8N1, D5, D6);
+ModbusHAL::TCP multiInterfaceClientTcpHal("127.0.0.1", MULTI_INTERFACE_PORT);
+ModbusHAL::UART multiInterfaceClientRtuHal(UART_NUM_2, 9600, ModbusHAL::UART::CONFIG_8N1, D7, D8);
+
 void test_multi_interface_server_reqmutex_maxtimeout() {
     Modbus::Logger::logln("TEST_MULTI_INTERFACE_SERVER_REQMUTEX_MAXTIMEOUT");
-    constexpr uint16_t LOCAL_PORT = MODBUS_PORT + 1;
 
-    // Static instances to avoid stack overflow
-    static ModbusHAL::TCP localTcpHal(LOCAL_PORT);  // Different port to avoid conflict
-    static ModbusHAL::UART localRtuHal(UART_NUM_1, 9600, ModbusHAL::UART::CONFIG_8N1, D5, D6);
-
-    static ModbusInterface::TCP tcpInterface(localTcpHal, Modbus::SERVER);
-    static ModbusInterface::RTU rtuInterface(localRtuHal, Modbus::SERVER);
+    // Static instances to avoid stack overflow (using global HAL instances)
+    static ModbusInterface::TCP tcpInterface(multiInterfaceServerTcpHal, Modbus::SERVER);
+    static ModbusInterface::RTU rtuInterface(multiInterfaceServerRtuHal, Modbus::SERVER);
 
     static Modbus::StaticWordStore<20> localStore;
 
@@ -1718,8 +1723,8 @@ void test_multi_interface_server_reqmutex_maxtimeout() {
     static Modbus::Server multiServer({&tcpInterface, &rtuInterface}, localStore, 1, true, UINT32_MAX);
 
     // 1. INITIALIZE HAL FIRST
-    localTcpHal.begin();
-    localRtuHal.begin();
+    multiInterfaceServerTcpHal.begin();
+    multiInterfaceServerRtuHal.begin();
     auto tcpIfcRes = tcpInterface.begin();
     auto rtuIfcRes = rtuInterface.begin();
 
@@ -1753,12 +1758,11 @@ void test_multi_interface_server_reqmutex_maxtimeout() {
     TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, serverBeginRes);
 
     // Test TCP client → multi-interface server
-    static ModbusHAL::TCP clientTcpHal("127.0.0.1", LOCAL_PORT);
-    static ModbusInterface::TCP clientTcp(clientTcpHal, Modbus::CLIENT);
+    static ModbusInterface::TCP clientTcp(multiInterfaceClientTcpHal, Modbus::CLIENT);
     static Modbus::Client tcpClient(clientTcp);
 
     // Initialize TCP client
-    clientTcpHal.begin();
+    multiInterfaceClientTcpHal.begin();
     auto clientTcpIfcRes = clientTcp.begin();
     auto clientTcpRes = tcpClient.begin();
 
@@ -1785,12 +1789,11 @@ void test_multi_interface_server_reqmutex_maxtimeout() {
     TEST_ASSERT_EQUAL(0x1234, tcpResponse.getRegister(0));
 
     // Test RTU client → multi-interface server (via UART loopback)
-    static ModbusHAL::UART clientRtuHal(UART_NUM_2, 9600, ModbusHAL::UART::CONFIG_8N1, D7, D8);
-    static ModbusInterface::RTU clientRtu(clientRtuHal, Modbus::CLIENT);
+    static ModbusInterface::RTU clientRtu(multiInterfaceClientRtuHal, Modbus::CLIENT);
     static Modbus::Client rtuClient(clientRtu);
 
     // Initialize RTU client
-    clientRtuHal.begin();
+    multiInterfaceClientRtuHal.begin();
     auto clientRtuIfcRes = clientRtu.begin();
     auto clientRtuRes = rtuClient.begin();
 
@@ -1845,14 +1848,10 @@ void test_multi_interface_server_reqmutex_maxtimeout() {
 
 void test_multi_interface_server_reqmutex_nolock() {
     Modbus::Logger::logln("TEST_MULTI_INTERFACE_SERVER_REQMUTEX_NOLOCK");
-    constexpr uint16_t LOCAL_PORT = MODBUS_PORT + 1;
 
-    // Static instances to avoid stack overflow
-    static ModbusHAL::TCP localTcpHal(LOCAL_PORT);  // Different port to avoid conflict
-    static ModbusHAL::UART localRtuHal(UART_NUM_1, 9600, ModbusHAL::UART::CONFIG_8N1, D5, D6);
-
-    static ModbusInterface::TCP tcpInterface(localTcpHal, Modbus::SERVER);
-    static ModbusInterface::RTU rtuInterface(localRtuHal, Modbus::SERVER);
+    // Static instances to avoid stack overflow (using global HAL instances)
+    static ModbusInterface::TCP tcpInterface(multiInterfaceServerTcpHal, Modbus::SERVER);
+    static ModbusInterface::RTU rtuInterface(multiInterfaceServerRtuHal, Modbus::SERVER);
 
     static Modbus::StaticWordStore<20> localStore;
 
@@ -1860,8 +1859,8 @@ void test_multi_interface_server_reqmutex_nolock() {
     static Modbus::Server multiServer({&tcpInterface, &rtuInterface}, localStore, 1, true, 0);
 
     // 1. INITIALIZE HAL FIRST
-    localTcpHal.begin();
-    localRtuHal.begin();
+    multiInterfaceServerTcpHal.begin();
+    multiInterfaceServerRtuHal.begin();
     auto tcpIfcRes = tcpInterface.begin();
     auto rtuIfcRes = rtuInterface.begin();
 
@@ -1895,12 +1894,11 @@ void test_multi_interface_server_reqmutex_nolock() {
     TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, serverBeginRes);
 
     // Test TCP client → multi-interface server
-    static ModbusHAL::TCP clientTcpHal("127.0.0.1", LOCAL_PORT);
-    static ModbusInterface::TCP clientTcp(clientTcpHal, Modbus::CLIENT);
+    static ModbusInterface::TCP clientTcp(multiInterfaceClientTcpHal, Modbus::CLIENT);
     static Modbus::Client tcpClient(clientTcp);
 
     // Initialize TCP client
-    clientTcpHal.begin();
+    multiInterfaceClientTcpHal.begin();
     auto clientTcpIfcRes = clientTcp.begin();
     auto clientTcpRes = tcpClient.begin();
 
@@ -1927,12 +1925,11 @@ void test_multi_interface_server_reqmutex_nolock() {
     TEST_ASSERT_EQUAL(0x1234, tcpResponse.getRegister(0));
 
     // Test RTU client → multi-interface server (via UART loopback)
-    static ModbusHAL::UART clientRtuHal(UART_NUM_2, 9600, ModbusHAL::UART::CONFIG_8N1, D7, D8);
-    static ModbusInterface::RTU clientRtu(clientRtuHal, Modbus::CLIENT);
+    static ModbusInterface::RTU clientRtu(multiInterfaceClientRtuHal, Modbus::CLIENT);
     static Modbus::Client rtuClient(clientRtu);
 
     // Initialize RTU client
-    clientRtuHal.begin();
+    multiInterfaceClientRtuHal.begin();
     auto clientRtuIfcRes = clientRtu.begin();
     auto clientRtuRes = rtuClient.begin();
 
