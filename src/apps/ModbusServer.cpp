@@ -160,84 +160,91 @@ bool Server::isBusy() {
  */
 Server::Result Server::handleRequest(const Modbus::Frame& request,
                                      ModbusInterface::IInterface& sourceInterface) {
-    // Safety: ignore requests if server not properly initialized
     if (!_isInitialized) {
         return Error(Server::ERR_NOT_INITIALIZED, "server not initialized");
     }
 
-    // Response buffer on stack - thread-safe by nature
-    Modbus::Frame responseBuffer;
-    bool dropResponse = false;
+    Modbus::Frame response;
+    bool shouldReply = false;
+    Server::Result finalRes = SUCCESS;
+    const bool isBroadcast = Modbus::isBroadcastId(request.slaveId);
 
-    // Scope for mutex protection of WordStore access
-    {
-        TickType_t mutexTimeout = (REQUEST_MUTEX_TIMEOUT_MS == UINT32_MAX)
-                                 ? portMAX_DELAY
-                                 : pdMS_TO_TICKS(REQUEST_MUTEX_TIMEOUT_MS);
+    { // Scope for mutex protection of WordStore access
+        TickType_t timeout = (REQUEST_MUTEX_TIMEOUT_MS == UINT32_MAX)
+                             ? portMAX_DELAY : pdMS_TO_TICKS(REQUEST_MUTEX_TIMEOUT_MS);
+        Lock guard(_serverMutex, timeout);
 
-        Lock guard(_serverMutex, mutexTimeout);
-        if (!guard.isLocked()) {
-            // Build and send busy exception without mutex
-            Modbus::makeException(request, responseBuffer, Modbus::SLAVE_DEVICE_BUSY);
-            sourceInterface.sendFrame(responseBuffer, nullptr, nullptr);
-            return Error(Server::ERR_RCV_BUSY, "server busy processing another request");
+        // Single while(0) loop: check all guard clauses and exit at each step if needed
+        // Set finalRes with Error() helper to log the exact location where it failed
+        do {
+            // Send busy exception if we couldn't lock the mutex
+            if (!guard.isLocked()) {
+                finalRes = Error(Server::ERR_RCV_BUSY, "server busy");
+                if (!isBroadcast) {
+                    Modbus::makeException(request, response, Modbus::SLAVE_DEVICE_BUSY);
+                    shouldReply = true;
+                }
+                break;
+            }
+
+            // Ignore requests not addressed to us
+            const bool catchAll = Modbus::isBroadcastId(_serverId) || sourceInterface.checkCatchAllSlaveIds();
+            if (!catchAll && (request.slaveId != _serverId) && !isBroadcast) {
+                finalRes = Error(Server::ERR_RCV_WRONG_SLAVE_ID);
+                break;
+            }
+
+            // Ignore unsolicited responses from clients
+            if (request.type != Modbus::REQUEST) {
+                finalRes = Error(Server::ERR_RCV_INVALID_TYPE);
+                break;
+            }
+
+            // Ignore broadcast read requests (do not send an exception!)
+            const bool isWriteReq = Server::isWrite(request.fc);
+            if (isBroadcast && !isWriteReq) {
+                finalRes = Error(Server::ERR_RCV_ILLEGAL_FUNCTION, "read on broadcast");
+                break;
+            }
+
+            // Send illegal function exception upon invalid FC
+            if (!ModbusCodec::isValidFunctionCode(static_cast<uint8_t>(request.fc))) {
+                finalRes = Error(Server::ERR_RCV_ILLEGAL_FUNCTION, "invalid function code");
+                if (!isBroadcast) {
+                    Modbus::makeException(request, response, Modbus::ILLEGAL_FUNCTION);
+                    shouldReply = true;
+                }
+                break;
+            }
+
+            // If we reach here, the request is valid and ready to be processed
+            response.clear();
+            response.type           = Modbus::RESPONSE;
+            response.fc             = request.fc;
+            response.slaveId        = request.slaveId;
+            response.regAddress     = request.regAddress;
+            response.regCount       = request.regCount;
+            response.exceptionCode  = Modbus::NULL_EXCEPTION;
+
+            finalRes = isWriteReq ? handleWrite(request, response)
+                                  : handleRead(request, response);
+
+            shouldReply = !isBroadcast;
+
+        } while (0);
+
+    } // Mutex released here, now safe to reply
+
+    // Single send point, outside critical section
+    if (shouldReply) {
+        Server::Result txRes = sendResponse(response, sourceInterface);
+        // Prioritize transmission error if it exists
+        if (txRes != SUCCESS) {
+            finalRes = txRes; // sendResponse already logged the failure
         }
-
-        responseBuffer.clear();
-
-        // Ignore the Slave ID if the request is sent to a broadcast slave ID
-        // or if the server is configured to catch all requests (broadcast mode or TCP server)
-        bool catchAllMode = Modbus::isBroadcastId(_serverId) || sourceInterface.checkCatchAllSlaveIds();
-        bool broadcastRequest = Modbus::isBroadcastId(request.slaveId);
-        dropResponse = broadcastRequest;  // We don't respond to broadcast requests
-        bool dropRequest = !catchAllMode 
-                            && (request.slaveId != _serverId)
-                            && !broadcastRequest; // We drop requests not addressed to us
-
-        // We ignore requests not addressed to us & unsolicited responses
-        if (dropRequest) return Error(Server::ERR_RCV_WRONG_SLAVE_ID);
-        if (request.type != Modbus::REQUEST) return Error(Server::ERR_RCV_INVALID_TYPE);
-
-        const bool isWriteReq = isWrite(request.fc);
-
-        // Reject read requests in broadcast mode according to Modbus spec
-        // (do not send back an exception for invalid broadcast requests)
-        if (broadcastRequest && !isWriteReq) {
-            return Error(Server::ERR_RCV_ILLEGAL_FUNCTION);
-        }
-
-        // Prepare the response
-        responseBuffer.type = Modbus::RESPONSE;
-        responseBuffer.fc = request.fc;
-        responseBuffer.slaveId = request.slaveId;
-        responseBuffer.regAddress = request.regAddress;
-        responseBuffer.regCount = request.regCount;
-        responseBuffer.clearData(false);
-        responseBuffer.exceptionCode = Modbus::NULL_EXCEPTION;
-
-        // Check that the function code is valid, return an exception if not
-        if (!ModbusCodec::isValidFunctionCode(static_cast<uint8_t>(request.fc))) {
-            responseBuffer.exceptionCode = Modbus::ILLEGAL_FUNCTION;
-            if (!dropResponse) sourceInterface.sendFrame(responseBuffer, nullptr, nullptr);
-            return Error(Server::ERR_RCV_ILLEGAL_FUNCTION);
-        }
-
-        // Process the request based on whether it's a read or write
-        if (isWriteReq) {
-            handleWrite(request, responseBuffer);
-        } else {
-            handleRead(request, responseBuffer);
-        }
-
-    } // Mutex released here - WordStore access complete
-
-    // Send the response OUTSIDE mutex - no blocking between interfaces
-    if (!dropResponse) {
-        Server::Result res = sendResponse(responseBuffer, sourceInterface);
-        if (res != Server::SUCCESS) return res;
     }
 
-    return Success();
+    return finalRes;
 }
 
 /* @brief Handle a read request with streaming approach (NO dynamic allocation)

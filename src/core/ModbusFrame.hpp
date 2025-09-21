@@ -899,13 +899,13 @@ inline bool Modbus::Frame::getInt16(int16_t& target, size_t regIndex, ByteOrder 
     * @param code The exception code to set
     */
 inline void makeException(const Frame& request, Frame& response, ExceptionCode code) {
-    response.type = RESPONSE;
-    response.fc = request.fc;
-    response.slaveId = request.slaveId;
-    response.regAddress = request.regAddress;
-    response.regCount = request.regCount;
+    response.type           = RESPONSE;
+    response.fc             = request.fc;
+    response.slaveId        = request.slaveId;
+    response.regAddress     = request.regAddress;
+    response.regCount       = request.regCount;
+    response.exceptionCode  = code;
     response.clearData(false);
-    response.exceptionCode = code;
 }
 
 
