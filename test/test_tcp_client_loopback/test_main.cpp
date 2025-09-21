@@ -1717,9 +1717,17 @@ void test_multi_interface_server_reqmutex_maxtimeout() {
     // Create multi-interface server with new ctor - USE MAX MUTEX TIMEOUT (UINT32_MAX => portMAX_DELAY)
     static Modbus::Server multiServer({&tcpInterface, &rtuInterface}, localStore, 1, true, UINT32_MAX);
 
-    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, multiServer.begin());
+    // 1. INITIALIZE HAL FIRST
+    localTcpHal.begin();
+    localRtuHal.begin();
+    auto tcpIfcRes = tcpInterface.begin();
+    auto rtuIfcRes = rtuInterface.begin();
 
-    // Add test words to the server
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, tcpIfcRes);
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, rtuIfcRes);
+
+    // 2. ADD WORDS TO SERVER BEFORE INITIALIZATION
     Modbus::Word testHoldingReg = {
         .type = Modbus::HOLDING_REGISTER,
         .startAddr = 1000,
@@ -1735,7 +1743,14 @@ void test_multi_interface_server_reqmutex_maxtimeout() {
         .userCtx = nullptr
     };
 
-    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, multiServer.addWord(testHoldingReg));
+    auto addWordRes = multiServer.addWord(testHoldingReg);
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, addWordRes);
+
+    // 3. INITIALIZE SERVER AFTER ADDING WORDS
+    auto serverBeginRes = multiServer.begin();
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, serverBeginRes);
 
     // Test TCP client → multi-interface server
     static ModbusHAL::TCP clientTcpHal("127.0.0.1", LOCAL_PORT);
@@ -1743,7 +1758,13 @@ void test_multi_interface_server_reqmutex_maxtimeout() {
     static Modbus::Client tcpClient(clientTcp);
 
     // Initialize TCP client
-    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, clientTcp.begin());
+    clientTcpHal.begin();
+    auto clientTcpIfcRes = clientTcp.begin();
+    auto clientTcpRes = tcpClient.begin();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, clientTcpIfcRes);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, clientTcpRes);
 
     // Test TCP read
     Modbus::Frame tcpRequest = {
@@ -1759,6 +1780,7 @@ void test_multi_interface_server_reqmutex_maxtimeout() {
     vTaskDelay(pdMS_TO_TICKS(100)); // Let everything settle
     auto tcpResult = tcpClient.sendRequest(tcpRequest, tcpResponse);
 
+    TEST_ASSERT_START();
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tcpResult);
     TEST_ASSERT_EQUAL(0x1234, tcpResponse.getRegister(0));
 
@@ -1768,7 +1790,13 @@ void test_multi_interface_server_reqmutex_maxtimeout() {
     static Modbus::Client rtuClient(clientRtu);
 
     // Initialize RTU client
-    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, clientRtu.begin());
+    clientRtuHal.begin();
+    auto clientRtuIfcRes = clientRtu.begin();
+    auto clientRtuRes = rtuClient.begin();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, clientRtuIfcRes);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, clientRtuRes);
 
     // Test RTU read
     Modbus::Frame rtuRequest = {
@@ -1784,6 +1812,7 @@ void test_multi_interface_server_reqmutex_maxtimeout() {
     vTaskDelay(pdMS_TO_TICKS(100)); // Let server initialize
     auto rtuResult = rtuClient.sendRequest(rtuRequest, rtuResponse);
 
+    TEST_ASSERT_START();
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, rtuResult);
     TEST_ASSERT_EQUAL(0x1234, rtuResponse.getRegister(0));
 
@@ -1807,6 +1836,7 @@ void test_multi_interface_server_reqmutex_maxtimeout() {
             && elapsed < pdMS_TO_TICKS(1500)); // Timeout to avoid being stuck here
 
     // Both requests should succeed
+    TEST_ASSERT_START();
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, rtuTracker);
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tcpTracker);
     TEST_ASSERT_EQUAL(0x1234, concurrentRtuResp.getRegister(0));
@@ -1829,9 +1859,17 @@ void test_multi_interface_server_reqmutex_nolock() {
     // Create multi-interface server with new ctor - USE NO MUTEX TIMEOUT (0 => try-lock no wait)
     static Modbus::Server multiServer({&tcpInterface, &rtuInterface}, localStore, 1, true, 0);
 
-    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, multiServer.begin());
+    // 1. INITIALIZE HAL FIRST
+    localTcpHal.begin();
+    localRtuHal.begin();
+    auto tcpIfcRes = tcpInterface.begin();
+    auto rtuIfcRes = rtuInterface.begin();
 
-    // Add test words to the server
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, tcpIfcRes);
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, rtuIfcRes);
+
+    // 2. ADD WORDS TO SERVER BEFORE INITIALIZATION
     Modbus::Word testHoldingReg = {
         .type = Modbus::HOLDING_REGISTER,
         .startAddr = 1000,
@@ -1847,7 +1885,14 @@ void test_multi_interface_server_reqmutex_nolock() {
         .userCtx = nullptr
     };
 
-    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, multiServer.addWord(testHoldingReg));
+    auto addWordRes = multiServer.addWord(testHoldingReg);
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, addWordRes);
+
+    // 3. INITIALIZE SERVER AFTER ADDING WORDS
+    auto serverBeginRes = multiServer.begin();
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, serverBeginRes);
 
     // Test TCP client → multi-interface server
     static ModbusHAL::TCP clientTcpHal("127.0.0.1", LOCAL_PORT);
@@ -1855,7 +1900,13 @@ void test_multi_interface_server_reqmutex_nolock() {
     static Modbus::Client tcpClient(clientTcp);
 
     // Initialize TCP client
-    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, clientTcp.begin());
+    clientTcpHal.begin();
+    auto clientTcpIfcRes = clientTcp.begin();
+    auto clientTcpRes = tcpClient.begin();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, clientTcpIfcRes);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, clientTcpRes);
 
     // Test TCP read
     Modbus::Frame tcpRequest = {
@@ -1871,6 +1922,7 @@ void test_multi_interface_server_reqmutex_nolock() {
     vTaskDelay(pdMS_TO_TICKS(100)); // Let everything settle
     auto tcpResult = tcpClient.sendRequest(tcpRequest, tcpResponse);
 
+    TEST_ASSERT_START();
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tcpResult);
     TEST_ASSERT_EQUAL(0x1234, tcpResponse.getRegister(0));
 
@@ -1880,7 +1932,13 @@ void test_multi_interface_server_reqmutex_nolock() {
     static Modbus::Client rtuClient(clientRtu);
 
     // Initialize RTU client
-    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, clientRtu.begin());
+    clientRtuHal.begin();
+    auto clientRtuIfcRes = clientRtu.begin();
+    auto clientRtuRes = rtuClient.begin();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, clientRtuIfcRes);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, clientRtuRes);
 
     // Test RTU read
     Modbus::Frame rtuRequest = {
@@ -1896,6 +1954,7 @@ void test_multi_interface_server_reqmutex_nolock() {
     vTaskDelay(pdMS_TO_TICKS(100)); // Let server initialize
     auto rtuResult = rtuClient.sendRequest(rtuRequest, rtuResponse);
 
+    TEST_ASSERT_START();
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, rtuResult);
     TEST_ASSERT_EQUAL(0x1234, rtuResponse.getRegister(0));
 
@@ -1935,7 +1994,9 @@ void test_multi_interface_server_overflow() {
     static Modbus::Server overflowServer({&mbt, &mbt, &mbt, &mbt}, overflowStore);
 
     // begin() must fail because too many interfaces (default max: 2)
-    TEST_ASSERT_EQUAL(Modbus::Server::ERR_INIT_FAILED, overflowServer.begin());
+    auto overflowServerRes = overflowServer.begin();
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Server::ERR_INIT_FAILED, overflowServerRes);
 }
 
 void setup() {
