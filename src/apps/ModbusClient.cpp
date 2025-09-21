@@ -255,7 +255,7 @@ void Client::PendingRequest::setResult(Result result, bool finalize, bool fromTi
     closer{this, finalize && !fromTimer};
 
     // Kill timer first
-    if (!fromTimer) {
+    if (finalize && !fromTimer) {
         switch (killTimer(TIMER_CMD_TOUT_TICKS)) {
             case KillOutcome::KILLED:
                 // safe to continue
@@ -274,15 +274,21 @@ void Client::PendingRequest::setResult(Result result, bool finalize, bool fromTi
     {
         Lock guard(_mutex);
         if (!isActive()) return; // Exit if already cleared
-        
-        if (_tracker) *_tracker = result;
+
         cbSnapshot = _cb;
         ctxSnapshot = _cbCtx;
-        if (finalize) resetUnsafe(); // also sets _active=false
 
-        notifySyncWaiterUnsafe(); // still inside mutex
+        // Re-open the gates: it's now safe to publish & let API callers launch a new
+        // request (the _active flag & _mutex protect us until we leave this function)
+        if (fromTimer) timerClosing(false);
+        else if (finalize) respClosing(false);
+        
+        if (_tracker) *_tracker = result;
+        if (finalize) resetUnsafe();
+        notifySyncWaiterUnsafe();
     }
 
+    // Important - always call callback outside of mutex
     // Since we don't expect a response (failure or broadcast), we pass nullptr as response
     if (cbSnapshot) cbSnapshot(result, nullptr, ctxSnapshot);
 }
@@ -302,7 +308,7 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
     closer{this, finalize && !fromTimer};
 
     // Kill timer first
-    if (!fromTimer) {
+    if (finalize && !fromTimer) {
         switch (killTimer(TIMER_CMD_TOUT_TICKS)) {
             case KillOutcome::KILLED:
                 // safe to continue
@@ -322,15 +328,21 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
         Lock guard(_mutex);
         if (!isActive()) return; // Exit if already cleared
 
-        if (_pResponse) *_pResponse = response;
-        if (_tracker) *_tracker = SUCCESS;
         cbSnapshot = _cb;
         ctxSnapshot = _cbCtx;
-        if (finalize) resetUnsafe(); // also sets _active=false
 
-        notifySyncWaiterUnsafe(); // still inside mutex
+        // Re-open the gates: it's now safe to publish & let API callers launch a new
+        // request (the _active flag & _mutex protect us until we leave this function)
+        if (fromTimer) timerClosing(false);
+        else if (finalize) respClosing(false);
+
+        if (_pResponse) *_pResponse = response;
+        if (_tracker) *_tracker = SUCCESS;
+        if (finalize) resetUnsafe();
+        notifySyncWaiterUnsafe();
     }
 
+    // Important - always call callback outside of mutex
     if (cbSnapshot) cbSnapshot(SUCCESS, &response, ctxSnapshot);
 }
 

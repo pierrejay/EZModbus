@@ -192,7 +192,7 @@ private:
     * Call sites never manage timers directly. They only:
     * - take a read-only snapshot for validation (to avoid long critical sections or torn reads),
     * - then call one of:
-    *   - setResponse(frame, finalize, fromTimer=false)
+    *   - setResponse(frame, finalize) -> only called from response path (not from timer)
     *   - setResult(result, finalize, fromTimer=false)
     *
     * These methods internally:
