@@ -893,55 +893,19 @@ inline bool Modbus::Frame::getInt16(int16_t& target, size_t regIndex, ByteOrder 
 // HELPER FUNCTIONS
 // ===================================================================================
 
-/* @brief Create an ILLEGAL_FUNCTION exception response from a request frame
-    * @note Copies the original request frame passed as argument
-    * @param request The initial request frame
-    * @return The response frame with the exception
+/* @brief Make an exception response in the provided buffer
+    * @param request The initial request frame (read-only)
+    * @param response The response buffer to fill
+    * @param code The exception code to set
     */
-inline Frame setIllegalFunction(const Frame& request) {
-    return Frame {
-        .type = RESPONSE,
-        .fc = request.fc,
-        .slaveId = request.slaveId,
-        .regAddress = request.regAddress,
-        .regCount = request.regCount,
-        .data = {},
-        .exceptionCode = ILLEGAL_FUNCTION
-    };
-}
-
-/* @brief Create a SLAVE_DEVICE_BUSY exception response from a request frame
-    * @note Copies the original request frame passed as argument
-    * @param request The initial request frame
-    * @return The response frame with the exception
-    */
-inline Frame setSlaveBusy(const Frame& request) {
-    return Frame {
-        .type = RESPONSE,
-        .fc = request.fc,
-        .slaveId = request.slaveId,
-        .regAddress = request.regAddress,
-        .regCount = request.regCount,
-        .data = {},
-        .exceptionCode = SLAVE_DEVICE_BUSY
-    };
-}
-
-/* @brief Create a SLAVE_DEVICE_FAILURE exception response from a request frame
-    * @note Copies the original request frame passed as argument
-    * @param request The initial request frame
-    * @return The response frame with the exception
-    */
-inline Frame setSlaveDeviceFailure(const Frame& request) {
-    return Frame {
-        .type = RESPONSE,
-        .fc = request.fc,
-        .slaveId = request.slaveId,
-        .regAddress = request.regAddress,
-        .regCount = request.regCount,
-        .data = {},
-        .exceptionCode = SLAVE_DEVICE_FAILURE
-    };
+inline void makeException(const Frame& request, Frame& response, ExceptionCode code) {
+    response.type = RESPONSE;
+    response.fc = request.fc;
+    response.slaveId = request.slaveId;
+    response.regAddress = request.regAddress;
+    response.regCount = request.regCount;
+    response.clearData(false);
+    response.exceptionCode = code;
 }
 
 
