@@ -312,8 +312,9 @@ private:
         uint32_t getTimestampMs() const;
         const Modbus::FrameMeta& getRequestMetadata() const;
         // Locked methods
-        void setResult(Result result, bool finalize, bool fromTimer = false);
-        void setResponse(const Modbus::Frame& response, bool finalize, bool fromTimer = false);
+        void setResult(Result result, bool finalize = true, bool fromTimer = false);
+        void setResultFromTimer(Result result); // For use from timer context (same, with safe args)
+        void setResponse(const Modbus::Frame& response, bool finalize = true);
         void setSyncEventGroup(EventGroupHandle_t group);
 
         // Snapshot helper for lock-free validation in handleResponse

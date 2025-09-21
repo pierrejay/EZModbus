@@ -90,8 +90,8 @@ void Client::PendingRequest::timeoutCallback(TimerHandle_t timer) {
     // Valid timeout for current transaction
     pendingReq->_client->_interface.abortCurrentTransaction();
 
-    // Do not manage sync here, setResult(...,fromTimer=true) will take care of it
-    pendingReq->setResult(ERR_TIMEOUT, true, true);
+    // Use dedicated timer method
+    pendingReq->setResultFromTimer(ERR_TIMEOUT);
     Modbus::Debug::LOG_MSG("Request timed out via timer");
 }
 
@@ -242,6 +242,9 @@ const Modbus::FrameMeta& Client::PendingRequest::getRequestMetadata() const { re
 
 /* @brief Update the pending request result tracker
  * @param result The result to set
+ * @param finalize Whether to finalize the request (default: true)
+ * @param fromTimer Internal flag - DO NOT USE from timer callback, use setResultFromTimer() instead
+ * @note ⚠️ DO NOT call this method from timer context! Use setResultFromTimer() instead
  */
 void Client::PendingRequest::setResult(Result result, bool finalize, bool fromTimer) {
     Client::ResponseCallback cbSnapshot = nullptr;
@@ -293,22 +296,33 @@ void Client::PendingRequest::setResult(Result result, bool finalize, bool fromTi
     if (cbSnapshot) cbSnapshot(result, nullptr, ctxSnapshot);
 }
 
+/* @brief Set result from timer callback
+ * @param result The timeout result (typically ERR_TIMEOUT)
+ * @note This method should ONLY be called from timeoutCallback()
+ */
+void Client::PendingRequest::setResultFromTimer(Result result) {
+    setResult(result, true, true); // Forces finalize=true, fromTimer=true
+}
+
 /* @brief Set the response for the pending request & update the result tracker
  * @param response The response to set
+ * @param finalize Whether to finalize the request (default: true)
+ * @param fromTimer Internal flag - should always be false for responses
+ * @note ⚠️ DO NOT call this method from timer context!
  */
-void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool finalize, bool fromTimer) {
+void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool finalize) {
     Client::ResponseCallback cbSnapshot = nullptr;
     void* ctxSnapshot = nullptr;
 
     // Atomic gate : we are closing the request if finalize is true and call origins from response
-    if (finalize && !fromTimer) respClosing(true);
+    if (finalize) respClosing(true);
     
     // One-liner RAII closing guard: ensure we call respClosing(false) in all return paths
     struct Closer { PendingRequest* p; bool en; ~Closer(){ if (en) p->respClosing(false);} } 
-    closer{this, finalize && !fromTimer};
+    closer{this, finalize};
 
     // Kill timer first
-    if (finalize && !fromTimer) {
+    if (finalize) {
         switch (killTimer(TIMER_CMD_TOUT_TICKS)) {
             case KillOutcome::KILLED:
                 // safe to continue
@@ -333,8 +347,7 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
 
         // Re-open the gates: it's now safe to publish & let API callers launch a new
         // request (the _active flag & _mutex protect us until we leave this function)
-        if (fromTimer) timerClosing(false);
-        else if (finalize) respClosing(false);
+        if (finalize) respClosing(false);
 
         if (_pResponse) *_pResponse = response;
         if (_tracker) *_tracker = SUCCESS;
