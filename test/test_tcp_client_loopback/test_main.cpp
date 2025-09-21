@@ -1701,6 +1701,116 @@ void test_client_reconnect_on_first_request() {
     Modbus::Logger::logln("Client successfully reconnected on first request");
 }
 
+void test_multi_interface_server() {
+    Modbus::Logger::logln("TEST_MULTI_INTERFACE_SERVER");
+    constexpr uint16_t LOCAL_PORT = MODBUS_PORT + 1;
+
+    // Static instances to avoid stack overflow
+    static ModbusHAL::TCP localTcpHal(LOCAL_PORT);  // Different port to avoid conflict
+    static ModbusHAL::UART localRtuHal(UART_NUM_1, 9600, ModbusHAL::UART::CONFIG_8N1, D5, D6);
+
+    static ModbusInterface::TCP tcpInterface(localTcpHal, Modbus::SERVER);
+    static ModbusInterface::RTU rtuInterface(localRtuHal, Modbus::SERVER);
+
+    static Modbus::StaticWordStore<20> localStore;
+
+    // Create multi-interface server with new ctor
+    static Modbus::Server multiServer({&tcpInterface, &rtuInterface}, localStore, 1);
+
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, multiServer.begin());
+
+    // Add test words to the server
+    Modbus::Word testHoldingReg = {
+        .type = Modbus::HOLDING_REGISTER,
+        .startAddr = 1000,
+        .nbRegs = 1,
+        .readHandler = [](const Modbus::Word& word, uint16_t* outVals, void* userCtx) -> Modbus::ExceptionCode {
+            outVals[0] = 0x1234;  // Test value
+            return Modbus::NULL_EXCEPTION;
+        },
+        .writeHandler = [](const uint16_t* writeVals, const Modbus::Word& word, void* userCtx) -> Modbus::ExceptionCode {
+            // Accept any write for test
+            return Modbus::NULL_EXCEPTION;
+        },
+        .userCtx = nullptr
+    };
+
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, multiServer.addWord(testHoldingReg));
+
+    // Test TCP client → multi-interface server
+    static ModbusHAL::TCP clientTcpHal("127.0.0.1", LOCAL_PORT);
+    static ModbusInterface::TCP clientTcp(clientTcpHal, Modbus::CLIENT);
+    static Modbus::Client tcpClient(clientTcp);
+
+    // Initialize TCP client
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, clientTcp.begin());
+
+    // Test TCP read
+    Modbus::Frame tcpRequest = {
+        .type       = Modbus::REQUEST,
+        .fc         = Modbus::READ_HOLDING_REGISTERS,
+        .slaveId    = 1,
+        .regAddress = 1000,
+        .regCount   = 1,
+        .data       = {},
+    };
+    Modbus::Frame tcpResponse;
+
+    vTaskDelay(pdMS_TO_TICKS(100)); // Let everything settle
+    auto tcpResult = tcpClient.sendRequest(tcpRequest, tcpResponse);
+
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tcpResult);
+    TEST_ASSERT_EQUAL(0x1234, tcpResponse.getRegister(0));
+
+    // Test RTU client → multi-interface server (via UART loopback)
+    static ModbusHAL::UART clientRtuHal(UART_NUM_2, 9600, ModbusHAL::UART::CONFIG_8N1, D7, D8);
+    static ModbusInterface::RTU clientRtu(clientRtuHal, Modbus::CLIENT);
+    static Modbus::Client rtuClient(clientRtu);
+
+    // Initialize RTU client
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, clientRtu.begin());
+
+    // Test RTU read
+    Modbus::Frame rtuRequest = {
+        .type       = Modbus::REQUEST,
+        .fc         = Modbus::READ_HOLDING_REGISTERS,
+        .slaveId    = 1,
+        .regAddress = 1000,
+        .regCount   = 1,
+        .data       = {},
+    };
+    Modbus::Frame rtuResponse;
+
+    vTaskDelay(pdMS_TO_TICKS(100)); // Let server initialize
+    auto rtuResult = rtuClient.sendRequest(rtuRequest, rtuResponse);
+
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, rtuResult);
+    TEST_ASSERT_EQUAL(0x1234, rtuResponse.getRegister(0));
+
+    // Test concurrent access
+
+    // Send requests almost simultaneously (start by RTU -> higher delay)
+    Modbus::Frame concurrentTcpResp, concurrentRtuResp;
+    Modbus::Client::Result rtuTracker, tcpTracker = Modbus::Client::NODATA;
+    rtuClient.sendRequest(rtuRequest, concurrentRtuResp, &rtuTracker);
+    vTaskDelay(pdMS_TO_TICKS(1));
+    tcpClient.sendRequest(tcpRequest, concurrentTcpResp, &tcpTracker);
+
+    TickType_t start = xTaskGetTickCount();
+    TickType_t elapsed = 0;
+    // Wait for both requests to complete
+    do {
+        vTaskDelay(pdMS_TO_TICKS(1));
+        elapsed = xTaskGetTickCount() - start;
+    } while ((tcpTracker == Modbus::Client::NODATA || rtuTracker == Modbus::Client::NODATA) 
+            && elapsed < pdMS_TO_TICKS(1500)); // Timeout to avoid being stuck here
+
+    // First arrived (RTU) should succeed, the other one (TCP) should fail
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, rtuTracker);
+    TEST_ASSERT_EQUAL(Modbus::Client::ERR_BUSY, tcpTracker);
+    TEST_ASSERT_EQUAL(0x1234, concurrentRtuResp.getRegister(0));
+}
+
 void setup() {
     // Debug port
     Serial.setTxBufferSize(2048);
@@ -1785,6 +1895,10 @@ void setup() {
     // RUN_TEST(test_concurrent_calls);
     RUN_TEST(test_server_busy_exception);
     RUN_TEST(test_client_reconnect_on_first_request);
+
+    // Multi-interface server test
+    RUN_TEST(test_multi_interface_server);
+
     UNITY_END();
 }
 
