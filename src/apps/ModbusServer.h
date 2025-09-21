@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <initializer_list>
+#include <array>
 #include "core/ModbusCore.h"
 #include "core/ModbusWord.hpp"
 #include "interfaces/ModbusInterface.hpp"
@@ -12,6 +14,10 @@
 
 #ifndef EZMODBUS_SERVER_MAX_WORD_SIZE // Server max word size (# Modbus registers per Word)
     #define EZMODBUS_SERVER_MAX_WORD_SIZE 8
+#endif
+
+#ifndef EZMODBUS_SERVER_MAX_INTERFACES // Server max simultaneous interfaces
+    #define EZMODBUS_SERVER_MAX_INTERFACES 2
 #endif
 
 
@@ -25,6 +31,7 @@ public:
 
     static constexpr uint32_t MAX_REGISTERS = 65535;
     static constexpr size_t MAX_WORD_SIZE = (size_t)EZMODBUS_SERVER_MAX_WORD_SIZE; // max no. registers per word
+    static constexpr size_t MAX_INTERFACES = (size_t)EZMODBUS_SERVER_MAX_INTERFACES; // max simultaneous interfaces
 
     // ===================================================================================
     // RESULT TYPES
@@ -118,9 +125,12 @@ public:
     // CONSTRUCTOR & PUBLIC METHODS
     // ===================================================================================
 
-    // Constructor with WordStore (now mandatory)
+    // Single-interface ctor
     Server(ModbusInterface::IInterface& interface, IWordStore& store, uint8_t slaveId = 1, bool rejectUndefined = true);
-    
+
+    // Multi-interface ctor
+    Server(std::initializer_list<ModbusInterface::IInterface*> interfaces, IWordStore& store, uint8_t slaveId = 1, bool rejectUndefined = true);
+
     ~Server();
 
     Result begin();
@@ -137,11 +147,25 @@ public:
 
 private:
     // ===================================================================================
+    // PRIVATE TYPES
+    // ===================================================================================
+
+    // Callback context for interface routing
+    struct RcvCallbackCtx {
+        Server* server;
+        ModbusInterface::IInterface* sourceInterface;
+    };
+
+    // ===================================================================================
     // PRIVATE MEMBERS
     // ===================================================================================
 
-    // Configuration
-    ModbusInterface::IInterface& _interface;
+    // Interfaces management
+    std::array<ModbusInterface::IInterface*, MAX_INTERFACES> _interfaces;
+    std::array<RcvCallbackCtx, MAX_INTERFACES> _rcvCbContexts;  // Callback contexts (must stay valid for lifetime)
+    size_t _interfaceCount = 0;
+
+    // Server configuration
     uint8_t _serverId;
     bool _rejectUndefined; // If false, undefined registers will be silently ignored (no exception returned)
     bool _isInitialized = false;
@@ -159,10 +183,10 @@ private:
     // ===================================================================================
 
     // Request handlers
-    Result handleRequest(const Modbus::Frame& request);
+    Result handleRequest(const Modbus::Frame& request, ModbusInterface::IInterface& sourceInterface);
     Result handleRead(const Modbus::Frame& request, Modbus::Frame& response);
     Result handleWrite(const Modbus::Frame& request, Modbus::Frame& response);
-    Result sendResponse(const Modbus::Frame& response);
+    Result sendResponse(const Modbus::Frame& response, ModbusInterface::IInterface& targetInterface);
 
     // Find helpers
     
