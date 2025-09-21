@@ -11,9 +11,24 @@ namespace Modbus {
 // PUBLIC METHODS
 // ===================================================================================
 
-// Constructor with WordStore (now mandatory)
+// Constructor with single interface (backward compatible)
 Server::Server(ModbusInterface::IInterface& interface, IWordStore& store, uint8_t slaveId, bool rejectUndefined)
-    : _interface(interface), _serverId(slaveId), _rejectUndefined(rejectUndefined), _wordStore(store) {
+    : _serverId(slaveId), _rejectUndefined(rejectUndefined), _wordStore(store) {
+    _interfaces.fill(nullptr);
+    _interfaces[0] = &interface;
+    _interfaceCount = 1;
+    _isInitialized = false;
+}
+
+// Constructor with multiple interfaces (new)
+Server::Server(std::initializer_list<ModbusInterface::IInterface*> interfaces, IWordStore& store, uint8_t slaveId, bool rejectUndefined)
+    : _serverId(slaveId), _rejectUndefined(rejectUndefined), _wordStore(store) {
+    _interfaces.fill(nullptr);
+    _interfaceCount = 0;
+    for (auto* iface : interfaces) {
+        if (_interfaceCount >= MAX_INTERFACES) break;
+        _interfaces[_interfaceCount++] = iface;
+    }
     _isInitialized = false;
 }
 
@@ -28,22 +43,44 @@ Server::~Server() {
 Server::Result Server::begin() {
     if (_isInitialized) return Success();
 
-    if (_interface.getRole() != Modbus::SERVER) {
-        return Error(Server::ERR_INIT_FAILED, "interface must be SERVER");
-    }
+    // Initialize all interfaces with proper context routing
+    for (size_t i = 0; i < _interfaceCount; i++) {
+        if (_interfaces[i]->getRole() != Modbus::SERVER) {
+            return Error(Server::ERR_INIT_FAILED, "interface must be SERVER");
+        }
 
-    if (_interface.begin() != ModbusInterface::IInterface::SUCCESS) {
-        return Error(Server::ERR_INIT_FAILED, "interface init failed");
-    }
+        if (_interfaces[i]->begin() != ModbusInterface::IInterface::SUCCESS) {
+            return Error(Server::ERR_INIT_FAILED, "interface init failed");
+        }
 
-    auto rcvCb = [](const Modbus::Frame& frame, void* ctx) {
-        Modbus::Debug::LOG_MSG("Received request from interface");
-        static_cast<Server*>(ctx)->handleRequest(frame);
-    };
+        // Set up context for proper interface routing
+        _rcvCbContexts[i] = {this, _interfaces[i]};
 
-    auto setRcvCbRes = _interface.setRcvCallback(rcvCb, this);
-    if (setRcvCbRes != ModbusInterface::IInterface::SUCCESS) {
-        return Error(Server::ERR_INIT_FAILED, "cannot set receive callback on interface");
+        // Secure callback with interface identification
+        auto rcvCb = [](const Modbus::Frame& frame, void* ctx) {
+            // Defensive programming: validate context
+            if (!ctx) {
+                Modbus::Debug::LOG_MSG("ERROR: null context in receive callback");
+                return;
+            }
+
+            auto* callbackCtx = static_cast<RcvCallbackCtx*>(ctx);
+
+            // Validate context structure
+            if (!callbackCtx->server || !callbackCtx->sourceInterface) {
+                Modbus::Debug::LOG_MSG("ERROR: invalid context in receive callback");
+                return;
+            }
+
+            Modbus::Debug::LOG_MSG("Received request from interface");
+            // Route to handleRequest with proper source interface
+            callbackCtx->server->handleRequest(frame, *callbackCtx->sourceInterface);
+        };
+
+        auto setRcvCbRes = _interfaces[i]->setRcvCallback(rcvCb, &_rcvCbContexts[i]);
+        if (setRcvCbRes != ModbusInterface::IInterface::SUCCESS) {
+            return Error(Server::ERR_INIT_FAILED, "cannot set receive callback on interface");
+        }
     }
 
     // Sort WordStore for efficient lookups and validate overlaps
@@ -94,7 +131,7 @@ bool Server::isBusy() {
  * @param request The request to process
  * @return The result of the request
  */
-Server::Result Server::handleRequest(const Modbus::Frame& request) {
+Server::Result Server::handleRequest(const Modbus::Frame& request, ModbusInterface::IInterface& sourceInterface) {
     bool dropResponse = false;
 
     // Process request and send response atomically (request + response buffer + WordStore protected)
@@ -108,7 +145,7 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
 
     // Ignore the Slave ID if the request is sent to a broadcast slave ID
     // or if the server is configured to catch all requests (broadcast mode or TCP server)
-    bool catchAllMode = Modbus::isBroadcastId(_serverId) || _interface.checkCatchAllSlaveIds();
+    bool catchAllMode = Modbus::isBroadcastId(_serverId) || sourceInterface.checkCatchAllSlaveIds();
     bool broadcastRequest = Modbus::isBroadcastId(request.slaveId);
     dropResponse = broadcastRequest;  // We don't respond to broadcast requests
     bool dropRequest = !catchAllMode 
@@ -140,7 +177,7 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
     // Check that the function code is valid, return an exception if not
     if (!ModbusCodec::isValidFunctionCode(static_cast<uint8_t>(request.fc))) {
         _responseBuffer.exceptionCode = Modbus::ILLEGAL_FUNCTION;
-        if (!dropResponse) _interface.sendFrame(_responseBuffer, nullptr, nullptr);
+        if (!dropResponse) sourceInterface.sendFrame(_responseBuffer, nullptr, nullptr);
         return Error(Server::ERR_RCV_ILLEGAL_FUNCTION);
     }
 
@@ -153,7 +190,7 @@ Server::Result Server::handleRequest(const Modbus::Frame& request) {
 
     // Send the response (unless broadcast) - keep mutex locked during transmission
     if (!dropResponse) {
-        Server::Result res = sendResponse(_responseBuffer);
+        Server::Result res = sendResponse(_responseBuffer, sourceInterface);
         if (res != Server::SUCCESS) return res;
     }
 
@@ -456,8 +493,8 @@ Server::Result Server::handleWrite(const Modbus::Frame& request, Modbus::Frame& 
     return Success();
 }
 
-Server::Result Server::sendResponse(const Modbus::Frame& response) {
-    auto sendResult = _interface.sendFrame(response, nullptr, nullptr);
+Server::Result Server::sendResponse(const Modbus::Frame& response, ModbusInterface::IInterface& targetInterface) {
+    auto sendResult = targetInterface.sendFrame(response, nullptr, nullptr);
     if (sendResult != ModbusInterface::IInterface::SUCCESS) {
         return Error(Server::ERR_RSP_TX_FAILED);
     }
