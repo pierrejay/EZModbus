@@ -11,23 +11,45 @@ namespace Modbus {
 // PUBLIC METHODS
 // ===================================================================================
 
-// Constructor with single interface (backward compatible)
-Server::Server(ModbusInterface::IInterface& interface, IWordStore& store, uint8_t slaveId, bool rejectUndefined)
+/* @brief Single interface constructor
+ * @param interface Reference to the TCP or RTU interface to bind
+ * @param store Reference to the WordStore exposing Modbus registers
+ * @param slaveId Server Slave/Unit ID (defaults to 1)
+ * @param rejectUndefined Whether to reject requests containing read/writes to undefined registers (defaults to true)
+ */
+Server::Server(ModbusInterface::IInterface& interface, IWordStore& store, 
+               uint8_t slaveId, bool rejectUndefined)
     : _serverId(slaveId), _rejectUndefined(rejectUndefined), _wordStore(store) {
+    // Always valid, we assume MAX_INTERFACES >= 1 even if defined otherwise
     _interfaces.fill(nullptr);
     _interfaces[0] = &interface;
     _interfaceCount = 1;
+    _rcvCbContexts[0] = {this, &interface};
     _isInitialized = false;
 }
 
-// Constructor with multiple interfaces (new)
-Server::Server(std::initializer_list<ModbusInterface::IInterface*> interfaces, IWordStore& store, uint8_t slaveId, bool rejectUndefined)
+/* @brief Multi-interface constructor
+ * @param interfaces List of pointers to interfaces to bind
+ * @param store Reference to the WordStore exposing Modbus registers
+ * @param slaveId Server Slave/Unit ID (defaults to 1)
+ * @param rejectUndefined Whether to reject requests containing read/writes to undefined registers (defaults to true)
+ * @note No more than MAX_INTERFACES should be provided, otherwise begin() will return an error
+ */
+Server::Server(std::initializer_list<ModbusInterface::IInterface*> interfaces, IWordStore& store,
+               uint8_t slaveId, bool rejectUndefined)
     : _serverId(slaveId), _rejectUndefined(rejectUndefined), _wordStore(store) {
     _interfaces.fill(nullptr);
     _interfaceCount = 0;
     for (auto* iface : interfaces) {
-        if (_interfaceCount >= MAX_INTERFACES) break;
-        _interfaces[_interfaceCount++] = iface;
+        if (_interfaceCount >= MAX_INTERFACES) {
+            // Overflow detected - reset everything to signal error in begin()
+            _interfaces.fill(nullptr);
+            _interfaceCount = 0;
+            break;
+        }
+        _interfaces[_interfaceCount] = iface;
+        _rcvCbContexts[_interfaceCount] = {this, iface};
+        _interfaceCount++;
     }
     _isInitialized = false;
 }
@@ -38,10 +60,16 @@ Server::~Server() {
 
 /* @brief Initialize the server
  * @return Result::SUCCESS if the server was initialized successfully
- * @note The server is fed by interface callbacks, no polling required
  */
 Server::Result Server::begin() {
     if (_isInitialized) return Success();
+
+    // Validate that we have at least one interface, otherwise it means
+    // the ctor aborted filling the _interfaces array because the user
+    // provided more interfaces than authorized by MAX_INTERFACES
+    if (_interfaceCount == 0 || !_interfaces[0]) {
+        return Error(Server::ERR_INIT_FAILED, "no valid interface (or more than MAX_INTERFACES provided in ctor)");
+    }
 
     // Initialize all interfaces with proper context routing
     for (size_t i = 0; i < _interfaceCount; i++) {
@@ -50,15 +78,14 @@ Server::Result Server::begin() {
         }
 
         if (_interfaces[i]->begin() != ModbusInterface::IInterface::SUCCESS) {
+            // No cleanup needed - user can initialize interfaces manually
+            // and retry server.begin() if desired
             return Error(Server::ERR_INIT_FAILED, "interface init failed");
         }
 
-        // Set up context for proper interface routing
-        _rcvCbContexts[i] = {this, _interfaces[i]};
-
-        // Secure callback with interface identification
+        // Build secure callback with interface identification
         auto rcvCb = [](const Modbus::Frame& frame, void* ctx) {
-            // Defensive programming: validate context
+            // Defensive: validate context
             if (!ctx) {
                 Modbus::Debug::LOG_MSG("ERROR: null context in receive callback");
                 return;
@@ -131,7 +158,13 @@ bool Server::isBusy() {
  * @param request The request to process
  * @return The result of the request
  */
-Server::Result Server::handleRequest(const Modbus::Frame& request, ModbusInterface::IInterface& sourceInterface) {
+Server::Result Server::handleRequest(const Modbus::Frame& request,
+                                     ModbusInterface::IInterface& sourceInterface) {
+    // Safety: ignore requests if server not properly initialized
+    if (!_isInitialized) {
+        return Error(Server::ERR_NOT_INITIALIZED, "server not initialized");
+    }
+
     bool dropResponse = false;
 
     // Process request and send response atomically (request + response buffer + WordStore protected)
