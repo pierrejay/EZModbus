@@ -174,8 +174,7 @@ private:
     uint8_t _serverId;
     bool _rejectUndefined; // If false, undefined registers will be silently ignored (no exception returned)
     bool _isInitialized = false;
-    Modbus::Frame _responseBuffer;
-    
+
     // WordStore & buffer for word operations
     IWordStore& _wordStore;
     uint16_t _wordBuffer[MAX_WORD_SIZE];
@@ -203,8 +202,8 @@ private:
     Result addWordInternal(const Word& word);
     Result isValidWordEntry(const Word& word);
     
-    static bool isWrite(const Modbus::FunctionCode fc);
-    static bool isReadOnly(const Modbus::RegisterType type);
+    static inline bool isWrite(const Modbus::FunctionCode fc);
+    static inline bool isReadOnly(const Modbus::RegisterType type);
 };
 
 } // namespace Modbus 
