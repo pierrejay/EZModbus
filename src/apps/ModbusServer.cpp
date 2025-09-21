@@ -17,9 +17,9 @@ namespace Modbus {
  * @param slaveId Server Slave/Unit ID (defaults to 1)
  * @param rejectUndefined Whether to reject requests containing read/writes to undefined registers (defaults to true)
  */
-Server::Server(ModbusInterface::IInterface& interface, IWordStore& store, 
-               uint8_t slaveId, bool rejectUndefined)
-    : _serverId(slaveId), _rejectUndefined(rejectUndefined), _wordStore(store) {
+Server::Server(ModbusInterface::IInterface& interface, IWordStore& store,
+               uint8_t slaveId, bool rejectUndefined, uint32_t reqMutexTimeoutMs)
+    : _serverId(slaveId), _rejectUndefined(rejectUndefined), _wordStore(store), _reqMutexTimeoutMs(reqMutexTimeoutMs) {
     // Always valid, we assume MAX_INTERFACES >= 1 even if defined otherwise
     _interfaces.fill(nullptr);
     _interfaces[0] = &interface;
@@ -36,8 +36,8 @@ Server::Server(ModbusInterface::IInterface& interface, IWordStore& store,
  * @note No more than MAX_INTERFACES should be provided, otherwise begin() will return an error
  */
 Server::Server(std::initializer_list<ModbusInterface::IInterface*> interfaces, IWordStore& store,
-               uint8_t slaveId, bool rejectUndefined)
-    : _serverId(slaveId), _rejectUndefined(rejectUndefined), _wordStore(store) {
+               uint8_t slaveId, bool rejectUndefined, uint32_t reqMutexTimeoutMs)
+    : _serverId(slaveId), _rejectUndefined(rejectUndefined), _wordStore(store), _reqMutexTimeoutMs(reqMutexTimeoutMs) {
     _interfaces.fill(nullptr);
     _interfaceCount = 0;
     for (auto* iface : interfaces) {
@@ -170,8 +170,9 @@ Server::Result Server::handleRequest(const Modbus::Frame& request,
     const bool isBroadcast = Modbus::isBroadcastId(request.slaveId);
 
     { // Scope for mutex protection of WordStore access
-        TickType_t timeout = (REQUEST_MUTEX_TIMEOUT_MS == UINT32_MAX)
-                             ? portMAX_DELAY : pdMS_TO_TICKS(REQUEST_MUTEX_TIMEOUT_MS);
+        TickType_t timeout = (_reqMutexTimeoutMs == UINT32_MAX)
+                             ? portMAX_DELAY 
+                             : pdMS_TO_TICKS(_reqMutexTimeoutMs);
         Lock guard(_serverMutex, timeout);
 
         // Single while(0) loop: check all guard clauses and exit at each step if needed
