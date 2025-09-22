@@ -12,18 +12,18 @@ The workflow of the server is simple:&#x20;
 * When the server receives a request, it will look for registered Words that match the target registers contained in the request, and if the request is valid, individually read/write each Word through the pointer or callbacks (handlers) defined in the Words metadata
 * It sends back to the client a response frame, containing either result data or a Modbus exception if any operation failed (invalid Words in request, partial Word read/write, exception returned in handlers...).
 
-### Recommended workflow example
+### Single-interface setup
 
-In this example, we add Words inline to keep the syntax clear, but you will notice in the following sections that you can separate `Word` declaration from their registration on the Server.
+For basic single-interface setups (RTU or TCP), the workflow is straightforward:
 
 ```cpp
 // 1. Create Word store
 // - On the stack (hides an std::array)
-Modbus::StaticWordStore<200> store;  
+Modbus::StaticWordStore<200> store;
 // - Or on the heap (hides an std::vector)
 Modbus::DynamicWordStore store(10000);
 
-// 2. Create Server instance                               
+// 2. Create Server instance
 Modbus::Server server(rtu,              // ModbusInterface instance (RTU/TCP)
                       store,            // WordStore reference
                       SERVER_SLAVEID);  // Server Slave ID (optional for TCP)
@@ -39,8 +39,50 @@ server.addWord({Modbus::INPUT_REGISTER, 110, 1, &regPtr2});
 server.begin(); // -> Returns ERR_WORD_xxx upon failure
 
 // The server is now ready to operate
-                                          
 ```
+
+### Multi-interface setup
+
+Since `v1.1.6` servers can accept multiple interfaces simultaneously, allowing a single server instance to handle requests comming several Modbus interfaces of any type (TCP/RTU).
+
+This approach is particularly useful for applications that need both low-level RS485/RTU access by legacy equipment and high-level TCP connectivity for remote monitoring or configuration tools. All interfaces share the same Word store (register map), ensuring data consistency regardless of the access method.
+
+```cpp
+// 1. Create interfaces
+ModbusInterface::TCP tcpInterface(tcpHal, Modbus::SERVER);
+ModbusInterface::RTU rtuInterface(rtuHal, Modbus::SERVER);
+
+// 2. Create Word store
+Modbus::StaticWordStore<200> store;
+
+// 3. Create Server with multiple interfaces
+Modbus::Server server({&tcpInterface, &rtuInterface},  // Initializer list of interface pointers
+                      store,                           // WordStore reference
+                      SERVER_SLAVEID,                  // Server Slave ID
+                      true,                            // Reject undefined registers - optional
+                      UINT32_MAX);                     // Request mutex timeout (ms) - optional
+
+// 4. Add words and initialize
+server.addWord({Modbus::HOLDING_REGISTER, 100, 1, &tempValue});
+server.begin();
+
+// Server now responds to both TCP and RTU requests
+```
+
+**Thread safety**: Multi-interface servers use an internal mutex to ensure thread-safe access to the Word store: register values and read/write handlers are protected from concurrent access. The "Request Mutex timeout" controls behavior:
+
+- `UINT32_MAX` (default): Blocking wait until mutex is available - requests for all interfaces will be serialized.
+- `0`: Try-lock mode - returns `SLAVE_DEVICE_BUSY` exception if mutex is already held
+- In-between: waits for a max amount of time and returns if cannot lock the mutex
+
+This parameter can be set in 2 different ways:
+
+- At compile time, by setting the build flag `EZMODBUS_SERVER_REQ_MUTEX_TIMEOUT_MS`
+- At runtime, by providing the `Server` ctor's last argument (`reqMutexTimeoutMs`)
+
+The default behaviour ensures 100% request hit rate but may be prone to deadlocks, as a bug in handlers might cause a stuck interface to block other threads. A safer compromise may be to use a fixed timeout of 50~100 ms.
+
+**Interface limits**: The server enforces a maximum number of interfaces defined at compile time (2 by default). This limit can be adjusted using the `EZMODBUS_SERVER_MAX_INTERFACES` build flag if more interfaces are needed.
 
 ### Words storage & memory management
 

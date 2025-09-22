@@ -15,9 +15,12 @@ board = esp32dev
 framework = arduino
 
 build_flags =
-    -DEZMODBUS_DEBUG                    ; Enable debug output
-    -DEZMODBUS_CLIENT_REQ_TIMEOUT=2000  ; Custom client timeout (2s)
-    -DEZMODBUS_TCP_TXN_SAFETY_TIMEOUT=10000  ; Custom TCP safety timeout (10s)
+    -DEZMODBUS_DEBUG                            ; Enable debug output
+    -DEZMODBUS_CLIENT_REQ_TIMEOUT=2000          ; Custom client timeout (2s)
+    -DEZMODBUS_TCP_TXN_SAFETY_TIMEOUT=10000     ; Custom TCP safety timeout (10s)
+    -DEZMODBUS_SERVER_MAX_INTERFACES=4          ; Allow up to 4 interfaces per server
+    -DEZMODBUS_SERVER_REQ_MUTEX_TIMEOUT_MS=100  ; 100ms mutex timeout
+    ...                                         ; Other flags
 ```
 
 ### ESP-IDF (CMake)
@@ -31,9 +34,11 @@ cmake_minimum_required(VERSION 3.16)
 
 # -> Add this section HERE (not after include/project)
 add_compile_definitions(
-    EZMODBUS_DEBUG                      # Enable debug output
-    EZMODBUS_CLIENT_REQ_TIMEOUT=2000    # Custom client timeout (2s)
-    ...                                 # Other flags
+    EZMODBUS_DEBUG                            # Enable debug output
+    EZMODBUS_CLIENT_REQ_TIMEOUT=2000          # Custom client timeout (2s)
+    EZMODBUS_SERVER_MAX_INTERFACES=4          # Allow up to 4 interfaces per server
+    EZMODBUS_SERVER_REQ_MUTEX_TIMEOUT_MS=100  # 100ms mutex timeout
+    ...                                       # Other flags
 )
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
@@ -49,6 +54,14 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
 * **`EZMODBUS_SERVER_MAX_WORD_SIZE`**
     * Max Word size (# Modbus registers per Word)
     * Default: 8
+
+* **`EZMODBUS_SERVER_MAX_INTERFACES`**
+    * Maximum number of interfaces supported by multi-interface servers
+    * Default: 2
+
+* **`EZMODBUS_SERVER_REQ_MUTEX_TIMEOUT_MS`**
+    * Default timeout for request mutex in multi-interface servers (ms)
+    * Default: UINT32_MAX (blocking mode)
 
 ### ModbusClient.h
 

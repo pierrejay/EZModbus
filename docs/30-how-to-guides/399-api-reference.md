@@ -224,11 +224,19 @@ namespace Modbus {
             ERR_INIT_FAILED
         };
 
-        // Constructor
+        // Constructors
+        // Single interface (legacy)
         Server(ModbusInterface::IInterface& interface,
-               IWordStore& store,            // Register storage
-               uint8_t slaveId = 1,         // Device slave ID
-               bool rejectUndefined = true); // Reject undefined registers
+               IWordStore& store,                           // Register storage
+               uint8_t slaveId = 1,                         // Device slave ID
+               bool rejectUndefined = true);                // Reject undefined registers
+
+        // Multi-interface
+        Server(std::initializer_list<ModbusInterface::IInterface*> interfaces,
+               IWordStore& store,                            // Register storage
+               uint8_t slaveId = 1,                          // Device slave ID
+               bool rejectUndefined = true,                  // Reject undefined registers
+               uint32_t requestMutexTimeoutMs = UINT32_MAX); // Mutex timeout
 
         // Initialization  
         Result begin();
