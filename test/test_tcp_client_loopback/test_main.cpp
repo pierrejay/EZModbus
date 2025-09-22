@@ -1728,6 +1728,9 @@ ModbusInterface::RTU multiInterfaceServerRtu(multiInterfaceServerRtuHal, Modbus:
 ModbusInterface::RTU multiInterfaceClientRtu(multiInterfaceClientRtuHal, Modbus::CLIENT);
 Modbus::Client multiInterfaceRtuClient(multiInterfaceClientRtu);
 
+// Global test flag for test2 handler synchronization
+static volatile bool g_test2HandlerEntered = false;
+
 void test_multi_interface_server_reqmutex_maxtimeout() {
     Modbus::Logger::logln("TEST_MULTI_INTERFACE_SERVER_REQMUTEX_MAXTIMEOUT");
 
@@ -1889,6 +1892,8 @@ void test_multi_interface_server_reqmutex_nolock() {
         .startAddr = 2000,  // Different address from test1 (1000)
         .nbRegs = 1,
         .readHandler = [](const Modbus::Word& word, uint16_t* outVals, void* userCtx) -> Modbus::ExceptionCode {
+            g_test2HandlerEntered = true;                    // Signal: mutex acquired
+            vTaskDelay(pdMS_TO_TICKS(100));                   // Hold the mutex to force contention
             outVals[0] = 0x5678;  // Different test value for test2
             return Modbus::NULL_EXCEPTION;
         },
@@ -1958,8 +1963,17 @@ void test_multi_interface_server_reqmutex_nolock() {
     Modbus::Frame concurrentTcpResp, concurrentRtuResp;
     Modbus::Client::Result rtuTracker = Modbus::Client::NODATA, tcpTracker = Modbus::Client::NODATA;
 
-    // Send requests almost simultaneously (RTU first to grab the mutex)
+    // Reset flag and send RTU request first to grab the mutex
+    g_test2HandlerEntered = false;
     multiInterfaceRtuClient.sendRequest(rtuRequest, concurrentRtuResp, &rtuTracker);
+
+    // Wait for handler to enter (ensuring mutex is held)
+    TickType_t waitStart = xTaskGetTickCount();
+    while (!g_test2HandlerEntered && (xTaskGetTickCount() - waitStart) < pdMS_TO_TICKS(200)) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    // Now send TCP request - should get SLAVE_DEVICE_BUSY due to try-lock with timeout=0
     test2TcpClient.sendRequest(tcpRequest, concurrentTcpResp, &tcpTracker);  // Use test2 TCP client!
 
     TickType_t start = xTaskGetTickCount();
