@@ -46,6 +46,23 @@ As stated before, the TCP server will totally ignore the `slaveId` field. It mea
 !!! note
     **Only one TCP server can be connected to a single interface.** If you need to run several Modbus TCP servers on the same device, the correct way is to use different TCP servers and use a different port for each server.
 
+
+### Server: single server shared by multiple interfaces
+
+**✅ Fully supported since v1.1.6**
+
+A single server instance can accept multiple interfaces simultaneously, allowing the same register map to be accessible through different protocols:
+
+```cpp
+// Create ONE server with multiple interfaces (any mix of RTU/TCP)
+Modbus::Server server({&tcpIface, &rtuIface}, store, 1);
+server.begin(); // Initializes all provided interfaces automatically
+```
+
+By design, the server accepts any set of interfaces of any type (RTU/TCP mix) up to `MAX_INTERFACES` limit (2 by default). The server handles interface initialization and ensures thread-safe concurrent access through an internal mutex.
+
+See [Modbus Server (Slave)](301-modbus-server-slave.md#multi-interface-setup) for detailed configuration and usage.
+
 ### Client: Multiple clients on one interface
 
 **⚠️ Possible but not standard (RTU ONLY)**
