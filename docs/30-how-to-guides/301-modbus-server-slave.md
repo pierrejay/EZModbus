@@ -80,7 +80,7 @@ This parameter can be set in 2 different ways:
 - At compile time, by setting the build flag `EZMODBUS_SERVER_REQ_MUTEX_TIMEOUT_MS`
 - At runtime, by providing the `Server` ctor's last argument (`reqMutexTimeoutMs`)
 
-The default behaviour ensures 100% request hit rate but may be prone to deadlocks, as a bug in handlers might cause a stuck interface to block other threads. A safer compromise may be to use a fixed timeout of 50~100 ms.
+The default behaviour ensures 100% request hit rate but may be prone to deadlocks, as a bug in handlers might cause a stuck interface to block other threads. A safer compromise may be to use a fixed timeout of 50~100 ms, long enough to guarantee success while allowing to detect logic bugs in case of repeated timeouts
 
 **Interface limits**: The server enforces a maximum number of interfaces defined at compile time (2 by default). This limit can be adjusted using the `EZMODBUS_SERVER_MAX_INTERFACES` build flag if more interfaces are needed.
 
