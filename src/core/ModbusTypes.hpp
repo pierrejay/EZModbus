@@ -13,6 +13,7 @@
 #include <vector>
 #include <functional>
 #include <algorithm>
+#include <atomic>
 
 // Do not include timing macros & FreeRTOS types if NATIVE_TEST is defined
 #ifndef NATIVE_TEST
@@ -97,6 +98,33 @@ public:
 private:
     Mutex& _m;
     volatile bool _locked;
+};
+
+/* @brief RAII wrapper for a FreeRTOS binary semaphore
+*/
+class BinarySemaphore {
+public:
+    BinarySemaphore() { 
+        _sem = xSemaphoreCreateBinaryStatic(&_semBuf); 
+        configASSERT(_sem);
+        // Give the semaphore initially so first take() succeeds
+        xSemaphoreGive(_sem);
+    }
+    ~BinarySemaphore() {} // Static Semaphore : no call to vSemaphoreDelete needed
+    BinarySemaphore(const BinarySemaphore&) = delete;
+    BinarySemaphore& operator=(const BinarySemaphore&) = delete;
+    
+    inline bool take(TickType_t wait = portMAX_DELAY) { return xSemaphoreTake(_sem, wait) == pdTRUE; }
+    inline bool tryTake() { return xSemaphoreTake(_sem, 0) == pdTRUE; }
+    inline void give() const { BaseType_t ok = xSemaphoreGive(_sem); configASSERT(ok == pdTRUE); }
+    inline void giveForce() const { (void)xSemaphoreGive(_sem); }
+    __attribute__((always_inline)) inline void giveFromISR(BaseType_t* pxHigherPriorityTaskWoken) { 
+        xSemaphoreGiveFromISR(_sem, pxHigherPriorityTaskWoken); 
+    }
+
+private:
+    StaticSemaphore_t _semBuf;
+    SemaphoreHandle_t _sem;
 };
 
 #endif // NATIVE_TEST

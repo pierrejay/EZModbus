@@ -39,6 +39,7 @@ namespace Modbus {
     class Bridge;                   // Interface bridge/proxy
     
     struct Frame;                   // Modbus message abstraction
+    struct FrameMeta;               // Frame metadata (internal)
     struct Word;                    // Register abstraction (Server)
     
     class IWordStore;               // Abstract register storage
