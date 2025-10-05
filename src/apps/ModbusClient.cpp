@@ -102,8 +102,8 @@ void Client::PendingRequest::timeoutCallback(TimerHandle_t timer) {
  * @param timeoutMs Timeout in milliseconds
  * @return true if the pending request was set successfully, false is already active (clear it first)
  */
-bool Client::PendingRequest::set(const Modbus::Frame& request, Modbus::Frame* response, 
-                                 Result* tracker, uint32_t timeoutMs) {
+bool Client::PendingRequest::set(const Modbus::Frame& request, Modbus::Frame* response,
+                                 Result* tracker, uint32_t timeoutMs, EventGroupHandle_t waiterEventGroup) {
     if (isActive() || closingInProgress()) return false; // Fail-fast
 
     Lock guard(_mutex);
@@ -120,7 +120,7 @@ bool Client::PendingRequest::set(const Modbus::Frame& request, Modbus::Frame* re
     _cb = nullptr; 
     _cbCtx = nullptr;
     _timestampMs = TIME_MS();
-    _syncEventGroup = nullptr; // Start from clean slate
+    _waiterEventGroup = waiterEventGroup;
     _active = true;
 
     // Rearm the timer callback & create timer if necessary
@@ -214,7 +214,7 @@ void Client::PendingRequest::clear() {
     _tracker = nullptr;
     _pResponse = nullptr;
     _timestampMs = 0;
-    _syncEventGroup = nullptr; // Clear sync waiter
+    _waiterEventGroup = nullptr; // Clear sync waiter
     _cb = nullptr;
     _cbCtx = nullptr;
     _active = false; // Disarms any remaining timeout callbacks
@@ -287,8 +287,10 @@ void Client::PendingRequest::setResult(Result result, bool finalize, bool fromTi
         else if (finalize) respClosing(false);
         
         if (_tracker) *_tracker = result;
-        if (finalize) resetUnsafe();
-        notifySyncWaiterUnsafe();
+        if (finalize) {
+            resetUnsafe();
+            notifySyncWaiterUnsafe();
+        }
     }
 
     // Important - always call callback outside of mutex
@@ -359,22 +361,14 @@ void Client::PendingRequest::setResponse(const Modbus::Frame& response, bool fin
     if (cbSnapshot) cbSnapshot(SUCCESS, &response, ctxSnapshot);
 }
 
-/* @brief Set the event group for synchronous waiting
- * @param group The event group handle waiting for completion
- */
-void Client::PendingRequest::setSyncEventGroup(EventGroupHandle_t group) {
-    Lock guard(_mutex);
-    _syncEventGroup = group;
-}
-
 /* @brief Notify the synchronous waiting task
  * @note This method MUST be called while holding _mutex to ensure atomicity
  */
 void Client::PendingRequest::notifySyncWaiterUnsafe() {
     // This method should be called while holding the mutex
-    if (_syncEventGroup) {
-        xEventGroupSetBits(_syncEventGroup, SYNC_COMPLETION_BIT);
-        _syncEventGroup = nullptr;
+    if (_waiterEventGroup) {
+        xEventGroupSetBits(_waiterEventGroup, SYNC_COMPLETION_BIT);
+        _waiterEventGroup = nullptr;
     }
 }
 
@@ -498,8 +492,18 @@ Client::Result Client::sendRequest(const Modbus::Frame& request,
     Result localResult;
     Result* tracker = userTracker ? userTracker : &localResult;
 
+    // In sync mode, spawn the waiter event group before initializing the request
+    EventGroupHandle_t syncEvtGrp = nullptr;
+    if (!userTracker) {
+        syncEvtGrp = xEventGroupCreateStatic(&_waiterEventGroupBuf);
+        if (!syncEvtGrp) {
+            return Error(ERR_BUSY, "cannot create waiter event group");
+        }
+    }
+
     // Basic checks passed, we try to initiate the pending request
-    if (!_pendingRequest.set(request, &response, tracker, _requestTimeoutMs)) {
+    if (!_pendingRequest.set(request, &response, tracker, _requestTimeoutMs, syncEvtGrp)) {
+        if (syncEvtGrp) vEventGroupDelete(syncEvtGrp); // Cleanup on failure
         return Error(ERR_BUSY, "request already in progress");
     }
 
@@ -514,15 +518,6 @@ Client::Result Client::sendRequest(const Modbus::Frame& request,
 
     // ---------- Synchronous mode (userTracker == nullptr) ----------
     if (!userTracker) {
-        // Create an event group for this synchronous transaction
-        EventGroupHandle_t syncEvtGrp = xEventGroupCreateStatic(&_syncEventGroupBuf);
-        if (!syncEvtGrp) {
-            _pendingRequest.setResult(ERR_TIMEOUT, true);
-            return Error(ERR_BUSY, "cannot create event group");
-        }
-
-        // Register the event group inside the pending request so that the worker can signal completion
-        _pendingRequest.setSyncEventGroup(syncEvtGrp);
 
         // Wait for completion or timeout (response, TX error, or timeout timer)
         EventBits_t bits = xEventGroupWaitBits(

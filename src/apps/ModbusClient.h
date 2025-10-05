@@ -283,7 +283,7 @@ private:
         uint32_t _timestampMs = 0;                    // Timestamp of request creation
         volatile bool _active = false;                // Whether the request is active
         Mutex _mutex;                                 // Mutex to protect the pending request data
-        EventGroupHandle_t _syncEventGroup = nullptr; // Event group handle for synchronous wait (sync mode)
+        EventGroupHandle_t _waiterEventGroup = nullptr; // Event group handle for synchronous wait (sync mode)
 
         // Request timeout cleanup timer management
         StaticTimer_t _timerBuf;                      // Static timer buffer
@@ -301,8 +301,8 @@ private:
         PendingRequest(Client* client) : _client(client), _timerCbDisarmed(0), _respClosing(0), _timerClosing(0) {}
         
         // Helper methods
-        bool set(const Modbus::Frame& request, Modbus::Frame* response, 
-                 Result* tracker, uint32_t timeoutMs);
+        bool set(const Modbus::Frame& request, Modbus::Frame* response,
+                 Result* tracker, uint32_t timeoutMs, EventGroupHandle_t waiterEventGroup = nullptr);
         bool set(const Modbus::Frame& request, ResponseCallback cb, 
                  void* userCtx, uint32_t timeoutMs);
         void clear();
@@ -315,7 +315,6 @@ private:
         void setResult(Result result, bool finalize = true, bool fromTimer = false);
         void setResultFromTimer(Result result); // For use from timer context (same, with safe args)
         void setResponse(const Modbus::Frame& response, bool finalize = true);
-        void setSyncEventGroup(EventGroupHandle_t group);
 
         // Snapshot helper for lock-free validation in handleResponse
         struct PendingSnapshot {
@@ -356,7 +355,7 @@ private:
     PendingRequest _pendingRequest;
     Modbus::Frame _responseBuffer;
     bool _isInitialized = false;
-    StaticEventGroup_t _syncEventGroupBuf; // Event group buffer for synchronous wait (sync mode)
+    StaticEventGroup_t _waiterEventGroupBuf; // Event group buffer for synchronous wait (sync mode)
     
     // ===================================================================================
     // PRIVATE METHODS
