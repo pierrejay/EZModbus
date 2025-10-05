@@ -225,7 +225,7 @@ namespace Modbus {
         };
 
         // Constructors
-        // Single interface (legacy)
+        // Single interface
         Server(ModbusInterface::IInterface& interface,
                IWordStore& store,                           // Register storage
                uint8_t slaveId = 1,                         // Device slave ID
