@@ -672,5 +672,12 @@ void Client::staticHandleTxResult(ModbusInterface::IInterface::Result result, vo
     // Pour un TX non-broadcast réussi, on ne fait rien, on attend la réponse.
 }
 
+// ===================================================================================
+// CONVENIENCE HELPER METHODS IMPLEMENTATION
+// ===================================================================================
+
+// Helper methods implementations are now in ModbusClient.h as templates
+
+
 
 } // namespace Modbus

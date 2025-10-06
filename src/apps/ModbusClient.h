@@ -114,9 +114,24 @@ public:
     Result begin();
     Result sendRequest(const Modbus::Frame& request, 
                        Modbus::Frame& response, Result* userTracker = nullptr);
-    Result sendRequest(const Modbus::Frame& request, 
+    Result sendRequest(const Modbus::Frame& request,
                        ResponseCallback cb, void* userCtx = nullptr);
     bool isReady();
+
+    // ===================================================================================
+    // CONVENIENCE HELPER METHODS
+    // ===================================================================================
+
+    // Read helper template (works for all register types with any arithmetic type)
+    template<typename T>
+    Result read(uint8_t slaveId, Modbus::RegisterType regType, uint16_t startAddr,
+                uint16_t qty, T* toBuf, Modbus::ExceptionCode* rspExcep = nullptr);
+
+    // Write helper template (works for COIL and HOLDING_REGISTER with any arithmetic type)
+    template<typename T>
+    Result write(uint8_t slaveId, Modbus::RegisterType regType, uint16_t startAddr,
+                 uint16_t qty, const T* fromBuf, Modbus::ExceptionCode* rspExcep = nullptr);
+
 
 private:
     // ===================================================================================
@@ -356,7 +371,11 @@ private:
     Modbus::Frame _responseBuffer;
     bool _isInitialized = false;
     StaticEventGroup_t _waiterEventGroupBuf; // Event group buffer for synchronous wait (sync mode)
-    
+
+    // Helper methods members
+    Modbus::Frame _helperBuffer;             // Reusable buffer for helper methods
+    Mutex _helperMutex;                      // Mutex to protect helper buffer access
+
     // ===================================================================================
     // PRIVATE METHODS
     // ===================================================================================
@@ -370,5 +389,210 @@ private:
     static void staticHandleTxResult(ModbusInterface::IInterface::Result result, void* pClient);
 
 };
+
+// ===================================================================================
+// TEMPLATE IMPLEMENTATIONS FOR READ/WRITE HELPERS
+// ===================================================================================
+
+/* @brief Send read request and write response data & exception code (if any) to provided buffer
+ * @tparam T Arithmetic type for the buffer (bool, int8_t, uint16_t, float, etc.)
+ * @param slaveId Target slave ID
+ * @param regType Register type (COIL, DISCRETE_INPUT, HOLDING_REGISTER, INPUT_REGISTER)
+ * @param startAddr Starting address
+ * @param qty Number of registers/coils to read
+ * @param toBuf Buffer to store the read values
+ * @param rspExcep Optional pointer to store exception code from response
+ * @return Result code (SUCCESS = transaction succeeded with slave response, check rspExcep for Modbus exceptions)
+ * @note For coils: values are 0 or 1. For registers: values are clamped to T's max if sizeof(T) < 2 bytes.
+ * @note IMPORTANT: make sure your buffer size is at least equal to `qty`! The method has no way to enforce this.
+ */
+template<typename T>
+Client::Result Client::read(uint8_t slaveId, Modbus::RegisterType regType, uint16_t startAddr,
+                            uint16_t qty, T* toBuf, Modbus::ExceptionCode* rspExcep) {
+    static_assert(std::is_arithmetic<T>::value, "Client::read() only works with arithmetic types (bool, int, float, etc.)");
+
+    // Validate parameters
+    if (!toBuf || qty == 0) {
+        return Error(ERR_INVALID_FRAME, "invalid buffer or quantity");
+    }
+
+    // Thread-safe access to helper buffer
+    Lock guard(_helperMutex);
+
+    // Build request in helper buffer
+    _helperBuffer.clear();
+    _helperBuffer.type = Modbus::REQUEST;
+    _helperBuffer.slaveId = slaveId;
+    _helperBuffer.regAddress = startAddr;
+    _helperBuffer.regCount = qty;
+
+    // Set function code based on register type
+    switch (regType) {
+        case Modbus::COIL:
+            _helperBuffer.fc = Modbus::READ_COILS;
+            break;
+        case Modbus::DISCRETE_INPUT:
+            _helperBuffer.fc = Modbus::READ_DISCRETE_INPUTS;
+            break;
+        case Modbus::HOLDING_REGISTER:
+            _helperBuffer.fc = Modbus::READ_HOLDING_REGISTERS;
+            break;
+        case Modbus::INPUT_REGISTER:
+            _helperBuffer.fc = Modbus::READ_INPUT_REGISTERS;
+            break;
+        default:
+            return Error(ERR_INVALID_FRAME, "invalid register type");
+    }
+
+    // Send request synchronously
+    Result res = sendRequest(_helperBuffer, _helperBuffer);
+
+    // Handle transport result
+    if (res != SUCCESS) {
+        if (rspExcep) *rspExcep = Modbus::NULL_EXCEPTION;
+        return Error(res);
+    }
+
+    // Transport success - check for Modbus exception
+    if (_helperBuffer.exceptionCode != Modbus::NULL_EXCEPTION) {
+        if (rspExcep) *rspExcep = _helperBuffer.exceptionCode;
+        return Success(); // Transport OK, but Modbus exception
+    }
+
+    // Valid response with data - extract based on type
+    if (regType == Modbus::COIL || regType == Modbus::DISCRETE_INPUT) {
+        // For coils: extract each bit as T (0 or 1)
+        for (uint16_t i = 0; i < qty; i++) {
+            toBuf[i] = _helperBuffer.getCoil(i) ? static_cast<T>(1) : static_cast<T>(0);
+        }
+    } else {
+        // For registers: copy with clamping if needed
+        for (uint16_t i = 0; i < qty; i++) {
+            uint16_t val = _helperBuffer.getRegister(i);
+
+            // Clamp if T cannot contain uint16_t
+            if constexpr (std::numeric_limits<T>::max() < std::numeric_limits<uint16_t>::max()) {
+                if (val > std::numeric_limits<T>::max()) {
+                    toBuf[i] = std::numeric_limits<T>::max();
+                    continue;
+                }
+            }
+
+            toBuf[i] = static_cast<T>(val);
+        }
+    }
+
+    if (rspExcep) *rspExcep = Modbus::NULL_EXCEPTION;
+    return Success();
+}
+
+/* @brief Send write request from provided buffer, write exception code (if any) to provided buffer
+ * @tparam T Arithmetic type for the buffer (bool, int8_t, uint16_t, float, etc.)
+ * @param slaveId Target slave ID
+ * @param regType Register type (COIL or HOLDING_REGISTER only)
+ * @param startAddr Starting address
+ * @param qty Number of registers/coils to write
+ * @param fromBuf Buffer containing values to write (will be clamped to uint16_t range if needed)
+ * @param rspExcep Optional pointer to store exception code from response
+ * @return Result code (SUCCESS = transaction succeeded with slave response, check rspExcep for Modbus exceptions)
+ * @note For coils: values > 0 are considered as `true` state. For registers: values are clamped to UINT16_MAX if needed.
+ * @note If using signed numbers, negative write values will be considered as false/0.
+ * @note IMPORTANT: make sure your buffer size is at least equal to `qty`! The method has no way to enforce this.
+ */
+template<typename T>
+Client::Result Client::write(uint8_t slaveId, Modbus::RegisterType regType, uint16_t startAddr,
+                             uint16_t qty, const T* fromBuf, Modbus::ExceptionCode* rspExcep) {
+    static_assert(std::is_arithmetic<T>::value, "Client::write() only works with arithmetic types (bool, int, float, etc.)");
+
+    // Validate parameters
+    if (!fromBuf || qty == 0) {
+        return Error(ERR_INVALID_FRAME, "invalid buffer or quantity");
+    }
+
+    // Only COIL and HOLDING_REGISTER can be written
+    if (regType != Modbus::COIL && regType != Modbus::HOLDING_REGISTER) {
+        return Error(ERR_INVALID_FRAME, "register type not writable");
+    }
+
+    // Thread-safe access to helper buffer
+    Lock guard(_helperMutex);
+
+    // Build request in helper buffer
+    _helperBuffer.clear();
+    _helperBuffer.type = Modbus::REQUEST;
+    _helperBuffer.slaveId = slaveId;
+    _helperBuffer.regAddress = startAddr;
+    _helperBuffer.regCount = qty;
+
+    // Set function code and data based on quantity and type
+    if (regType == Modbus::COIL) {
+        if (qty == 1) {
+            _helperBuffer.fc = Modbus::WRITE_COIL;
+        } else {
+            _helperBuffer.fc = Modbus::WRITE_MULTIPLE_COILS;
+        }
+
+        // Convert T to uint16_t for coils (0 or 1) - no cast, just check != 0
+        uint16_t coilBuf[qty];
+        for (uint16_t i = 0; i < qty; i++) {
+            coilBuf[i] = fromBuf[i] != 0 ? 1 : 0;
+        }
+        if (!_helperBuffer.setCoils(coilBuf, qty)) {
+            return Error(ERR_INVALID_FRAME, "failed to pack coils");
+        }
+    } else { // HOLDING_REGISTER
+        if (qty == 1) {
+            _helperBuffer.fc = Modbus::WRITE_REGISTER;
+        } else {
+            _helperBuffer.fc = Modbus::WRITE_MULTIPLE_REGISTERS;
+        }
+
+        // Convert T to uint16_t for registers with clamping
+        uint16_t regBuf[qty];
+        for (uint16_t i = 0; i < qty; i++) {
+            T val = fromBuf[i];
+
+            // Clamp negative signed numbers to 0
+            if constexpr (std::is_signed<T>::value) {
+                if (val < 0) {
+                    regBuf[i] = 0;
+                    continue;
+                }
+            }
+
+            // Clamp to UINT16_MAX for > 16-bit types
+            if constexpr (std::numeric_limits<T>::max() > std::numeric_limits<uint16_t>::max()) {
+                if (val > std::numeric_limits<uint16_t>::max()) {
+                    regBuf[i] = std::numeric_limits<uint16_t>::max();
+                    continue;
+                }
+            }
+
+            regBuf[i] = static_cast<uint16_t>(val);
+        }
+        if (!_helperBuffer.setRegisters(regBuf, qty)) {
+            return Error(ERR_INVALID_FRAME, "failed to set registers");
+        }
+    }
+
+    // Send request synchronously
+    Result res = sendRequest(_helperBuffer, _helperBuffer);
+
+    // Handle transport result
+    if (res != SUCCESS) {
+        if (rspExcep) *rspExcep = Modbus::NULL_EXCEPTION;
+        return Error(res);
+    }
+
+    // Transport success - check for Modbus exception
+    if (_helperBuffer.exceptionCode != Modbus::NULL_EXCEPTION) {
+        if (rspExcep) *rspExcep = _helperBuffer.exceptionCode;
+        return Success(); // Transport OK, but Modbus exception
+    }
+
+    // Write successful
+    if (rspExcep) *rspExcep = Modbus::NULL_EXCEPTION;
+    return Success();
+}
 
 } // namespace Modbus

@@ -14,6 +14,7 @@
 #include <functional>
 #include <algorithm>
 #include <atomic>
+#include <limits>
 
 // Do not include timing macros & FreeRTOS types if NATIVE_TEST is defined
 #ifndef NATIVE_TEST
