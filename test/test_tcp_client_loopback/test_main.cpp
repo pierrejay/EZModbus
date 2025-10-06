@@ -1701,6 +1701,315 @@ void test_client_reconnect_on_first_request() {
     Modbus::Logger::logln("Client successfully reconnected on first request");
 }
 
+
+
+// Multi-interface test instances - SEPARATE TCP PORTS to avoid catch-all conflicts
+constexpr uint16_t TEST1_TCP_PORT = MODBUS_PORT + 1;
+constexpr uint16_t TEST2_TCP_PORT = MODBUS_PORT + 2;
+
+// TEST 1 instances (TCP on port 502+1)
+ModbusHAL::TCP test1ServerTcpHal(TEST1_TCP_PORT);
+ModbusHAL::TCP test1ClientTcpHal("127.0.0.1", TEST1_TCP_PORT);
+ModbusInterface::TCP test1ServerTcp(test1ServerTcpHal, Modbus::SERVER);
+ModbusInterface::TCP test1ClientTcp(test1ClientTcpHal, Modbus::CLIENT);
+Modbus::Client test1TcpClient(test1ClientTcp);
+
+// TEST 2 instances (TCP on port 502+2)
+ModbusHAL::TCP test2ServerTcpHal(TEST2_TCP_PORT);
+ModbusHAL::TCP test2ClientTcpHal("127.0.0.1", TEST2_TCP_PORT);
+ModbusInterface::TCP test2ServerTcp(test2ServerTcpHal, Modbus::SERVER);
+ModbusInterface::TCP test2ClientTcp(test2ClientTcpHal, Modbus::CLIENT);
+Modbus::Client test2TcpClient(test2ClientTcp);
+
+// SHARED RTU instances (no conflicts on RTU, filtered by slaveId)
+ModbusHAL::UART multiInterfaceServerRtuHal(UART_NUM_1, 9600, ModbusHAL::UART::CONFIG_8N1, D5, D6);
+ModbusHAL::UART multiInterfaceClientRtuHal(UART_NUM_2, 9600, ModbusHAL::UART::CONFIG_8N1, D7, D8);
+ModbusInterface::RTU multiInterfaceServerRtu(multiInterfaceServerRtuHal, Modbus::SERVER);
+ModbusInterface::RTU multiInterfaceClientRtu(multiInterfaceClientRtuHal, Modbus::CLIENT);
+Modbus::Client multiInterfaceRtuClient(multiInterfaceClientRtu);
+
+// Global test flag for test2 handler synchronization
+static volatile bool g_test2HandlerEntered = false;
+
+void test_multi_interface_server_reqmutex_maxtimeout() {
+    Modbus::Logger::logln("TEST_MULTI_INTERFACE_SERVER_REQMUTEX_MAXTIMEOUT");
+
+    // === MASTER TEST: Initialize all shared multi-interface components ===
+    // This test initializes HAL + Interface pairs ONCE for both tests
+    // Subsequent tests reuse these instances without re-initialization
+    static bool sharedComponentsInitialized = false;
+    if (!sharedComponentsInitialized) {
+        Modbus::Logger::logln("[MASTER] Initializing shared multi-interface components");
+
+        // Initialize TEST1 HAL + Interface pairs (TCP + RTU)
+        test1ServerTcpHal.begin();
+        test1ClientTcpHal.begin();
+        multiInterfaceServerRtuHal.begin();
+        multiInterfaceClientRtuHal.begin();
+
+        auto test1TcpServerRes = test1ServerTcp.begin();
+        auto test1TcpClientRes = test1ClientTcp.begin();
+        auto rtuServerRes = multiInterfaceServerRtu.begin();
+        auto rtuClientRes = multiInterfaceClientRtu.begin();
+        auto test1TcpClientBeginRes = test1TcpClient.begin();
+        auto rtuClientBeginRes = multiInterfaceRtuClient.begin();
+
+        TEST_ASSERT_START();
+        TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, test1TcpServerRes);
+        TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, test1TcpClientRes);
+        TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, rtuServerRes);
+        TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, rtuClientRes);
+        TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, test1TcpClientBeginRes);
+        TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, rtuClientBeginRes);
+
+        sharedComponentsInitialized = true;
+        Modbus::Logger::logln("[MASTER] Shared components initialized successfully");
+    }
+
+    // === TEST 1 SPECIFIC: Create server with slaveId=1 and UINT32_MAX timeout ===
+    static Modbus::StaticWordStore<20> test1Store;
+    static Modbus::Server test1Server({&test1ServerTcp, &multiInterfaceServerRtu}, test1Store, 1, true, UINT32_MAX);
+
+    // 2. ADD WORDS TO TEST1 SERVER
+    Modbus::Word testHoldingReg = {
+        .type = Modbus::HOLDING_REGISTER,
+        .startAddr = 1000,
+        .nbRegs = 1,
+        .readHandler = [](const Modbus::Word& word, uint16_t* outVals, void* userCtx) -> Modbus::ExceptionCode {
+            outVals[0] = 0x1234;  // Test value
+            return Modbus::NULL_EXCEPTION;
+        },
+        .writeHandler = [](const uint16_t* writeVals, const Modbus::Word& word, void* userCtx) -> Modbus::ExceptionCode {
+            // Accept any write for test
+            return Modbus::NULL_EXCEPTION;
+        },
+        .userCtx = nullptr
+    };
+
+    auto addWordRes = test1Server.addWord(testHoldingReg);
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, addWordRes);
+
+    // 3. INITIALIZE SERVER AFTER ADDING WORDS
+    auto serverBeginRes = test1Server.begin();
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, serverBeginRes);
+
+    // Test TCP client → multi-interface server (using global clients)
+    // Clients are already initialized by master test
+
+    // Test TCP read
+    Modbus::Frame tcpRequest = {
+        .type       = Modbus::REQUEST,
+        .fc         = Modbus::READ_HOLDING_REGISTERS,
+        .slaveId    = 1,
+        .regAddress = 1000,
+        .regCount   = 1,
+        .data       = {},
+    };
+    Modbus::Frame tcpResponse;
+
+    vTaskDelay(pdMS_TO_TICKS(100)); // Let everything settle
+    auto tcpResult = test1TcpClient.sendRequest(tcpRequest, tcpResponse);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tcpResult);
+    TEST_ASSERT_EQUAL(0x1234, tcpResponse.getRegister(0));
+
+    // Test RTU client → multi-interface server (using global clients)
+    // Clients are already initialized by master test
+
+    // Test RTU read
+    Modbus::Frame rtuRequest = {
+        .type       = Modbus::REQUEST,
+        .fc         = Modbus::READ_HOLDING_REGISTERS,
+        .slaveId    = 1,
+        .regAddress = 1000,
+        .regCount   = 1,
+        .data       = {},
+    };
+    Modbus::Frame rtuResponse;
+
+    vTaskDelay(pdMS_TO_TICKS(100)); // Let server initialize
+    auto rtuResult = multiInterfaceRtuClient.sendRequest(rtuRequest, rtuResponse);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, rtuResult);
+    TEST_ASSERT_EQUAL(0x1234, rtuResponse.getRegister(0));
+
+    // Test concurrent access
+
+    // Send requests almost simultaneously (start by RTU -> higher delay)
+    Modbus::Frame concurrentTcpResp, concurrentRtuResp;
+    Modbus::Client::Result rtuTracker, tcpTracker = Modbus::Client::NODATA;
+    // Async API = returns immediately
+    multiInterfaceRtuClient.sendRequest(rtuRequest, concurrentRtuResp, &rtuTracker);
+    vTaskDelay(pdMS_TO_TICKS(1));
+    test1TcpClient.sendRequest(tcpRequest, concurrentTcpResp, &tcpTracker);
+
+    TickType_t start = xTaskGetTickCount();
+    TickType_t elapsed = 0;
+    // Wait for both requests to complete
+    do {
+        vTaskDelay(pdMS_TO_TICKS(1));
+        elapsed = xTaskGetTickCount() - start;
+    } while ((tcpTracker == Modbus::Client::NODATA || rtuTracker == Modbus::Client::NODATA) 
+            && elapsed < pdMS_TO_TICKS(1500)); // Timeout to avoid being stuck here
+
+    // Both requests should succeed
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, rtuTracker);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tcpTracker);
+    TEST_ASSERT_EQUAL(0x1234, concurrentRtuResp.getRegister(0));
+    TEST_ASSERT_EQUAL(0x1234, concurrentTcpResp.getRegister(0));
+}
+
+void test_multi_interface_server_reqmutex_nolock() {
+    Modbus::Logger::logln("TEST_MULTI_INTERFACE_SERVER_REQMUTEX_NOLOCK");
+
+    // === SLAVE TEST: Initialize TEST2 specific components ===
+    // Initialize TEST2 HAL + Interface pairs (separate TCP, shared RTU)
+    test2ServerTcpHal.begin();
+    test2ClientTcpHal.begin();
+    // RTU already initialized by master test
+
+    auto test2TcpServerRes = test2ServerTcp.begin();
+    auto test2TcpClientRes = test2ClientTcp.begin();
+    auto test2TcpClientBeginRes = test2TcpClient.begin();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, test2TcpServerRes);
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, test2TcpClientRes);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, test2TcpClientBeginRes);
+
+    // === TEST 2 SPECIFIC: Create server with slaveId=2 and timeout=0 (try-lock) ===
+    static Modbus::StaticWordStore<20> test2Store;
+    static Modbus::Server test2Server({&test2ServerTcp, &multiInterfaceServerRtu}, test2Store, 2, true, 0);
+
+    // 2. ADD WORDS TO TEST2 SERVER (using different register address to avoid conflict)
+    Modbus::Word test2HoldingReg = {
+        .type = Modbus::HOLDING_REGISTER,
+        .startAddr = 2000,  // Different address from test1 (1000)
+        .nbRegs = 1,
+        .readHandler = [](const Modbus::Word& word, uint16_t* outVals, void* userCtx) -> Modbus::ExceptionCode {
+            g_test2HandlerEntered = true;                    // Signal: mutex acquired
+            vTaskDelay(pdMS_TO_TICKS(100));                   // Hold the mutex to force contention
+            outVals[0] = 0x5678;  // Different test value for test2
+            return Modbus::NULL_EXCEPTION;
+        },
+        .writeHandler = [](const uint16_t* writeVals, const Modbus::Word& word, void* userCtx) -> Modbus::ExceptionCode {
+            // Accept any write for test
+            return Modbus::NULL_EXCEPTION;
+        },
+        .userCtx = nullptr
+    };
+
+    auto addWordRes = test2Server.addWord(test2HoldingReg);
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, addWordRes);
+
+    // 3. INITIALIZE TEST2 SERVER AFTER ADDING WORDS
+    auto serverBeginRes = test2Server.begin();
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, serverBeginRes);
+
+    // === SIMPLIFIED TEST: Just validate timeout=0 behavior (try-lock) ===
+    // Test one simple TCP read to validate server works with timeout=0
+
+    // Test TCP read (using test2 server slaveId=2 and address=2000)
+    Modbus::Frame tcpRequest = {
+        .type       = Modbus::REQUEST,
+        .fc         = Modbus::READ_HOLDING_REGISTERS,
+        .slaveId    = 2,          // Use test2 server slaveId
+        .regAddress = 2000,       // Use test2 register address
+        .regCount   = 1,
+        .data       = {},
+    };
+    Modbus::Frame tcpResponse;
+
+    vTaskDelay(pdMS_TO_TICKS(100)); // Let everything settle
+    auto tcpResult = test2TcpClient.sendRequest(tcpRequest, tcpResponse);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tcpResult);
+    TEST_ASSERT_EQUAL(0x5678, tcpResponse.getRegister(0));  // Expect test2 value
+
+    // === TEST CONCURRENT ACCESS WITH TIMEOUT=0 (try-lock behavior) ===
+    // The key difference vs test1 is the mutex timeout behavior:
+    // - test1: UINT32_MAX (blocking) - will wait for mutex
+    // - test2: 0 (try-lock) - returns SLAVE_DEVICE_BUSY immediately if mutex is locked
+
+    Modbus::Logger::logln("[TEST2] Testing concurrent access with timeout=0");
+
+    // Test RTU read to test2 server
+    Modbus::Frame rtuRequest = {
+        .type       = Modbus::REQUEST,
+        .fc         = Modbus::READ_HOLDING_REGISTERS,
+        .slaveId    = 2,          // Use test2 server slaveId
+        .regAddress = 2000,       // Use test2 register address
+        .regCount   = 1,
+        .data       = {},
+    };
+    Modbus::Frame rtuResponse;
+
+    vTaskDelay(pdMS_TO_TICKS(100)); // Let server initialize
+    auto rtuResult = multiInterfaceRtuClient.sendRequest(rtuRequest, rtuResponse);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, rtuResult);
+    TEST_ASSERT_EQUAL(0x5678, rtuResponse.getRegister(0));  // Expect test2 value
+
+    // Test concurrent access - both to test2 server
+    Modbus::Frame concurrentTcpResp, concurrentRtuResp;
+    Modbus::Client::Result rtuTracker = Modbus::Client::NODATA, tcpTracker = Modbus::Client::NODATA;
+
+    // Reset flag and send RTU request first to grab the mutex
+    g_test2HandlerEntered = false;
+    multiInterfaceRtuClient.sendRequest(rtuRequest, concurrentRtuResp, &rtuTracker);
+
+    // Wait for handler to enter (ensuring mutex is held)
+    TickType_t waitStart = xTaskGetTickCount();
+    while (!g_test2HandlerEntered && (xTaskGetTickCount() - waitStart) < pdMS_TO_TICKS(200)) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    // Now send TCP request - should get SLAVE_DEVICE_BUSY due to try-lock with timeout=0
+    test2TcpClient.sendRequest(tcpRequest, concurrentTcpResp, &tcpTracker);  // Use test2 TCP client!
+
+    TickType_t start = xTaskGetTickCount();
+    TickType_t elapsed = 0;
+    // Wait for both requests to complete
+    do {
+        vTaskDelay(pdMS_TO_TICKS(1));
+        elapsed = xTaskGetTickCount() - start;
+    } while ((tcpTracker == Modbus::Client::NODATA || rtuTracker == Modbus::Client::NODATA)
+            && elapsed < pdMS_TO_TICKS(1500));
+
+    // With timeout=0: RTU should succeed, TCP should get SLAVE_DEVICE_BUSY immediately
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, rtuTracker);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tcpTracker);
+    TEST_ASSERT_EQUAL(0x5678, concurrentRtuResp.getRegister(0));  // RTU got the value
+    TEST_ASSERT_EQUAL(Modbus::SLAVE_DEVICE_BUSY, concurrentTcpResp.exceptionCode);  // TCP got busy!
+
+    Modbus::Logger::logln("[TEST2] Concurrent access with timeout=0 works correctly!");
+}
+
+void test_multi_interface_server_overflow() {
+    Modbus::Logger::logln("TEST_SERVER_MAX_INTERFACES_OVERFLOW");
+
+    // Dummy store to satisfy ctor
+    static Modbus::StaticWordStore<5> overflowStore;
+
+    // Reuse global interface instance from previous test and try to register them 4 time
+    static Modbus::Server overflowServer({&mbt, &mbt, &mbt, &mbt}, overflowStore);
+
+    // begin() must fail because too many interfaces (default max: 2)
+    auto overflowServerRes = overflowServer.begin();
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Server::ERR_INIT_FAILED, overflowServerRes);
+}
+
 void setup() {
     // Debug port
     Serial.setTxBufferSize(2048);
@@ -1785,6 +2094,14 @@ void setup() {
     // RUN_TEST(test_concurrent_calls);
     RUN_TEST(test_server_busy_exception);
     RUN_TEST(test_client_reconnect_on_first_request);
+
+    // Multi-interface server tests
+    // Placed here (not in test_rtu_server_loopback) because the only
+    // way to test it properly is to use TCP+RTU simultaneously
+    RUN_TEST(test_multi_interface_server_reqmutex_maxtimeout);
+    RUN_TEST(test_multi_interface_server_reqmutex_nolock);
+    RUN_TEST(test_multi_interface_server_overflow);
+
     UNITY_END();
 }
 
