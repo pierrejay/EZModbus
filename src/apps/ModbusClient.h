@@ -395,15 +395,16 @@ private:
 // ===================================================================================
 
 /* @brief Send read request and write response data & exception code (if any) to provided buffer
- * @tparam T Arithmetic type for the buffer (bool, int8_t, uint16_t, float, etc.)
+ * @tparam T Arithmetic type for the user buffer (bool, uint16_t, etc.)
  * @param slaveId Target slave ID
  * @param regType Register type (COIL, DISCRETE_INPUT, HOLDING_REGISTER, INPUT_REGISTER)
  * @param startAddr Starting address
  * @param qty Number of registers/coils to read
  * @param dst Buffer to store the read values (should have at least `qty` elements)
- * @param rspExcep Optional pointer to store exception code from response
+ * @param rspExcep Pointer to exception response
  * @return Result code (SUCCESS = transaction succeeded with slave response, check rspExcep for Modbus exceptions)
  * @note For coils: values are 0 or 1. For registers: values are clamped to T's max if sizeof(T) < 2 bytes.
+ * @note Floating-point types: Values are truncated (not rounded) when converting from uint16_t. E.g., 123 → 123.0
  * @note IMPORTANT: make sure your buffer size is at least equal to `qty`! The method has no way to enforce this.
  */
 template<typename T>
@@ -492,11 +493,12 @@ Client::Result Client::read(uint8_t slaveId, Modbus::RegisterType regType, uint1
  * @param regType Register type (COIL or HOLDING_REGISTER only)
  * @param startAddr Starting address
  * @param qty Number of registers/coils to write
- * @param src Buffer containing values to write (will be clamped to uint16_t range if needed - should have at least `qty` elements)
+ * @param src Buffer containing values to write (should have at least `qty` elements - values will be clamped to bool/uint16_t range if needed)
  * @param rspExcep Optional pointer to store exception code from response
  * @return Result code (SUCCESS = transaction succeeded with slave response, check rspExcep for Modbus exceptions)
  * @note For coils: values > 0 are considered as `true` state. For registers: values are clamped to UINT16_MAX if needed.
- * @note If using signed numbers, negative write values will be considered as false/0.
+ * @note If using signed numbers, negative write values will be clamped to 0.
+ * @note Floating-point types: Values are truncated (not rounded) when converting to uint16_t. E.g., 123.7 → 123
  * @note IMPORTANT: make sure your buffer size is at least equal to `qty`! The method has no way to enforce this.
  */
 template<typename T>
