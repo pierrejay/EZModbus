@@ -125,12 +125,12 @@ public:
     // Read helper template (works for all register types with any arithmetic type)
     template<typename T>
     Result read(uint8_t slaveId, Modbus::RegisterType regType, uint16_t startAddr,
-                uint16_t qty, T* toBuf, Modbus::ExceptionCode* rspExcep = nullptr);
+                uint16_t qty, T* dst, Modbus::ExceptionCode* rspExcep = nullptr);
 
     // Write helper template (works for COIL and HOLDING_REGISTER with any arithmetic type)
     template<typename T>
     Result write(uint8_t slaveId, Modbus::RegisterType regType, uint16_t startAddr,
-                 uint16_t qty, const T* fromBuf, Modbus::ExceptionCode* rspExcep = nullptr);
+                 uint16_t qty, const T* src, Modbus::ExceptionCode* rspExcep = nullptr);
 
 
 private:
@@ -400,7 +400,7 @@ private:
  * @param regType Register type (COIL, DISCRETE_INPUT, HOLDING_REGISTER, INPUT_REGISTER)
  * @param startAddr Starting address
  * @param qty Number of registers/coils to read
- * @param toBuf Buffer to store the read values
+ * @param dst Buffer to store the read values (should have at least `qty` elements)
  * @param rspExcep Optional pointer to store exception code from response
  * @return Result code (SUCCESS = transaction succeeded with slave response, check rspExcep for Modbus exceptions)
  * @note For coils: values are 0 or 1. For registers: values are clamped to T's max if sizeof(T) < 2 bytes.
@@ -408,11 +408,11 @@ private:
  */
 template<typename T>
 Client::Result Client::read(uint8_t slaveId, Modbus::RegisterType regType, uint16_t startAddr,
-                            uint16_t qty, T* toBuf, Modbus::ExceptionCode* rspExcep) {
+                            uint16_t qty, T* dst, Modbus::ExceptionCode* rspExcep) {
     static_assert(std::is_arithmetic<T>::value, "Client::read() only works with arithmetic types (bool, int, float, etc.)");
 
     // Validate parameters
-    if (!toBuf || qty == 0) {
+    if (!dst || qty == 0) {
         return Error(ERR_INVALID_FRAME, "invalid buffer or quantity");
     }
 
@@ -463,7 +463,7 @@ Client::Result Client::read(uint8_t slaveId, Modbus::RegisterType regType, uint1
     if (regType == Modbus::COIL || regType == Modbus::DISCRETE_INPUT) {
         // For coils: extract each bit as T (0 or 1)
         for (uint16_t i = 0; i < qty; i++) {
-            toBuf[i] = _helperBuffer.getCoil(i) ? static_cast<T>(1) : static_cast<T>(0);
+            dst[i] = _helperBuffer.getCoil(i) ? static_cast<T>(1) : static_cast<T>(0);
         }
     } else {
         // For registers: copy with clamping if needed
@@ -473,12 +473,12 @@ Client::Result Client::read(uint8_t slaveId, Modbus::RegisterType regType, uint1
             // Clamp if T cannot contain uint16_t
             if constexpr (std::numeric_limits<T>::max() < std::numeric_limits<uint16_t>::max()) {
                 if (val > std::numeric_limits<T>::max()) {
-                    toBuf[i] = std::numeric_limits<T>::max();
+                    dst[i] = std::numeric_limits<T>::max();
                     continue;
                 }
             }
 
-            toBuf[i] = static_cast<T>(val);
+            dst[i] = static_cast<T>(val);
         }
     }
 
@@ -492,7 +492,7 @@ Client::Result Client::read(uint8_t slaveId, Modbus::RegisterType regType, uint1
  * @param regType Register type (COIL or HOLDING_REGISTER only)
  * @param startAddr Starting address
  * @param qty Number of registers/coils to write
- * @param fromBuf Buffer containing values to write (will be clamped to uint16_t range if needed)
+ * @param src Buffer containing values to write (will be clamped to uint16_t range if needed - should have at least `qty` elements)
  * @param rspExcep Optional pointer to store exception code from response
  * @return Result code (SUCCESS = transaction succeeded with slave response, check rspExcep for Modbus exceptions)
  * @note For coils: values > 0 are considered as `true` state. For registers: values are clamped to UINT16_MAX if needed.
@@ -501,11 +501,11 @@ Client::Result Client::read(uint8_t slaveId, Modbus::RegisterType regType, uint1
  */
 template<typename T>
 Client::Result Client::write(uint8_t slaveId, Modbus::RegisterType regType, uint16_t startAddr,
-                             uint16_t qty, const T* fromBuf, Modbus::ExceptionCode* rspExcep) {
+                             uint16_t qty, const T* src, Modbus::ExceptionCode* rspExcep) {
     static_assert(std::is_arithmetic<T>::value, "Client::write() only works with arithmetic types (bool, int, float, etc.)");
 
     // Validate parameters
-    if (!fromBuf || qty == 0) {
+    if (!src || qty == 0) {
         return Error(ERR_INVALID_FRAME, "invalid buffer or quantity");
     }
 
@@ -535,7 +535,7 @@ Client::Result Client::write(uint8_t slaveId, Modbus::RegisterType regType, uint
         // Convert T to uint16_t for coils (0 or 1) - no cast, just check != 0
         uint16_t coilBuf[qty];
         for (uint16_t i = 0; i < qty; i++) {
-            coilBuf[i] = fromBuf[i] != 0 ? 1 : 0;
+            coilBuf[i] = src[i] != 0 ? 1 : 0;
         }
         if (!_helperBuffer.setCoils(coilBuf, qty)) {
             return Error(ERR_INVALID_FRAME, "failed to pack coils");
@@ -550,7 +550,7 @@ Client::Result Client::write(uint8_t slaveId, Modbus::RegisterType regType, uint
         // Convert T to uint16_t for registers with clamping
         uint16_t regBuf[qty];
         for (uint16_t i = 0; i < qty; i++) {
-            T val = fromBuf[i];
+            T val = src[i];
 
             // Clamp negative signed numbers to 0
             if constexpr (std::is_signed<T>::value) {
