@@ -53,7 +53,7 @@ These helpers use the same asynchronous request mechanism described below, but h
 
 ### Usage
 
-The sync mode works exactly as in the former examples:
+If you need more control than the simple helpers provide, you can use the Frame-based API directly:
 
 ```cpp
 Modbus::Frame request = { /* request details */ };
