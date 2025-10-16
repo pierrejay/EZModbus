@@ -134,37 +134,26 @@ void loop() {
  * Example 1: Synchronous read of current temperature and humidity
  */
 void readTemperature_Sync() {
-    Serial.println("Reading current temperature and humidity...");
-    
-    // Create frame to read temperature (input register)
-    Modbus::Frame tempRequest = {
-        .type = Modbus::REQUEST,
-        .fc = Modbus::READ_INPUT_REGISTERS,
-        .slaveId = THERMOSTAT_SLAVE_ID,
-        .regAddress = RegAddr::REG_CURRENT_TEMPERATURE,
-        .regCount = 1,
-        .data = {}
-    };
-    
-    // Send request and wait for response
-    // (tracker not provided -> waits until response received or timeout)
-    Modbus::Frame tempResponse;
-    auto result = client.sendRequest(tempRequest, tempResponse);
-    
-    // Check if the request was successful
+    Serial.println("Reading current temperature...");
+
+    uint16_t tempRaw;
+    Modbus::ExceptionCode excep;
+
+    // Read one input register synchronously using helper method
+    auto result = client.read(THERMOSTAT_SLAVE_ID, Modbus::INPUT_REGISTER,
+                              RegAddr::REG_CURRENT_TEMPERATURE, 1, &tempRaw, &excep);
+
     if (result != ModbusClient::SUCCESS) {
-        Serial.printf("Failed to read temperature: %s\n", ModbusClient::toString(result));
+        Serial.printf("Communication error: %s\n", ModbusClient::toString(result));
         return;
     }
 
-    // Check if the response has an exception
-    if (tempResponse.exceptionCode != Modbus::NULL_EXCEPTION) {
-        Serial.printf("Modbus exception reading temperature: %s\n", Modbus::toString(tempResponse.exceptionCode));
+    if (excep) {
+        Serial.printf("Modbus exception: %s\n", Modbus::toString(excep));
         return;
     }
 
-    // Get the temperature value from the response
-    float tempValue = tempResponse.getRegister(0) / 10.0f;
+    float tempValue = tempRaw / 10.0f;
     Serial.printf("Temperature: %.1f°C\n", tempValue);
 }
 

@@ -170,31 +170,27 @@ static void clientTask(void* arg)
     }
 }
 
-// Read temperature (synchronous)
+// Read temperature (synchronous using helper method)
 static void read_temperature_sync(ModbusClient& client)
 {
     ESP_LOGI(TAG_TASK, "Reading current temperature...");
 
-    ModbusFrame req = {
-        .type       = Modbus::REQUEST,
-        .fc         = Modbus::READ_INPUT_REGISTERS,
-        .slaveId    = THERMOSTAT_SLAVE_ID,
-        .regAddress = RegAddr::REG_CURRENT_TEMPERATURE,
-        .regCount   = 1
-    };
+    uint16_t tempRaw;
+    Modbus::ExceptionCode excep;
 
-    ModbusFrame resp;
-    auto result = client.sendRequest(req, resp);
+    auto result = client.read(THERMOSTAT_SLAVE_ID, Modbus::INPUT_REGISTER,
+                              RegAddr::REG_CURRENT_TEMPERATURE, 1, &tempRaw, &excep);
+
     if (result != ModbusClient::SUCCESS) {
-        ESP_LOGE(TAG_TASK, "Failed to read temperature: %s", ModbusClient::toString(result));
+        ESP_LOGE(TAG_TASK, "Communication error: %s", ModbusClient::toString(result));
         return;
     }
-    if (resp.exceptionCode != Modbus::NULL_EXCEPTION) {
-        ESP_LOGE(TAG_TASK, "Modbus exception: %s", Modbus::toString(resp.exceptionCode));
+    if (excep) {
+        ESP_LOGE(TAG_TASK, "Modbus exception: %s", Modbus::toString(excep));
         return;
     }
 
-    float temp = resp.getRegister(0) / 10.0f;
+    float temp = tempRaw / 10.0f;
     ESP_LOGI(TAG_TASK, "Temperature: %.1f°C", temp);
 }
 
