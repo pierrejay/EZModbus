@@ -97,11 +97,10 @@ void setup() {
     delay(3000);
     
     Serial.println("\n========== All Examples Completed ==========");
-    Serial.println("Waiting 10 seconds before running again...");
-    delay(10000);
     }
 
 void loop() {
+    Serial.println("Idle...");
     vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
@@ -244,8 +243,8 @@ void writeSetpoints_Callback() {
     Serial.println("Writing temperature and humidity setpoints (callback mode)...");
 
     // Two variables that we want to update from the callback
-    static uint32_t totalUpdates = 0;
-    static uint32_t lastUpdateTime = 0;
+    static volatile uint32_t totalUpdates = 0;
+    static volatile uint32_t lastUpdateTime = 0;
 
     // Build frame to write both setpoints (22.5 °C & 45 % RH)
     Modbus::Frame request = {
@@ -259,8 +258,8 @@ void writeSetpoints_Callback() {
 
     // Simple context shared with the callback
     struct CbCtx { 
-        uint32_t& nb = totalUpdates;
-        uint32_t& time = lastUpdateTime;
+        volatile uint32_t& nb = totalUpdates;
+        volatile uint32_t& time = lastUpdateTime;
     } ctx;
 
     // Static, non-capturing lambda -> decays to a function pointer
