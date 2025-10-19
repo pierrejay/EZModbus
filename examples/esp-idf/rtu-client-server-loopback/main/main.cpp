@@ -210,7 +210,7 @@ void clientTask(void* pvParameters) {
         }
 
         // Response received with data: display register value
-        ESP_LOGI(TAG_CLIENT_TASK, "READ response: Register %u = %u", TARGET_REGISTER, receivedValue);
+        ESP_LOGI(TAG_CLIENT_TASK, "READ response: Register %u = %u", TARGET_REGISTER, readVal);
 
         // WRITE using raw Frame API
         Modbus::Frame writeRequest = {
