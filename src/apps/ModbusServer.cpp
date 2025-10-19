@@ -19,7 +19,7 @@ namespace Modbus {
  */
 Server::Server(ModbusInterface::IInterface& interface, IWordStore& store,
                uint8_t slaveId, bool rejectUndefined, uint32_t reqMutexTimeoutMs)
-    : _serverId(slaveId), _rejectUndefined(rejectUndefined), _wordStore(store), _reqMutexTimeoutMs(reqMutexTimeoutMs) {
+    : _serverId(slaveId), _rejectUndefined(rejectUndefined), _reqMutexTimeoutMs(reqMutexTimeoutMs), _wordStore(store) {
     // Always valid, we assume MAX_INTERFACES >= 1 even if defined otherwise
     _interfaces.fill(nullptr);
     _interfaces[0] = &interface;
@@ -37,7 +37,7 @@ Server::Server(ModbusInterface::IInterface& interface, IWordStore& store,
  */
 Server::Server(std::initializer_list<ModbusInterface::IInterface*> interfaces, IWordStore& store,
                uint8_t slaveId, bool rejectUndefined, uint32_t reqMutexTimeoutMs)
-    : _serverId(slaveId), _rejectUndefined(rejectUndefined), _wordStore(store), _reqMutexTimeoutMs(reqMutexTimeoutMs) {
+    : _serverId(slaveId), _rejectUndefined(rejectUndefined), _reqMutexTimeoutMs(reqMutexTimeoutMs), _wordStore(store) {
     _interfaces.fill(nullptr);
     _interfaceCount = 0;
     for (auto* iface : interfaces) {

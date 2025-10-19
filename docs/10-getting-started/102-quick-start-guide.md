@@ -6,7 +6,7 @@ ESP-IDF only differs in not including `Arduino.h` & using the IDF-style struct f
 
 ## Modbus Client
 
-This example shows how to read a single holding register over Modbus RTU. Here, we use a simple "blocking" read (synchronous). Detailed use of asynchronous requests is introduced in the [How To Guides > Modbus Client (Master)](../30-how-to-guides/300-modbus-client-master.md) section of this guide.
+This example shows how to read a single holding register over Modbus RTU using the simple helper method. Detailed use of sync/async requests and Frame-based API is introduced in the [How To Guides > Modbus Client (Master)](../30-how-to-guides/300-modbus-client-master.md) section of this guide.
 
 ```cpp
 #include <Arduino.h>
@@ -21,7 +21,7 @@ ModbusHAL::UART::Config uartConfig = {
     .serial = Serial2,
     .baud = 9600,
     .config = SERIAL_8N1,
-    .rxPin = 15,     
+    .rxPin = 15,
     .txPin = 14,
     .dePin = 5
 }
@@ -42,32 +42,25 @@ void setup() {
 }
 
 void loop() {
-  // Build request frame for holding register
-  Modbus::Frame request = {
-    .type       = Modbus::REQUEST,
-    .fc         = Modbus::READ_HOLDING_REGISTERS,
-    .slaveId    = SLAVE_ID,
-    .regAddress = REG_ADDRESS,
-    .regCount   = 1, // Here we will read 1 register at REG_ADDRESS
-    .data       = {} // No data in the request for reads
-  };
+  uint16_t value;
+  Modbus::ExceptionCode excep;
 
-  // Placeholder for response
-  Modbus::Frame response;
+  // Read one holding register synchronously (waits until response or timeout)
+  auto result = client.read(SLAVE_ID, Modbus::HOLDING_REGISTER, REG_ADDRESS, 1, &value, &excep);
 
-  // Send synchronously (waits until response or timeout)
-  if (client.sendRequest(request, response) == Modbus::Client::SUCCESS) {
-    auto value = response.getRegister(0); // Get the first (and only) register value
-    Serial.printf("Register %d value: %d\n", REG_ADDRESS, value);
+  if (result != Modbus::Client::SUCCESS) {
+    Serial.println("Communication error (timeout, transmission failed, etc.)");
+  } else if (excep) {
+    Serial.printf("Modbus exception: %s\n", Modbus::toString(excep));
   } else {
-    Serial.println("⚠️ Read failed or timed out");
+    Serial.printf("Register %d value: %d\n", REG_ADDRESS, value);
   }
 
   delay(1000);
 }
 ```
 
-That’s it! Your ESP32 now reads a register every second.
+That's it! Your ESP32 now reads a register every second.
 
 ## Modbus Server
 

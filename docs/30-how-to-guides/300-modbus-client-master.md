@@ -2,6 +2,49 @@
 
 The Modbus Client implements the master device role, initiating requests to slave devices and processing their responses. It offers both synchronous ("blocking") and asynchronous (non-blocking) operation modes to suit different application needs.
 
+## Simple read/write helpers (recommended for simple use cases)
+
+The easiest way to read or write Modbus registers and coils is using the `read()` and `write()` synchronous helper methods. These methods handle frame construction automatically and work with simple arrays.
+
+### Basic usage
+
+```cpp
+// Read 5 holding registers starting at address 100
+uint16_t registers[5];
+Modbus::ExceptionCode excep;
+
+auto result = client.read(1, Modbus::HOLDING_REGISTER, 100, 5, registers, &excep);
+
+if (result != Modbus::Client::SUCCESS) {
+    // Communication error (timeout, transmission failed, etc.)
+} else if (excep) {
+    // Modbus exception occurred (e.g., illegal address)
+} else {
+    // Success! Use registers[0], registers[1], etc.
+}
+
+// Write 3 coils starting at address 50
+uint16_t coils[3] = {1, 0, 1};  // or bool coils[3] = {true, false, true};
+Modbus::ExceptionCode excep;
+
+auto result = client.write(1, Modbus::COIL, 50, 3, coils, &excep);
+
+if (result == Modbus::Client::SUCCESS && !excep) {
+    // Write successful!
+}
+```
+
+### Supported buffer types
+
+The standard use is to provide a `uint16_t` buffer for registers & `bool` buffer for coils.
+
+Out of convenience `read()` & `write()` accept all arithmetic types as buffer type. **Rules:** register values clamped to `[0, UINT16_MAX]`, non-zero value = `true` coil state
+
+### Under the hood
+
+These helpers use the same asynchronous request mechanism described below, but handle the frame construction and response parsing automatically. They're perfect for simple use cases where you just want to read/write data without dealing with Modbus frame details.
+
+
 ## Synchronous mode ("blocking")
 
 * Simpler to use - request and response in one function call
@@ -10,7 +53,7 @@ The Modbus Client implements the master device role, initiating requests to slav
 
 ### Usage
 
-The sync mode works exactly as in the former examples:
+If you need more control than the simple helpers provide, you can use the Frame-based API directly:
 
 ```cpp
 Modbus::Frame request = { /* request details */ };

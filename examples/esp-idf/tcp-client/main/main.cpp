@@ -82,10 +82,10 @@ namespace RegAddr {
 }
 
 // Example functions prototypes
-static void read_temperature_sync(ModbusClient& client);
-static void read_alarms_async(ModbusClient& client);
-static void read_setpoints_sync(ModbusClient& client);
-static void write_setpoints_async(ModbusClient& client);
+static void readTemperature_Simple(ModbusClient& client);
+static void readSetpoints_Sync(ModbusClient& client);
+static void readAlarms_Async(ModbusClient& client);
+static void writeSetpoints_Callback(ModbusClient& client);
 static void clientTask(void* arg);
 
 
@@ -152,135 +152,182 @@ extern "C" void app_main(void)
 static void clientTask(void* arg)
 {
     while (true) {
-        ESP_LOGI(TAG_TASK, "========= EZModbus TCP Client Examples =========");
-        read_temperature_sync(client);
+        ESP_LOGI(TAG_TASK, "========== Starting EZModbus Examples ==========");
+
+        // Example 1: Simple read
+        ESP_LOGI(TAG_TASK, "");
+        ESP_LOGI(TAG_TASK, "****** EXAMPLE 1: Simple Read ******");
+        readTemperature_Simple(client);
         vTaskDelay(pdMS_TO_TICKS(3000));
 
-        read_alarms_async(client);
+        // Example 2: Synchronous read using raw frame
+        ESP_LOGI(TAG_TASK, "");
+        ESP_LOGI(TAG_TASK, "****** EXAMPLE 2: Synchronous Read ******");
+        readSetpoints_Sync(client);
         vTaskDelay(pdMS_TO_TICKS(3000));
 
-        read_setpoints_sync(client);
+        // Example 3: Asynchronous read
+        ESP_LOGI(TAG_TASK, "");
+        ESP_LOGI(TAG_TASK, "****** EXAMPLE 3: Asynchronous Read ******");
+        readAlarms_Async(client);
         vTaskDelay(pdMS_TO_TICKS(3000));
 
-        write_setpoints_async(client);
+        // Example 4: Asynchronous write with callback
+        ESP_LOGI(TAG_TASK, "");
+        ESP_LOGI(TAG_TASK, "****** EXAMPLE 4: Asynchronous Write with Callback ******");
+        writeSetpoints_Callback(client);
         vTaskDelay(pdMS_TO_TICKS(3000));
 
-        ESP_LOGI(TAG_TASK, "========= Cycle complete – restarting in 10 s =========");
+        ESP_LOGI(TAG_TASK, "");
+        ESP_LOGI(TAG_TASK, "========== All Examples Completed ==========");
+        ESP_LOGI(TAG_TASK, "Waiting 10 seconds before running again...");
         vTaskDelay(pdMS_TO_TICKS(10000));
     }
 }
 
-// Read temperature (synchronous)
-static void read_temperature_sync(ModbusClient& client)
+/**
+ * Example 1: Synchronous read of current temperature using simple read/write method
+ */
+static void readTemperature_Simple(ModbusClient& client)
 {
     ESP_LOGI(TAG_TASK, "Reading current temperature...");
 
-    ModbusFrame req = {
-        .type       = Modbus::REQUEST,
-        .fc         = Modbus::READ_INPUT_REGISTERS,
-        .slaveId    = THERMOSTAT_SLAVE_ID,
-        .regAddress = RegAddr::REG_CURRENT_TEMPERATURE,
-        .regCount   = 1
-    };
+    uint16_t tempRaw;
+    Modbus::ExceptionCode excep;
 
-    ModbusFrame resp;
-    auto result = client.sendRequest(req, resp);
+    // Read one input register synchronously
+    auto result = client.read(THERMOSTAT_SLAVE_ID, Modbus::INPUT_REGISTER,
+                              RegAddr::REG_CURRENT_TEMPERATURE, 1, &tempRaw, &excep);
+
+    // Check outcome
     if (result != ModbusClient::SUCCESS) {
-        ESP_LOGE(TAG_TASK, "Failed to read temperature: %s", ModbusClient::toString(result));
+        ESP_LOGE(TAG_TASK, "Communication error: %s", ModbusClient::toString(result));
         return;
-    }
-    if (resp.exceptionCode != Modbus::NULL_EXCEPTION) {
-        ESP_LOGE(TAG_TASK, "Modbus exception: %s", Modbus::toString(resp.exceptionCode));
+    } else if (excep) {
+        ESP_LOGE(TAG_TASK, "Modbus exception: %s", Modbus::toString(excep));
         return;
+    } else {
+        float temp = tempRaw / 10.0f;
+        ESP_LOGI(TAG_TASK, "Temperature: %.1f°C", temp);
     }
-
-    float temp = resp.getRegister(0) / 10.0f;
-    ESP_LOGI(TAG_TASK, "Temperature: %.1f°C", temp);
 }
 
-// Read alarms (asynchronous using tracker)
-static void read_alarms_async(ModbusClient& client)
+/**
+ * Example 2: Synchronous read of setpoints using raw frame
+ */
+static void readSetpoints_Sync(ModbusClient& client)
 {
-    ESP_LOGI(TAG_TASK, "Reading alarms (async)...");
+    ESP_LOGI(TAG_TASK, "Reading temperature and humidity setpoints...");
 
-    ModbusFrame req = {
+    // Create frame to read multiple holding registers
+    ModbusFrame request = {
+        .type       = Modbus::REQUEST,
+        .fc         = Modbus::READ_HOLDING_REGISTERS,
+        .slaveId    = THERMOSTAT_SLAVE_ID,
+        .regAddress = RegAddr::REG_TEMPERATURE_SETPOINT,
+        .regCount   = 2,  // Read both temperature and humidity setpoints
+        .data       = {}
+    };
+
+    // Send request and wait for response
+    // (tracker not provided -> waits until response received or timeout)
+    ModbusFrame response;
+    auto result = client.sendRequest(request, response);
+
+    // Check if the request was successful
+    if (result != ModbusClient::SUCCESS) {
+        ESP_LOGE(TAG_TASK, "Failed to start setpoint read: %s", ModbusClient::toString(result));
+        return;
+    }
+
+    // Check if the response has an exception
+    if (response.exceptionCode != Modbus::NULL_EXCEPTION) {
+        ESP_LOGE(TAG_TASK, "Modbus exception reading setpoints: %s", Modbus::toString(response.exceptionCode));
+        return;
+    }
+
+    // Check if the response has the correct number of registers
+    if (response.regCount < 2) {
+        ESP_LOGW(TAG_TASK, "Invalid response format");
+        return;
+    }
+
+    // Get the temperature and humidity setpoints from the response
+    float tempSetpoint = response.getRegister(0) / 10.0f;
+    float humSetpoint = response.getRegister(1) / 10.0f;
+
+    // Print the read setpoints
+    ESP_LOGI(TAG_TASK, "Temperature setpoint: %.1f°C", tempSetpoint);
+    ESP_LOGI(TAG_TASK, "Humidity setpoint: %.1f%%", humSetpoint);
+}
+
+/**
+ * Example 3: Asynchronous read of alarm status
+ */
+static void readAlarms_Async(ModbusClient& client)
+{
+    ESP_LOGI(TAG_TASK, "Reading alarm status...");
+
+    // Create frame to read multiple discrete inputs
+    ModbusFrame request = {
         .type       = Modbus::REQUEST,
         .fc         = Modbus::READ_DISCRETE_INPUTS,
         .slaveId    = THERMOSTAT_SLAVE_ID,
         .regAddress = RegAddr::REG_ALARM_START,
-        .regCount   = 10
+        .regCount   = 10,  // Read 10 alarms
+        .data       = {}
     };
 
-    ModbusFrame resp;
+    // Create frame for response and status tracker
+    ModbusFrame response;
     ModbusClient::Result tracker;
-    auto result = client.sendRequest(req, resp, &tracker);
+
+    // Send request asynchronously
+    // (tracker provided -> returns immediately after transfer started)
+    auto result = client.sendRequest(request, response, &tracker);
+
     if (result != ModbusClient::SUCCESS) {
         ESP_LOGE(TAG_TASK, "Failed to start alarm read: %s", ModbusClient::toString(result));
         return;
     }
 
-    TickType_t start = xTaskGetTickCount();
+    ESP_LOGI(TAG_TASK, "Alarm read request sent. Waiting for completion...");
+
+    // Wait for the request to complete
+    // (usually this is done in another task/function)
     while (tracker == ModbusClient::NODATA) {
-        if ((xTaskGetTickCount() - start) * portTICK_PERIOD_MS > 2000) {
-            ESP_LOGW(TAG_TASK, "Alarm response timeout");
-            return;
-        }
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 
+    // Check if the request was successful
     if (tracker != ModbusClient::SUCCESS) {
-        ESP_LOGE(TAG_TASK, "Alarm read failed: %s", ModbusClient::toString(tracker));
+        ESP_LOGE(TAG_TASK, "Failed to start alarm read: %s", ModbusClient::toString(tracker));
         return;
-    }
-    if (resp.exceptionCode != Modbus::NULL_EXCEPTION) {
-        ESP_LOGE(TAG_TASK, "Modbus exception: %s", Modbus::toString(resp.exceptionCode));
+    } else if (response.exceptionCode != Modbus::NULL_EXCEPTION) {
+        ESP_LOGE(TAG_TASK, "Modbus exception reading alarms: %s", Modbus::toString(response.exceptionCode));
         return;
     }
 
-    for (size_t i = 0; i < resp.regCount; ++i) {
-        ESP_LOGI(TAG_TASK, "Alarm %d: %s", (int)i, resp.getCoil(i) ? "ACTIVE" : "inactive");
+    // Print all alarm states
+    ESP_LOGI(TAG_TASK, "Alarm read complete!");
+    for (size_t i = 0; i < response.regCount; ++i) {
+        ESP_LOGI(TAG_TASK, "Alarm %d: %s", (int)i, response.getCoil(i) ? "ACTIVE" : "inactive");
     }
 }
 
-// Read setpoints (synchronous)
-static void read_setpoints_sync(ModbusClient& client)
+/**
+ * Example 4: Asynchronous write of setpoints using the callback API
+ */
+static void writeSetpoints_Callback(ModbusClient& client)
 {
-    ESP_LOGI(TAG_TASK, "Reading setpoints...");
+    ESP_LOGI(TAG_TASK, "Writing temperature and humidity setpoints (callback mode)...");
 
-    ModbusFrame req = {
-        .type       = Modbus::REQUEST,
-        .fc         = Modbus::READ_HOLDING_REGISTERS,
-        .slaveId    = THERMOSTAT_SLAVE_ID,
-        .regAddress = RegAddr::REG_TEMPERATURE_SETPOINT,
-        .regCount   = 2
-    };
+    // Two variables that we want to update from the callback
+    static volatile uint32_t totalUpdates = 0;
+    static volatile uint32_t lastUpdateTime = 0;
 
-    ModbusFrame resp;
-    auto result = client.sendRequest(req, resp);
-    if (result != ModbusClient::SUCCESS) {
-        ESP_LOGE(TAG_TASK, "Failed to read setpoints: %s", ModbusClient::toString(result));
-        return;
-    }
-    if (resp.exceptionCode != Modbus::NULL_EXCEPTION) {
-        ESP_LOGE(TAG_TASK, "Modbus exception: %s", Modbus::toString(resp.exceptionCode));
-        return;
-    }
-    if (resp.regCount < 2) {
-        ESP_LOGW(TAG_TASK, "Invalid response length");
-        return;
-    }
-
-    float tempSet = resp.getRegister(0) / 10.0f;
-    float humSet  = resp.getRegister(1) / 10.0f;
-    ESP_LOGI(TAG_TASK, "Temp setpoint: %.1f°C | Hum setpoint: %.1f%%", tempSet, humSet);
-}
-
-// Write setpoints (asynchronous using callback)
-static void write_setpoints_async(ModbusClient& client)
-{
-    ESP_LOGI(TAG_TASK, "Writing setpoints (async)...");
-
-    ModbusFrame req = {
+    // Build frame to write both setpoints (22.5 °C & 45 % RH)
+    ModbusFrame request = {
         .type       = Modbus::REQUEST,
         .fc         = Modbus::WRITE_MULTIPLE_REGISTERS,
         .slaveId    = THERMOSTAT_SLAVE_ID,
@@ -289,19 +336,35 @@ static void write_setpoints_async(ModbusClient& client)
         .data       = Modbus::packRegisters({225, 450})
     };
 
-    static uint32_t updates = 0;
-    static auto cb = [](ModbusClient::Result res, const ModbusFrame *resp, void *ctx) {
+    // Simple context shared with the callback
+    struct CbCtx {
+        volatile uint32_t& nb = totalUpdates;
+        volatile uint32_t& time = lastUpdateTime;
+    } ctx;
+
+    // Static, non-capturing lambda -> decays to a function pointer
+    static auto cb = [](ModbusClient::Result res, const Modbus::Frame* resp, void* ctx) {
+        auto* c = static_cast<CbCtx*>(ctx);
+
         if (res == ModbusClient::SUCCESS && resp && resp->exceptionCode == Modbus::NULL_EXCEPTION) {
             ESP_LOGI(TAG_TASK, "Callback: write SUCCESS!");
         } else {
             ESP_LOGE(TAG_TASK, "Callback: write FAILED (%s)", ModbusClient::toString(res));
         }
-        updates++;
-        (void)ctx;
+
+        if (c) {
+            c->nb++;
+            c->time = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        }
     };
 
-    auto result = client.sendRequest(req, cb, nullptr);
+    // Launch request (returns immediately)
+    auto result = client.sendRequest(request, cb, &ctx);
     if (result != ModbusClient::SUCCESS) {
         ESP_LOGE(TAG_TASK, "Failed to queue write request: %s", ModbusClient::toString(result));
+        return;
     }
+
+    // Fire & forget: no need to wait for the request to complete!
+    // The callback will handle everything in the background
 }

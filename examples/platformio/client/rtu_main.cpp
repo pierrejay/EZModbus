@@ -49,10 +49,10 @@ ModbusRTU interface(uart, Modbus::CLIENT);
 ModbusClient client(interface);
 
 // Function prototypes
-void readTemperature_Sync();
-void readAlarms_Async();
+void readTemperature_Simple();
 void readSetpoints_Sync();
-void writeSetpoints_Async();
+void readAlarms_Async();
+void writeSetpoints_Callback();
 
 // ===================================================================================
 // SETUP & LOOP
@@ -77,31 +77,30 @@ void setup() {
     Serial.println("\n========== Starting EZModbus Examples ==========");
     
     // Example 1: Synchronous read
-    Serial.println("\n****** EXAMPLE 1: Synchronous Read ******");
-    readTemperature_Sync();
+    Serial.println("\n****** EXAMPLE 1: Simple Read ******");
+    readTemperature_Simple();
     delay(3000);
     
-    // Example 2: Asynchronous read
-    Serial.println("\n****** EXAMPLE 2: Asynchronous Read ******");
+    // Example 2: Synchronous read using raw frame
+    Serial.println("\n****** EXAMPLE 2: Synchronous Read ******");
+    readSetpoints_Sync();
+    delay(3000);
+
+    // Example 3: Asynchronous read
+    Serial.println("\n****** EXAMPLE 3: Asynchronous Read ******");
     readAlarms_Async();
     delay(3000);
     
-    // Example 3: Synchronous read using raw frame
-    Serial.println("\n****** EXAMPLE 3: Raw Frame Read ******");
-    readSetpoints_Sync();
-    delay(3000);
-    
-    // Example 4: Asynchronous write
-    Serial.println("\n****** EXAMPLE 4: Asynchronous Write ******");
-    writeSetpoints_Async();
+    // Example 4: Asynchronous write with callback
+    Serial.println("\n****** EXAMPLE 4: Asynchronous Write with Callback ******");
+    writeSetpoints_Callback();
     delay(3000);
     
     Serial.println("\n========== All Examples Completed ==========");
-    Serial.println("Waiting 10 seconds before running again...");
-    delay(10000);
     }
 
 void loop() {
+    Serial.println("Idle...");
     vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
@@ -110,108 +109,33 @@ void loop() {
 // ===================================================================================
 
 /**
- * Example 1: Synchronous read of current temperature and humidity
+ * Example 1: Synchronous read of current temperature using simple read/write method
  */
-void readTemperature_Sync() {
+void readTemperature_Simple() {
     Serial.println("Reading current temperature...");
-    
-    // Create frame to read temperature (input register)
-    Modbus::Frame tempRequest = {
-        .type = Modbus::REQUEST,
-        .fc = Modbus::READ_INPUT_REGISTERS,
-        .slaveId = THERMOSTAT_SLAVE_ID,
-        .regAddress = RegAddr::REG_CURRENT_TEMPERATURE,
-        .regCount = 1,
-        .data = {}
-    };
-    
-    // Send request and wait for response 
-    // (tracker not provided -> waits until response received or timeout)
-    Modbus::Frame tempResponse;
-    auto result = client.sendRequest(tempRequest, tempResponse);
 
-    // Check if the request was successful
+    uint16_t tempRaw;
+    Modbus::ExceptionCode excep;
+
+    // Read one input register synchronously
+    auto result = client.read(THERMOSTAT_SLAVE_ID, Modbus::INPUT_REGISTER,
+                              RegAddr::REG_CURRENT_TEMPERATURE, 1, &tempRaw, &excep);
+
+    // Check outcome
     if (result != ModbusClient::SUCCESS) {
-        Serial.printf("Failed to start temperature read: %s\n", ModbusClient::toString(result));
+        Serial.printf("Communication error: %s\n", ModbusClient::toString(result));
         return;
-    }
-
-    // Check if the response has an exception
-    if (tempResponse.exceptionCode != Modbus::NULL_EXCEPTION) {
-        Serial.printf("Modbus exception reading temperature: %s\n", Modbus::toString(tempResponse.exceptionCode));
+    } else if (excep) {
+        Serial.printf("Modbus exception: %s\n", Modbus::toString(excep));
         return;
-    }
-
-    // Get the temperature value from the response
-    float tempValue = tempResponse.getRegister(0) / 10.0f;
-    Serial.printf("Temperature: %.1f°C\n", tempValue);
-}
-
-/**
- * Example 2: Asynchronous read of alarm status
- */
-void readAlarms_Async() {
-    Serial.println("Reading alarm status...");
-    
-    // Create frame to read multiple discrete inputs
-    Modbus::Frame request = {
-        .type = Modbus::REQUEST,
-        .fc = Modbus::READ_DISCRETE_INPUTS,
-        .slaveId = THERMOSTAT_SLAVE_ID,
-        .regAddress = RegAddr::REG_ALARM_START,
-        .regCount = 10,  // Read 10 alarms
-        .data = {}
-    };
-    
-    // Create frame for response and status tracker
-    Modbus::Frame response;
-    ModbusClient::Result tracker;
-
-    // Send request asynchronously
-    // (tracker provided -> returns immediately after transfer started)
-    auto result = client.sendRequest(request, response, &tracker);
-    
-    if (result != ModbusClient::SUCCESS) {
-        Serial.print("Failed to start alarm read: ");
-        Serial.println(ModbusClient::toString(result));
-        return;
-    }
-    
-    Serial.println("Alarm read request sent. Waiting for completion...");
-    
-    // Wait for the request to complete
-    // (usually this is done in another task/function)
-    uint32_t startTime = millis();
-    while (tracker == ModbusClient::NODATA) {
-        // Timeout after 2 seconds (safety, should be already handled by the ModbusClient)
-        if (millis() - startTime > 2000) {
-            Serial.println("Waiting for response timed out");
-            return;
-        }
-        delay(1);
-    }
-
-    // Check if the request was successful
-    if (tracker != ModbusClient::SUCCESS) {
-        Serial.printf("Failed to start alarm read: %s\n", ModbusClient::toString(tracker));
-        return;
-    }
-
-    // Check if the response has an exception
-    if (response.exceptionCode != Modbus::NULL_EXCEPTION) {
-        Serial.printf("Modbus exception reading alarms: %s\n", Modbus::toString(response.exceptionCode));
-        return;
-    }
-
-    // Print all alarm states
-    Serial.println("Alarm read complete!");
-    for (size_t i = 0; i < response.regCount; i++) {
-        Serial.printf("Alarm %d: %s\n", i, response.getCoil(i) ? "ACTIVE" : "inactive");
+    } else {
+        float tempValue = tempRaw / 10.0f;
+        Serial.printf("Temperature: %.1f°C\n", tempValue);
     }
 }
 
 /**
- * Example 3: Synchronous read of setpoints using raw frame
+ * Example 2: Synchronous read of setpoints using raw frame
  */
 void readSetpoints_Sync() {
     Serial.println("Reading temperature and humidity setpoints...");
@@ -259,14 +183,68 @@ void readSetpoints_Sync() {
 }
 
 /**
+ * Example 3: Asynchronous read of alarm status
+ */
+void readAlarms_Async() {
+    Serial.println("Reading alarm status...");
+    
+    // Create frame to read multiple discrete inputs
+    Modbus::Frame request = {
+        .type = Modbus::REQUEST,
+        .fc = Modbus::READ_DISCRETE_INPUTS,
+        .slaveId = THERMOSTAT_SLAVE_ID,
+        .regAddress = RegAddr::REG_ALARM_START,
+        .regCount = 10,  // Read 10 alarms
+        .data = {}
+    };
+    
+    // Create frame for response and status tracker
+    Modbus::Frame response;
+    ModbusClient::Result tracker;
+
+    // Send request asynchronously
+    // (tracker provided -> returns immediately after transfer started)
+    auto result = client.sendRequest(request, response, &tracker);
+    
+    if (result != ModbusClient::SUCCESS) {
+        Serial.print("Failed to start alarm read: ");
+        Serial.println(ModbusClient::toString(result));
+        return;
+    }
+    
+    Serial.println("Alarm read request sent. Waiting for completion...");
+    
+    // Wait for the request to complete
+    // (usually this is done in another task/function)
+    while (tracker == ModbusClient::NODATA) {
+        delay(1);
+    }
+
+    // Check if the request was successful
+    if (tracker != ModbusClient::SUCCESS) {
+        Serial.printf("Failed to start alarm read: %s\n", ModbusClient::toString(tracker));
+        return;
+    } else if (response.exceptionCode != Modbus::NULL_EXCEPTION) {
+        Serial.printf("Modbus exception reading alarms: %s\n", Modbus::toString(response.exceptionCode));
+        return;
+    }
+
+    // Print all alarm states
+    Serial.println("Alarm read complete!");
+    for (size_t i = 0; i < response.regCount; i++) {
+        Serial.printf("Alarm %d: %s\n", i, response.getCoil(i) ? "ACTIVE" : "inactive");
+    }
+}
+
+/**
  * Example 4: Asynchronous write of setpoints using the callback API
  */
-void writeSetpoints_Async() {
+void writeSetpoints_Callback() {
     Serial.println("Writing temperature and humidity setpoints (callback mode)...");
 
     // Two variables that we want to update from the callback
-    static uint32_t totalUpdates = 0;
-    static uint32_t lastUpdateTime = 0;
+    static volatile uint32_t totalUpdates = 0;
+    static volatile uint32_t lastUpdateTime = 0;
 
     // Build frame to write both setpoints (22.5 °C & 45 % RH)
     Modbus::Frame request = {
@@ -280,8 +258,8 @@ void writeSetpoints_Async() {
 
     // Simple context shared with the callback
     struct CbCtx { 
-        uint32_t& nb = totalUpdates;
-        uint32_t& time = lastUpdateTime;
+        volatile uint32_t& nb = totalUpdates;
+        volatile uint32_t& time = lastUpdateTime;
     } ctx;
 
     // Static, non-capturing lambda -> decays to a function pointer

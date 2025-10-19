@@ -178,12 +178,38 @@ namespace Modbus {
         // Initialization
         Result begin();
         bool isReady();
-        
+
+        // =================================================================
+        // SIMPLE HELPER API (recommended for basic sync use cases)
+        // =================================================================
+
+        // Read helper - automatic Frame construction and parsing
+        template<typename T>
+        Result read(uint8_t slaveId,
+                   RegisterType regType,
+                   uint16_t startAddr,
+                   uint16_t qty,
+                   T* dst,
+                   ExceptionCode* rspExcep = nullptr);
+
+        // Write helper - automatic Frame construction
+        template<typename T>
+        Result write(uint8_t slaveId,
+                    RegisterType regType,
+                    uint16_t startAddr,
+                    uint16_t qty,
+                    const T* src,
+                    ExceptionCode* rspExcep = nullptr);
+
+        // =================================================================
+        // FRAME-BASED API (for advanced control)
+        // =================================================================
+
         // Sync (tracker = nullptr) / async (tracker defined)
         Result sendRequest(const Modbus::Frame& request,
                           Modbus::Frame& response,
                           Result* tracker = nullptr);
-        
+
         // Async with callback
         using ResponseCallback = void (*)(Result result,
                                          const Modbus::Frame* response,

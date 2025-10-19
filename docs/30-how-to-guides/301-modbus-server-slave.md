@@ -6,7 +6,7 @@ Read the [Core concepts > Word](../20-core-concepts/203-modbus-word.md) section 
 
 ## Basic workflow
 
-The workflow of the server is simple:&#x20;
+The workflow of the server is simple:
 
 * You define your data model by adding a set of Words to the Server's store
 * When the server receives a request, it will look for registered Words that match the target registers contained in the request, and if the request is valid, individually read/write each Word through the pointer or callbacks (handlers) defined in the Words metadata
@@ -71,7 +71,7 @@ server.begin();
 
 **Thread safety**: Multi-interface servers use an internal mutex to ensure thread-safe access to the Word store: register values and read/write handlers are protected from concurrent access. The "Request Mutex timeout" controls behavior:
 
-- `UINT32_MAX` (default): Blocking wait until mutex is available - requests for all interfaces will be serialized.
+- `UINT32_MAX` (default): Blocking wait until mutex is available - requests for all interfaces will be serialized (mapped to `portMAX_DELAY`)
 - `0`: Try-lock mode - returns `SLAVE_DEVICE_BUSY` exception if mutex is already held
 - In-between: waits for a max amount of time and returns if cannot lock the mutex
 

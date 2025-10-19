@@ -3,6 +3,7 @@
 #include <EZModbus.h>
 #include "test_params.h"
 #include <utils/ModbusLogger.hpp>
+#include "test_helpers.hpp"
 
 // Give some time for the application logs to be printed before asserting
 #ifdef EZMODBUS_DEBUG
@@ -1696,6 +1697,29 @@ void setup() {
     RUN_TEST(test_callback_success);
     RUN_TEST(test_callback_timeout);
     // RUN_TEST(test_concurrent_calls);
+
+    // Helper template tests
+    RUN_TEST(test_helper_read_uint16_holding_registers);
+    RUN_TEST(test_helper_read_uint16_coils);
+    RUN_TEST(test_helper_write_uint16_holding_registers);
+    RUN_TEST(test_helper_write_uint16_coils);
+    RUN_TEST(test_helper_read_uint8_clamp);
+    RUN_TEST(test_helper_read_int8_clamp);
+    RUN_TEST(test_helper_write_uint8);
+    RUN_TEST(test_helper_write_int8_negative_clamp);
+    RUN_TEST(test_helper_write_uint32_clamp);
+    RUN_TEST(test_helper_write_int32_clamp);
+    RUN_TEST(test_helper_write_int32_negative_clamp);
+    RUN_TEST(test_helper_read_bool_coils);
+    RUN_TEST(test_helper_write_bool_coils);
+    RUN_TEST(test_helper_write_bool_registers);
+    RUN_TEST(test_helper_exception_illegal_address);
+    RUN_TEST(test_helper_exception_vs_transport_error);
+    RUN_TEST(test_helper_invalid_regtype);
+    RUN_TEST(test_helper_null_buffer);
+    RUN_TEST(test_helper_qty_zero);
+    RUN_TEST(test_helper_write_readonly_regtype);
+
     UNITY_END();
 }
 

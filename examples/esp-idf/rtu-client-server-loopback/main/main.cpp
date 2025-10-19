@@ -165,6 +165,11 @@ extern "C" void app_main(void)
     }
 }
 
+/**
+ * Client Task: Demonstrates both simple API and Frame-based API
+ * - READ: Uses simple helper method
+ * - WRITE: Uses raw Frame API
+ */
 void clientTask(void* pvParameters) {
     ESP_LOGI(TAG_CLIENT_TASK, "Client Modbus task started.");
     uint16_t valueToWrite = 0;
@@ -177,38 +182,37 @@ void clientTask(void* pvParameters) {
             continue;
         }
 
-        // Prepare the READ request
-        Modbus::Frame readRequest = {
-            .type = Modbus::REQUEST,
-            .fc = Modbus::READ_HOLDING_REGISTERS,
-            .slaveId = SERVER_SLAVE_ID,
-            .regAddress = TARGET_REGISTER,
-            .regCount = 1
-        };
+        // READ using helper method (simple)
+        uint16_t readVal;
+        Modbus::ExceptionCode excep;
 
-         // Create response placeholder & send the request (synchronous method)
-        Modbus::Frame readResponse;
         ESP_LOGI(TAG_CLIENT_TASK, "Sending READ request for register %u...", TARGET_REGISTER);
-        ModbusClient::Result readResult = modbusClient.sendRequest(readRequest, readResponse);
+        ModbusClient::Result readResult = modbusClient.read(
+            SERVER_SLAVE_ID,
+            Modbus::HOLDING_REGISTER,
+            TARGET_REGISTER,
+            1,
+            &readVal,
+            &excep
+        );
 
         // Error sending request: abort
-        if (readResult != ModbusClient::SUCCESS) { 
-            ESP_LOGE(TAG_CLIENT_TASK, "Error on sendRequest (READ): %s", ModbusClient::toString(readResult));
+        if (readResult != ModbusClient::SUCCESS) {
+            ESP_LOGE(TAG_CLIENT_TASK, "Communication error (READ): %s", ModbusClient::toString(readResult));
             continue;
         }
 
         // Response received with Modbus exception: abort
-        if (readResponse.exceptionCode != Modbus::NULL_EXCEPTION) { 
+        if (excep != Modbus::NULL_EXCEPTION) {
             ESP_LOGE(TAG_CLIENT_TASK, "Modbus Exception on READ: %s (0x%02X)",
-                     Modbus::toString(readResponse.exceptionCode), readResponse.exceptionCode);
+                     Modbus::toString(excep), excep);
             continue;
         }
 
         // Response received with data: display register value
-        uint16_t receivedValue = readResponse.getRegister(0);
-        ESP_LOGI(TAG_CLIENT_TASK, "READ response: Register %u = %u", TARGET_REGISTER, receivedValue);
+        ESP_LOGI(TAG_CLIENT_TASK, "READ response: Register %u = %u", TARGET_REGISTER, readVal);
 
-        // Prepare the WRITE request
+        // WRITE using raw Frame API
         Modbus::Frame writeRequest = {
             .type = Modbus::REQUEST,
             .fc = Modbus::WRITE_REGISTER,
@@ -216,7 +220,7 @@ void clientTask(void* pvParameters) {
             .regAddress = TARGET_REGISTER,
             .regCount = 1
         };
-        valueToWrite = receivedValue + 1;
+        valueToWrite = readVal + 1;
         writeRequest.setRegisters({valueToWrite}); // Set Frame data with value to write
 
         // Create response placeholder & send the request (synchronous method)
