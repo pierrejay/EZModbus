@@ -38,7 +38,7 @@ if (result == Modbus::Client::SUCCESS && !excep) {
 
 The standard use is to provide a `uint16_t` buffer for registers & `bool` buffer for coils.
 
-Out of convenience `read()` & `write()` accept all arithmetic types as buffer type. Rules: register values clamped to `[0, UINT16_MAX]`, non-zero value = `true` coil state
+Out of convenience `read()` & `write()` accept all arithmetic types as buffer type. **Rules:** register values clamped to `[0, UINT16_MAX]`, non-zero value = `true` coil state
 
 ### Under the hood
 

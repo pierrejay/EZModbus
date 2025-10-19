@@ -1,6 +1,10 @@
 # Modbus::Frame
 
-At the heart of EZModbus is the `Modbus::Frame` structure - a representation of a Modbus message that serves as the common language between all components of the library. It is used internally by all the application components, but you will have to manipulate it directly to be able to send and receive Modbus messages using the `Client`.
+At the heart of EZModbus is the `Modbus::Frame` structure - a representation of a Modbus message that serves as the common language between all components of the library. It is used internally by all the application components, but you may have to manipulate it directly to be able to send and receive Modbus messages using the `Client`.
+
+!!! note
+    If you're just getting started or need to perform basic read/write operations, **you don't need to work with Frame directly**. The `ModbusClient` provides simple helper methods (`read()` and `write()`) that handle Frame construction and parsing automatically. See the [Client guide](../30-how-to-guides/300-modbus-client-master.md#simple-readwrite-helpers-recommended-for-simple-use-cases) for details.
+    Use the Frame-based API when you need more control over the Modbus protocol or want to work with asynchronous operations.
 
 ```cpp
 // The core data structure you'll work with
