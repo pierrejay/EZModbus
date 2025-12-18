@@ -370,7 +370,7 @@ private:
     PendingRequest _pendingRequest;
     Modbus::Frame _responseBuffer;
     bool _isInitialized = false;
-    StaticEventGroup_t _waiterEventGroupBuf; // Event group buffer for synchronous wait (sync mode)
+    StaticEventGroup_t _waiterEventGroupBuf{}; // Event group buffer for synchronous wait (sync mode)
 
     // Helper methods members
     Modbus::Frame _helperBuffer;             // Reusable buffer for helper methods

@@ -41,8 +41,8 @@ public:
 
     /* @brief Dedicated struct to measure the round trip time of a transaction (inbound or outbound) */
     struct RoundTripTimer {
-    uint64_t startUs = 0;
-    uint64_t storeUs = 0;
+        uint64_t startUs = 0;
+        uint64_t storeUs = 0;
 
     #ifdef EZMODBUS_DEBUG
         inline void store() {
@@ -96,7 +96,7 @@ private:
     // Serial communication
     ModbusHAL::UART& _uartHAL;
     uint64_t _silenceTimeUs = 0;   // Sets the silence time to observe between consecutive frames (RX + TX)
-    uint64_t _lastTxTimeUs; // Last time a frame was sent (used to enforce the silence time for TX)
+    uint64_t _lastTxTimeUs = 0; // Last time a frame was sent (used to enforce the silence time for TX)
     bool _isInitialized = false;
 
     // Data buffers & protection
@@ -120,7 +120,7 @@ private:
     QueueSetHandle_t _eventQueueSet = nullptr;
 
     // Miscellaneous
-    RoundTripTimer _rtt;
+    RoundTripTimer _rtt{};
 
     // ===================================================================================
     // PRIVATE METHODS
