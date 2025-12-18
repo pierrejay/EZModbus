@@ -166,7 +166,7 @@ private:
     int _pin_tx;
     QueueHandle_t _internal_event_queue_handle = nullptr;
     bool _is_driver_installed = false;
-    uart_config_t _current_hw_config;
+    uart_config_t _current_hw_config{};
 
 // ===================================================================================
 // PRIVATE METHODS
