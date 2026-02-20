@@ -560,24 +560,26 @@ void UART::silenceTimerCallback(TimerHandle_t xTimer) {
     UART* instance = static_cast<UART*>(pvTimerGetTimerID(xTimer));
     if (!instance) return;
     
-    // Create timeout event if we have pending bytes
-    if (instance->_rx_bytes_pending > 0) {
-        Event evt = { 
-            UART_DATA, 
-            instance->_rx_bytes_pending,  // All pending bytes
-            true                          // timeout_flag = true (end of frame)
+    // Atomically read+reset pending byte count (ISR can increment concurrently)
+    taskENTER_CRITICAL();
+    uint16_t pending = instance->_rx_bytes_pending;
+    instance->_rx_bytes_pending = 0;
+    taskEXIT_CRITICAL();
+
+    if (pending > 0) {
+        Event evt = {
+            UART_DATA,
+            pending,  // All pending bytes
+            true      // timeout_flag = true (end of frame)
         };
-        
+
         // Send event to queue (FreeRTOS timer callback runs in timer service task context)
         if (xQueueSend(instance->_event_queue, &evt, 0) == pdTRUE) {
-            Modbus::Debug::LOG_MSGF("Silence timeout: %u bytes processed (frame complete)", 
+            Modbus::Debug::LOG_MSGF("Silence timeout: %u bytes processed (frame complete)",
                                    (unsigned int)evt.size);
         } else {
             Modbus::Debug::LOG_MSG("Warning: Failed to send silence timeout event (queue full)");
         }
-        
-        // Reset pending bytes counter
-        instance->_rx_bytes_pending = 0;
     }
 }
 
