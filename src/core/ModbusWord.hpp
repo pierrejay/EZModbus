@@ -106,7 +106,8 @@ class StaticWordStore : public IWordStore {
 public:
     StaticWordStore() {
         static_assert(N > 0, "StaticWordStore capacity must be > 0");
-        clearAll();
+        // _count=0 and _needsSorting=true by default (bulk mode).
+        // No clearAll() call — matches DynamicWordStore behavior.
     }
 
 protected:
@@ -127,7 +128,7 @@ protected:
 
     void clearAll() override {
         _count = 0;
-        _isSorted = true; // Empty store is trivially sorted
+        _needsSorting = false; // Empty store is trivially sorted
     }
 
     Word* findExact(Modbus::RegisterType type, uint16_t address) override {
@@ -191,9 +192,9 @@ protected:
 
     bool insert(const Word& word) override {
         if (_count >= N) return false; // capacity exceeded
-        if (_isSorted && overlaps(word)) return false; // Skip expensive overlap scan in bulk mode
+        if (!_needsSorting && overlaps(word)) return false; // Reject overlaps when sorted
 
-        if (_isSorted) {
+        if (!_needsSorting) {
             // maintain sorted order by startAddr
             auto pos = std::lower_bound(_words.begin(), _words.begin() + _count, word.startAddr,
                                         [](const Word& w, uint16_t addr){ return w.startAddr < addr; });
@@ -203,6 +204,7 @@ protected:
             }
             *pos = word;
         } else {
+            // Bulk mode: fast append, defer sort+overlap check to sortAll()
             _words[_count] = word;
         }
         ++_count;
@@ -221,17 +223,17 @@ protected:
     size_t totalCapacity() const override { return N; }
 
     void sortAll() override {
-        if (_isSorted) return;
+        if (!_needsSorting) return;
         std::sort(_words.begin(), _words.begin() + _count, [](const Word& a, const Word& b){
             return a.startAddr < b.startAddr;
         });
-        _isSorted = true;
+        _needsSorting = false;
     }
 
 private:
     std::array<Word, N> _words{};
     size_t _count = 0;
-    bool _isSorted = false;
+    bool _needsSorting = true; // Start in bulk mode (matches DynamicWordStore)
 };
 
 /**
