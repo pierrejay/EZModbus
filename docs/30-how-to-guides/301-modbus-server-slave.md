@@ -84,6 +84,19 @@ The default behaviour ensures 100% request hit rate but may be prone to deadlock
 
 **Interface limits**: The server enforces a maximum number of interfaces defined at compile time (2 by default). This limit can be adjusted using the `EZMODBUS_SERVER_MAX_INTERFACES` build flag if more interfaces are needed.
 
+### Changing the Slave ID at runtime
+
+The server's Slave ID can be changed at runtime using `setSlaveId()`. This is thread-safe: the method acquires the server mutex, so it will block until any in-flight request completes before updating the ID.
+
+```cpp
+server.setSlaveId(newId);
+```
+
+This is useful for devices that allow their Modbus address to be reconfigured over the bus (e.g. via a dedicated holding register). The getter `getSlaveId()` is also available.
+
+!!! note
+    If the address change is triggered by a Modbus write handler, avoid calling `setSlaveId()` directly inside the handler - the server mutex is already held during request processing, so this would deadlock. Instead, defer the change (e.g. set a flag and apply it in your main loop after the response has been sent).
+
 ### Words storage & memory management
 
 Words are stored on the server inside a `Modbus::WordStore` container which can store an arbitrary number of `Word` objects regardless of their underlying `RegisterType`. This container is created in user code space (to keep in control of memory allocation) but directly managed by the Server.

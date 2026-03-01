@@ -140,6 +140,17 @@ Server::Result Server::clearAllWords() {
     return Success();
 }
 
+/* @brief Change the server's Slave/Unit ID at runtime
+ * @param id New Slave/Unit ID
+ * @note Thread-safe: acquires the server mutex to prevent concurrent access
+ *       with request processing. Blocks until any in-flight request completes.
+ *       -> Do NOT call inside a handler or it will deadlock!
+ */
+void Server::setSlaveId(uint8_t id) {
+    Lock guard(_serverMutex);
+    _serverId = id;
+}
+
 /* @brief Check if the server is busy
  * @return true if the server is busy (adding a word or processing a request)
  */
