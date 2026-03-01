@@ -113,6 +113,34 @@ The HAL RTU object is then passed to the Modbus interface:
 ModbusInterface::RTU rtu(uart, Modbus::CLIENT);
 ```
 
+#### Runtime reconfiguration
+
+The UART driver supports live reconfiguration of serial parameters (baud rate, data bits, parity, stop bits) at any time - both before and after `begin()`. Start with a sensible default (e.g. `9600 8N1`) and call the setters when you need to change:
+
+```cpp
+// Change everything at once using a CONFIG_xxx constant
+uart.setConfig(ModbusHAL::UART::CONFIG_8E1);
+
+// Or change individual parameters
+uart.setBaudrate(19200);
+uart.setParity(UART_PARITY_EVEN);
+uart.setStopBits(UART_STOP_BITS_2);
+uart.setDataBits(UART_DATA_7_BITS);
+
+// Or build a custom config from individual values
+uart.setConfig(ModbusHAL::UART::makeConfig(UART_DATA_8_BITS, UART_PARITY_ODD, UART_STOP_BITS_1));
+```
+
+If the driver is already running, changes are applied immediately via `uart_param_config()` without requiring a restart. If called before `begin()`, the values are stored and applied at startup.
+
+Getters are also available:
+
+```cpp
+uint32_t baud   = uart.getBaudrate();  // Current baud rate
+uint32_t config = uart.getConfig();    // Current packed config flags
+```
+
+Since `getConfig()` and `getBaudrate()` return plain integers, they can be saved to non-volatile storage (NVS, EEPROM, Flash) and restored on boot - useful for devices that allow serial settings to be changed at runtime (e.g. over Modbus).
 
 
 ## ModbusHAL::TCP - TCP socket driver
