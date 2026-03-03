@@ -154,6 +154,9 @@ public:
     
     bool isBusy();
 
+    uint8_t getSlaveId() const { return _serverId; }
+    void setSlaveId(uint8_t id);
+
 private:
     // ===================================================================================
     // PRIVATE TYPES

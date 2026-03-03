@@ -236,6 +236,53 @@ esp_err_t UART::setBaudrate(uint32_t baud_rate) {
     return err;
 }
 
+/* @brief Set the serial config (data bits, parity, stop bits) of the UART driver
+ * @param config_flags: Packed config flags (use CONFIG_xxx constants, e.g. CONFIG_8N1)
+ * @return ESP_OK on success
+ * @note If the driver is already running, the new config is applied immediately
+ *       via uart_param_config() without requiring a restart.
+ */
+esp_err_t UART::setConfig(uint32_t config_flags) {
+    _config_flags = config_flags;
+    decode_config_flags(_config_flags, _current_hw_config.data_bits, _current_hw_config.parity, _current_hw_config.stop_bits);
+
+    if (!_is_driver_installed) {
+        Modbus::Debug::LOG_MSGF("Info: Port %d config set to 0x%X (will be applied at begin())", _uart_num, (unsigned int)_config_flags);
+        return ESP_OK;
+    }
+    esp_err_t err = uart_param_config(_uart_num, &_current_hw_config);
+    if (err == ESP_OK) {
+        Modbus::Debug::LOG_MSGF("Info: Port %d config reconfigured to 0x%X", _uart_num, (unsigned int)_config_flags);
+    } else {
+        Modbus::Debug::LOG_MSGF("Error: Port %d failed to reconfigure config to 0x%X: %s", _uart_num, (unsigned int)config_flags, esp_err_to_name(err));
+    }
+    return err;
+}
+
+/* @brief Set only the parity of the UART driver
+ * @param parity: The parity to set (UART_PARITY_DISABLE, UART_PARITY_EVEN, UART_PARITY_ODD)
+ * @return ESP_OK on success
+ */
+esp_err_t UART::setParity(uart_parity_t parity) {
+    return setConfig(makeConfig(_current_hw_config.data_bits, parity, _current_hw_config.stop_bits));
+}
+
+/* @brief Set only the stop bits of the UART driver
+ * @param stop_bits: The stop bits to set (UART_STOP_BITS_1, UART_STOP_BITS_2)
+ * @return ESP_OK on success
+ */
+esp_err_t UART::setStopBits(uart_stop_bits_t stop_bits) {
+    return setConfig(makeConfig(_current_hw_config.data_bits, _current_hw_config.parity, stop_bits));
+}
+
+/* @brief Set only the data bits of the UART driver
+ * @param data_bits: The data bits to set (UART_DATA_5_BITS .. UART_DATA_8_BITS)
+ * @return ESP_OK on success
+ */
+esp_err_t UART::setDataBits(uart_word_length_t data_bits) {
+    return setConfig(makeConfig(data_bits, _current_hw_config.parity, _current_hw_config.stop_bits));
+}
+
 /* @brief Wait for the physical transmission to complete
  * @param timeout_ticks: The number of ticks to wait for the transmission to complete
  * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is not installed

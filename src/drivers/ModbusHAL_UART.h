@@ -138,7 +138,17 @@ public:
 
     // UART config methods
     uint32_t getBaudrate() const { return _baud_rate; }
-    esp_err_t setBaudrate(uint32_t baud_rate); 
+    esp_err_t setBaudrate(uint32_t baud_rate);
+    uint32_t getConfig() const { return _config_flags; }
+    esp_err_t setConfig(uint32_t config_flags);
+    esp_err_t setParity(uart_parity_t parity);
+    esp_err_t setStopBits(uart_stop_bits_t stop_bits);
+    esp_err_t setDataBits(uart_word_length_t data_bits);
+
+    // Helper to build config flags from individual parameters
+    static constexpr uint32_t makeConfig(uart_word_length_t data, uart_parity_t parity, uart_stop_bits_t stop) {
+        return static_cast<uint32_t>(data) | (static_cast<uint32_t>(parity) << 8) | (static_cast<uint32_t>(stop) << 16);
+    }
     uart_port_t getPort() const { return _uart_num; }
     QueueHandle_t getRegisteredEventQueue() const { return _internal_event_queue_handle; } // Renommé pour clarté
 

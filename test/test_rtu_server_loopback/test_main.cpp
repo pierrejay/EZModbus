@@ -1857,6 +1857,46 @@ void test_gap_handling_comprehensive() {
 }
 
 
+// ===================================================================================
+// RUNTIME RECONFIGURATION TESTS
+// ===================================================================================
+
+void test_runtime_set_slave_id() {
+    Modbus::Logger::logln("\nTEST_RUNTIME_SET_SLAVE_ID");
+
+    // Verify initial Slave ID
+    TEST_ASSERT_EQUAL(1, server.getSlaveId());
+
+    // Add a holding register with a known value
+    DummyWord1Reg hr(Modbus::HOLDING_REGISTER, 500);
+    hr.value = 0xBEEF;
+    do_test_add_word(server, hr.word, true, "Add HR@500 for slaveId test");
+
+    // 1) Read at original Slave ID 1 -> should succeed
+    int val = testClient.holdingRegisterRead(1, 500);
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(0xBEEF, val, "Read at original SlaveID=1 should succeed");
+
+    // 2) Change Slave ID to 42
+    server.setSlaveId(42);
+    TEST_ASSERT_EQUAL(42, server.getSlaveId());
+    vTaskDelay(pdMS_TO_TICKS(50)); // Let the bus settle
+
+    // 3) Read at old Slave ID 1 -> should timeout (no response)
+    val = testClient.holdingRegisterRead(1, 500);
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(-1, val, "Read at old SlaveID=1 should fail (no response)");
+
+    // 4) Read at new Slave ID 42 -> should succeed
+    val = testClient.holdingRegisterRead(42, 500);
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(0xBEEF, val, "Read at new SlaveID=42 should succeed");
+
+    // 5) Restore original Slave ID for subsequent tests
+    server.setSlaveId(1);
+    TEST_ASSERT_EQUAL(1, server.getSlaveId());
+}
+
 void setup() {
     // Debug port
     Serial.setTxBufferSize(2048);
@@ -1952,7 +1992,10 @@ void setup() {
     
     // Gap handling tests (rejectUndefined = false)
     RUN_TEST(test_gap_handling_comprehensive);
-    
+
+    // Runtime reconfiguration tests
+    RUN_TEST(test_runtime_set_slave_id);
+
     // Migration test - COMMENTED OUT (Register API removed)
     // RUN_TEST(test_register_to_word_migration);
 

@@ -1621,12 +1621,104 @@ void test_callback_timeout() {
     vTaskDelay(pdMS_TO_TICKS(100));
 }
 
+// ===================================================================================
+// RUNTIME UART RECONFIGURATION TESTS
+// ===================================================================================
+
+void test_runtime_uart_reconfig() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_RUNTIME_UART_RECONFIG: CHANGE BAUDRATE + SERIAL CONFIG AT RUNTIME");
+
+    // Save original config
+    const uint32_t origBaud = ezm_uart.getBaudrate();
+    const uint32_t origConfig = ezm_uart.getConfig();
+
+    // 1) Sanity check: read at current config -> should work
+    {
+        Modbus::Frame req = {
+            .type = Modbus::REQUEST,
+            .fc = Modbus::READ_HOLDING_REGISTERS,
+            .slaveId = TEST_SLAVE_ID,
+            .regAddress = READ_HOLDING_ADDR,
+            .regCount = 1,
+            .data = {},
+            .exceptionCode = Modbus::NULL_EXCEPTION
+        };
+        Modbus::Frame resp;
+        auto res = client.sendRequest(req, resp, nullptr);  // nullptr = synchronous
+        TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, res, "Baseline read before reconfig should succeed");
+        TEST_ASSERT_EQUAL_MESSAGE(MBT_INIT_HOLDING_REGISTER_VALUE(READ_HOLDING_ADDR), resp.getRegister(0),
+            "Baseline read value mismatch");
+    }
+
+    // 2) Reconfigure BOTH sides to 19200 8E1
+    const uint32_t newBaud = 19200;
+    const uint32_t newConfig = ModbusHAL::UART::CONFIG_8E1;
+
+    ezm_uart.setBaudrate(newBaud);
+    ezm_uart.setConfig(newConfig);
+    mbt_uart.setBaudrate(newBaud);
+    mbt_uart.setConfig(newConfig);
+    vTaskDelay(pdMS_TO_TICKS(50)); // Let hardware settle
+
+    // Flush stale data from both sides
+    ezm_uart.flush_input();
+    mbt_uart.flush_input();
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    // 3) Read again -> should succeed at new config
+    {
+        Modbus::Frame req = {
+            .type = Modbus::REQUEST,
+            .fc = Modbus::READ_HOLDING_REGISTERS,
+            .slaveId = TEST_SLAVE_ID,
+            .regAddress = READ_HOLDING_ADDR,
+            .regCount = 1,
+            .data = {},
+            .exceptionCode = Modbus::NULL_EXCEPTION
+        };
+        Modbus::Frame resp;
+        auto res = client.sendRequest(req, resp, nullptr);
+        TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, res, "Read after reconfig to 19200 8E1 should succeed");
+        TEST_ASSERT_EQUAL_MESSAGE(MBT_INIT_HOLDING_REGISTER_VALUE(READ_HOLDING_ADDR), resp.getRegister(0),
+            "Read value after reconfig mismatch");
+    }
+
+    // 4) Restore original config
+    ezm_uart.setBaudrate(origBaud);
+    ezm_uart.setConfig(origConfig);
+    mbt_uart.setBaudrate(origBaud);
+    mbt_uart.setConfig(origConfig);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    ezm_uart.flush_input();
+    mbt_uart.flush_input();
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    // 5) Verify restored config works
+    {
+        Modbus::Frame req = {
+            .type = Modbus::REQUEST,
+            .fc = Modbus::READ_HOLDING_REGISTERS,
+            .slaveId = TEST_SLAVE_ID,
+            .regAddress = READ_HOLDING_ADDR,
+            .regCount = 1,
+            .data = {},
+            .exceptionCode = Modbus::NULL_EXCEPTION
+        };
+        Modbus::Frame resp;
+        auto res = client.sendRequest(req, resp, nullptr);
+        TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, res, "Read after restoring original config should succeed");
+        TEST_ASSERT_EQUAL_MESSAGE(MBT_INIT_HOLDING_REGISTER_VALUE(READ_HOLDING_ADDR), resp.getRegister(0),
+            "Read value after restore mismatch");
+    }
+}
+
 void setup() {
     // Debug port
     Serial.setTxBufferSize(2048);
     Serial.setRxBufferSize(2048);
     Serial.begin(115200);
-    
+
     // Initialize UART HAL for client
     Modbus::Logger::logln("[setup] Initializing client UART HAL...");
     esp_err_t uart_init_res = ezm_uart.begin();
@@ -1719,6 +1811,9 @@ void setup() {
     RUN_TEST(test_helper_null_buffer);
     RUN_TEST(test_helper_qty_zero);
     RUN_TEST(test_helper_write_readonly_regtype);
+
+    // Runtime reconfiguration tests
+    RUN_TEST(test_runtime_uart_reconfig);
 
     UNITY_END();
 }
