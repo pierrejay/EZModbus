@@ -2106,6 +2106,10 @@ void setup() {
 }
 
 void loop() {
+    // Reopen Serial port after Unity closes it
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    Serial.begin();
+    
     // Nothing to do here
     Serial.println("Idling...");
     vTaskDelay(pdMS_TO_TICKS(1000));

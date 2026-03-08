@@ -177,11 +177,16 @@ private:
     QueueHandle_t _internal_event_queue_handle = nullptr;
     bool _is_driver_installed = false;
     uart_config_t _current_hw_config{};
+    int8_t _rx_timeout_threshold = -1; // -1 = not set by user; >=0 = last value set via setTimeoutThreshold
+    mutable Mutex _driver_mutex;
 
 // ===================================================================================
 // PRIVATE METHODS
 // ===================================================================================
 
+    esp_err_t applyRuntimeConfig();
+    esp_err_t setRS485ModeUnsafe(bool enable);
+    void restoreRxTimeout();
     static void decode_config_flags(uint32_t flags, uart_word_length_t& data_bits, uart_parity_t& parity, uart_stop_bits_t& stop_bits);
 
     #if defined(ARDUINO_ARCH_ESP32)

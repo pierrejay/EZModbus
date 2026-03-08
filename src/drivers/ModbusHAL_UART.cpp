@@ -86,6 +86,7 @@ UART::~UART() {
  * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is already installed
  */
 esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
+    Lock guard(_driver_mutex);
     if (_is_driver_installed) {
         Modbus::Debug::LOG_MSGF("Warning: Port %d already initialized. Call end() first.", _uart_num);
         return ESP_ERR_INVALID_STATE;
@@ -121,7 +122,7 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
 
     // Configure RS485 mode if RTS/DE pin is specified
     if (_pin_rts_de != GPIO_NUM_NC) {
-        err = setRS485Mode(true);
+        err = setRS485ModeUnsafe(true);
         if (err != ESP_OK) {
             Modbus::Debug::LOG_MSGF("Error: Failed to set RS485 mode for port %d: %s", _uart_num, esp_err_to_name(err));
             uart_driver_delete(_uart_num);
@@ -141,6 +142,7 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
 /* @brief Deinitialize the UART driver
  */
 void UART::end() {
+    Lock guard(_driver_mutex);
     esp_err_t err = uart_driver_delete(_uart_num);
     if (err != ESP_OK) {
         Modbus::Debug::LOG_MSGF("Error: uart_driver_delete failed for port %d: %s", _uart_num, esp_err_to_name(err));
@@ -157,6 +159,7 @@ void UART::end() {
  * @return The number of bytes read, or -1 if there was an error
  */
 int UART::read(uint8_t* buf_ptr, size_t max_len_to_read, TickType_t ticks_to_wait) {
+    Lock guard(_driver_mutex);
     if (!_is_driver_installed || !buf_ptr || max_len_to_read == 0) {
         return -1; // Error convention: -1 for invalid parameters or driver not ready
     }
@@ -171,6 +174,7 @@ int UART::read(uint8_t* buf_ptr, size_t max_len_to_read, TickType_t ticks_to_wai
  * @note Blocks until the physical transmission is complete
  */
 size_t UART::write(const uint8_t* buf, size_t size) {
+    Lock guard(_driver_mutex);
     if (!_is_driver_installed || size == 0) return 0;
     
     int sent_by_driver = uart_write_bytes(_uart_num, (const char*)buf, size);
@@ -201,6 +205,8 @@ size_t UART::write(const uint8_t* buf, size_t size) {
  * @return The number of bytes available
  */
 int UART::available() const {
+    Lock guard(_driver_mutex, 0);
+    if (!guard.isLocked()) return 0;
     if (!_is_driver_installed) return 0;
     size_t len = 0;
     uart_get_buffered_data_len(_uart_num, &len);
@@ -211,6 +217,7 @@ int UART::available() const {
  * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is not installed
  */
 esp_err_t UART::flush_input(){
+    Lock guard(_driver_mutex);
     if (!_is_driver_installed) return ESP_ERR_INVALID_STATE;
     return uart_flush_input(_uart_num);
 }
@@ -220,6 +227,7 @@ esp_err_t UART::flush_input(){
  * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is not installed
  */
 esp_err_t UART::setBaudrate(uint32_t baud_rate) {
+    Lock guard(_driver_mutex);
     _baud_rate = baud_rate; 
     _current_hw_config.baud_rate = baud_rate; 
 
@@ -227,7 +235,7 @@ esp_err_t UART::setBaudrate(uint32_t baud_rate) {
         Modbus::Debug::LOG_MSGF("Info: Port %d baudrate set to %d (will be applied at begin())", _uart_num, (int)_baud_rate);
         return ESP_OK;
     }
-    esp_err_t err = uart_param_config(_uart_num, &_current_hw_config);
+    esp_err_t err = applyRuntimeConfig();
     if (err == ESP_OK) {
         Modbus::Debug::LOG_MSGF("Info: Port %d baudrate reconfigured to %d", _uart_num, (int)_baud_rate);
     } else {
@@ -240,9 +248,10 @@ esp_err_t UART::setBaudrate(uint32_t baud_rate) {
  * @param config_flags: Packed config flags (use CONFIG_xxx constants, e.g. CONFIG_8N1)
  * @return ESP_OK on success
  * @note If the driver is already running, the new config is applied immediately
- *       via uart_param_config() without requiring a restart.
+ *       via targeted IDF setters without requiring a restart.
  */
 esp_err_t UART::setConfig(uint32_t config_flags) {
+    Lock guard(_driver_mutex);
     _config_flags = config_flags;
     decode_config_flags(_config_flags, _current_hw_config.data_bits, _current_hw_config.parity, _current_hw_config.stop_bits);
 
@@ -250,7 +259,7 @@ esp_err_t UART::setConfig(uint32_t config_flags) {
         Modbus::Debug::LOG_MSGF("Info: Port %d config set to 0x%X (will be applied at begin())", _uart_num, (unsigned int)_config_flags);
         return ESP_OK;
     }
-    esp_err_t err = uart_param_config(_uart_num, &_current_hw_config);
+    esp_err_t err = applyRuntimeConfig();
     if (err == ESP_OK) {
         Modbus::Debug::LOG_MSGF("Info: Port %d config reconfigured to 0x%X", _uart_num, (unsigned int)_config_flags);
     } else {
@@ -288,6 +297,7 @@ esp_err_t UART::setDataBits(uart_word_length_t data_bits) {
  * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is not installed
  */
 esp_err_t UART::waitTxComplete(TickType_t timeout_ticks) const {
+    Lock guard(_driver_mutex);
     if (!_is_driver_installed) return ESP_ERR_INVALID_STATE;
     return uart_wait_tx_done(_uart_num, timeout_ticks);
 }
@@ -299,12 +309,8 @@ esp_err_t UART::waitTxComplete(TickType_t timeout_ticks) const {
  * @note This function should only be called after the IDF driver has been installed
  */
 esp_err_t UART::setRS485Mode(bool enable) {
-    if (_pin_rts_de == GPIO_NUM_NC && enable) {
-        return ESP_ERR_INVALID_ARG; // Impossible to enable RS485 mode without DE/RTS pin
-    }
-    // Fall back to UART mode if DE/RTS pin is not available (not a critical error)
-    uart_mode_t mode = enable ? UART_MODE_RS485_HALF_DUPLEX : UART_MODE_UART;
-    return uart_set_mode(_uart_num, mode);
+    Lock guard(_driver_mutex);
+    return setRS485ModeUnsafe(enable);
 }
 
 /* @brief Get the number of bytes available in the UART driver
@@ -312,6 +318,8 @@ esp_err_t UART::setRS485Mode(bool enable) {
  * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is not installed
  */
 esp_err_t UART::getBufferedDataLen(size_t* size) const {
+    Lock guard(_driver_mutex, 0);
+    if (!guard.isLocked()) return ESP_ERR_TIMEOUT;
     if (!_is_driver_installed || !size) return ESP_ERR_INVALID_STATE;
     return uart_get_buffered_data_len(_uart_num, size);
 }
@@ -321,11 +329,16 @@ esp_err_t UART::getBufferedDataLen(size_t* size) const {
  * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is not installed
  */
 esp_err_t UART::setTimeoutThreshold(uint8_t timeout_threshold) {
+    Lock guard(_driver_mutex);
     if (!_is_driver_installed) return ESP_ERR_INVALID_STATE;
     if (timeout_threshold >= MAX_TOUT_THRESH) {
         timeout_threshold = MAX_TOUT_THRESH - 1;
     }
-    return uart_set_rx_timeout(_uart_num, timeout_threshold);
+    esp_err_t err = uart_set_rx_timeout(_uart_num, timeout_threshold);
+    if (err == ESP_OK) {
+        _rx_timeout_threshold = static_cast<int8_t>(timeout_threshold);
+    }
+    return err;
 }
 
 /* @brief Enable pattern detection for the UART driver
@@ -334,6 +347,7 @@ esp_err_t UART::setTimeoutThreshold(uint8_t timeout_threshold) {
  * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is not installed
  */
 esp_err_t UART::enablePatternDetection(char pattern_char, uint8_t pattern_length) {
+    Lock guard(_driver_mutex);
     if (!_is_driver_installed) return ESP_ERR_INVALID_STATE;
     esp_err_t err = uart_enable_pattern_det_baud_intr(_uart_num, pattern_char, pattern_length, 1, 0, 0);
     if (err != ESP_OK) return err;
@@ -344,6 +358,7 @@ esp_err_t UART::enablePatternDetection(char pattern_char, uint8_t pattern_length
  * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is not installed
  */
 esp_err_t UART::disablePatternDetection() {
+    Lock guard(_driver_mutex);
     if (!_is_driver_installed) return ESP_ERR_INVALID_STATE;
     return uart_disable_pattern_det_intr(_uart_num);
 }
@@ -352,8 +367,21 @@ esp_err_t UART::disablePatternDetection() {
  * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is not installed
  */
 esp_err_t UART::flushTxFifo() {
+    Lock guard(_driver_mutex);
     if (!_is_driver_installed) return ESP_ERR_INVALID_STATE;
     return uart_flush(_uart_num);
+}
+
+/* @brief Enable RS485 mode on UART driver
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG on parameter error
+ * @note _driver_mutex must be held to call this function!
+ */
+esp_err_t UART::setRS485ModeUnsafe(bool enable) {
+    if (_pin_rts_de == GPIO_NUM_NC && enable) {
+        return ESP_ERR_INVALID_ARG; // Impossible to enable RS485 mode without DE/RTS pin
+    }
+    uart_mode_t mode = enable ? UART_MODE_RS485_HALF_DUPLEX : UART_MODE_UART;
+    return uart_set_mode(_uart_num, mode);
 }
 
 /* @brief Set the timeout threshold for the UART driver in microseconds
@@ -379,9 +407,47 @@ esp_err_t UART::setTimeoutMicroseconds(uint64_t timeout_us) {
     esp_err_t err = setTimeoutThreshold(threshold);
     if (err == ESP_OK) {
         Modbus::Debug::LOG_MSGF("UART timeout set to: %u us -> %d UART symbols threshold", (uint32_t)timeout_us, threshold);
+    } else {
+        Modbus::Debug::LOG_MSGF("Failed to set UART timeout: %s", esp_err_to_name(err));
     }
-    Modbus::Debug::LOG_MSGF("Failed to set UART timeout: %s", esp_err_to_name(err));
     return err;
+}
+
+esp_err_t UART::applyRuntimeConfig() {
+    if (!_is_driver_installed) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = uart_wait_tx_done(_uart_num, pdMS_TO_TICKS(WRITE_TIMEOUT_MS));
+    if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
+        return err;
+    }
+
+    err = uart_set_baudrate(_uart_num, _current_hw_config.baud_rate);
+    if (err != ESP_OK) return err;
+
+    err = uart_set_word_length(_uart_num, _current_hw_config.data_bits);
+    if (err != ESP_OK) return err;
+
+    err = uart_set_parity(_uart_num, _current_hw_config.parity);
+    if (err != ESP_OK) return err;
+
+    err = uart_set_stop_bits(_uart_num, _current_hw_config.stop_bits);
+    if (err != ESP_OK) return err;
+
+    if (_pin_rts_de != GPIO_NUM_NC) {
+        err = setRS485ModeUnsafe(true);
+        if (err != ESP_OK) return err;
+    }
+
+    restoreRxTimeout();
+    return ESP_OK;
+}
+
+void UART::restoreRxTimeout() {
+    if (_rx_timeout_threshold >= 0 && _is_driver_installed) {
+        uart_set_rx_timeout(_uart_num, static_cast<uint8_t>(_rx_timeout_threshold));
+    }
 }
 
 

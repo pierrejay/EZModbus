@@ -1655,10 +1655,10 @@ void test_runtime_uart_reconfig() {
     const uint32_t newBaud = 19200;
     const uint32_t newConfig = ModbusHAL::UART::CONFIG_8E1;
 
-    ezm_uart.setBaudrate(newBaud);
-    ezm_uart.setConfig(newConfig);
-    mbt_uart.setBaudrate(newBaud);
-    mbt_uart.setConfig(newConfig);
+    TEST_ASSERT_EQUAL(ESP_OK, ezm_uart.setBaudrate(newBaud));
+    TEST_ASSERT_EQUAL(ESP_OK, ezm_uart.setConfig(newConfig));
+    TEST_ASSERT_EQUAL(ESP_OK, mbt_uart.setBaudrate(newBaud));
+    TEST_ASSERT_EQUAL(ESP_OK, mbt_uart.setConfig(newConfig));
     vTaskDelay(pdMS_TO_TICKS(50)); // Let hardware settle
 
     // Flush stale data from both sides
@@ -1685,10 +1685,10 @@ void test_runtime_uart_reconfig() {
     }
 
     // 4) Restore original config
-    ezm_uart.setBaudrate(origBaud);
-    ezm_uart.setConfig(origConfig);
-    mbt_uart.setBaudrate(origBaud);
-    mbt_uart.setConfig(origConfig);
+    TEST_ASSERT_EQUAL(ESP_OK, ezm_uart.setBaudrate(origBaud));
+    TEST_ASSERT_EQUAL(ESP_OK, ezm_uart.setConfig(origConfig));
+    TEST_ASSERT_EQUAL(ESP_OK, mbt_uart.setBaudrate(origBaud));
+    TEST_ASSERT_EQUAL(ESP_OK, mbt_uart.setConfig(origConfig));
     vTaskDelay(pdMS_TO_TICKS(50));
     ezm_uart.flush_input();
     mbt_uart.flush_input();
@@ -1819,6 +1819,10 @@ void setup() {
 }
 
 void loop() {
+    // Reopen Serial port after Unity closes it
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    Serial.begin();
+    
     // Nothing to do here
     Serial.println("Idling...");
     vTaskDelay(pdMS_TO_TICKS(1000));

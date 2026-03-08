@@ -2005,6 +2005,10 @@ void setup() {
 }
 
 void loop() {
+    // Reopen Serial port after Unity closes it
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    Serial.begin();
+    
     Modbus::Logger::logln("Idling in loop()...");
     vTaskDelay(pdMS_TO_TICKS(1000));
 }
