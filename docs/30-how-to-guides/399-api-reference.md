@@ -54,6 +54,19 @@ namespace Modbus {
 namespace ModbusHAL {
     class UART {
     public:
+        // Serial config constants (data bits / parity / stop bits)
+        // Format: CONFIG_<data><parity><stop>
+        //   data:   5, 6, 7, 8
+        //   parity: N (none), E (even), O (odd)
+        //   stop:   1, 2
+        static constexpr uint32_t CONFIG_8N1;   // 8 data, no parity, 1 stop (default)
+        static constexpr uint32_t CONFIG_8E1;   // 8 data, even parity, 1 stop
+        static constexpr uint32_t CONFIG_8O1;   // 8 data, odd parity, 1 stop
+        static constexpr uint32_t CONFIG_8N2;   // 8 data, no parity, 2 stop
+        static constexpr uint32_t CONFIG_8E2;   // 8 data, even parity, 2 stop
+        static constexpr uint32_t CONFIG_8O2;   // 8 data, odd parity, 2 stop
+        // etc.
+
         // Configuration structures
         struct ArduinoConfig {           // Arduino API
             HardwareSerial& serial;      // Serial1, Serial2, etc.
@@ -82,6 +95,21 @@ namespace ModbusHAL {
         // Methods
         esp_err_t begin();               // Initialize UART
         void stop();                     // Stop UART
+
+        // Runtime configuration (can be called before or after begin())
+        uint32_t getBaudrate() const;
+        esp_err_t setBaudrate(uint32_t baud_rate);
+        uint32_t getConfig() const;                    // Packed config flags
+        esp_err_t setConfig(uint32_t config_flags);    // CONFIG_8N1, CONFIG_8E1...
+        esp_err_t setParity(uart_parity_t parity);
+        esp_err_t setStopBits(uart_stop_bits_t stop_bits);
+        esp_err_t setDataBits(uart_word_length_t data_bits);
+
+        // Build config flags from individual parameters
+        static constexpr uint32_t makeConfig(
+            uart_word_length_t data,
+            uart_parity_t parity,
+            uart_stop_bits_t stop);
     };
 }
 ```
@@ -281,6 +309,10 @@ namespace Modbus {
         // Management
         Result clearAllWords();
         Word getWord(RegisterType type, uint16_t startAddr);
+
+        // Runtime configuration
+        uint8_t getSlaveId() const;
+        void setSlaveId(uint8_t id);   // Thread-safe (acquires server mutex)
 
         // =================================================================
         // WORD STORE TYPES
