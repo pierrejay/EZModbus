@@ -15,6 +15,7 @@
 #include "freertos/queue.h"
 
 #ifndef EZMODBUS_TCP_TXN_SAFETY_TIMEOUT // TCP transaction safety timeout (ms)
+    // Must be >= Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS
     #define EZMODBUS_TCP_TXN_SAFETY_TIMEOUT 5000
 #endif
 

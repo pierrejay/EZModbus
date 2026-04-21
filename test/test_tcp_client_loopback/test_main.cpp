@@ -36,6 +36,20 @@ static String clientTargetIpStr(LOOPBACK_IP_STR); // Will be initialized in setu
 ModbusHAL::TCP halForClient(LOOPBACK_IP_STR, MODBUS_PORT);
 ModbusHAL::TCP halForServer(MODBUS_PORT);
 
+// Isolated SERVER-only fixture for the safety-timeout idle-tick regression:
+// a SERVER interface with a silent callback (no Modbus::Server on top), so
+// the transaction can only be cleared by the rxTxTask itself. The client
+// side is a plain POSIX socket (see test body) — we don't use a ModbusHAL
+// CLIENT here because it would tight-loop its rx-event queue when responses
+// are never consumed, and blocking the HAL task deadlocks the test.
+//
+// Port 510 is above the 502..504 range already used by the main fixture and
+// the multi-interface tests (MODBUS_PORT + 1 / +2).
+static constexpr uint16_t SAFETY_TEST_PORT = 510;
+ModbusHAL::TCP halForSafetyServer(SAFETY_TEST_PORT);
+ModbusInterface::TCP safetyServerIf(halForSafetyServer, Modbus::SERVER);
+static std::atomic<uint32_t> safetyServerCbCount{0};
+
 // Primary EZModbus TCP client
 ModbusInterface::TCP ezm(halForClient, Modbus::CLIENT);
 Modbus::Client client(ezm);
@@ -1190,6 +1204,111 @@ void test_timeout_server() {
     Modbus::Logger::logln();
 }
 
+// Regression: when a TCP SERVER holds an in-flight transaction and NO external
+// signal ever reaches the interface (no response generated upstream, no
+// abortCurrentTransaction() from a Client), the rxTxTask MUST still fire the
+// safety-timeout on its own after TCP_TRANSACTION_SAFETY_TIMEOUT_MS.
+//
+// Before the fix: `continue` on `member == nullptr` in rxTxTask skipped the
+// transaction-timeout check → state stuck forever, only cleared by a new
+// event. Exposed by bridge-style topologies where no `Modbus::Client` sits
+// above the interface to propagate a timeout cleanup signal.
+//
+// Probe: count how many times the silent receive-callback fires on an
+// isolated SERVER-only pair (port 510). A second request sent while the
+// first is still in-flight must be rejected as SLAVE_DEVICE_BUSY (no
+// callback). A third request sent AFTER the safety-timeout elapsed must
+// go through, proving the transaction was cleared idle.
+void test_server_safety_timeout_clears_idle() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_SERVER_SAFETY_TIMEOUT_CLEARS_IDLE - rxTxTask idle tick");
+
+    // Reset the callback counter.
+    safetyServerCbCount.store(0);
+
+    // Open a plain POSIX TCP socket to the isolated server. We purposely
+    // avoid ModbusHAL::TCP CLIENT here: that HAL tight-loops its rx-event
+    // queue whenever responses sit unread on the socket (MSG_PEEK never
+    // consumes), and the queue would deadlock the HAL task.
+    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    TEST_ASSERT_TRUE_MESSAGE(sock >= 0, "socket() failed");
+
+    sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(SAFETY_TEST_PORT);
+    inet_aton(LOOPBACK_IP_STR, &addr.sin_addr);
+    int connRes = ::connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    TEST_ASSERT_EQUAL_MESSAGE(0, connRes, "connect() to isolated server failed");
+
+    auto sendReadHr = [sock](uint16_t tid) -> bool {
+        uint8_t buf[12] = {
+            static_cast<uint8_t>(tid >> 8), static_cast<uint8_t>(tid & 0xFF),
+            0x00, 0x00,                     // protocol id
+            0x00, 0x06,                     // length (unit + PDU = 6)
+            0x01,                           // unit id
+            0x03, 0x00, 0x00, 0x00, 0x01    // FC=0x03, addr=0, count=1
+        };
+        ssize_t n = ::send(sock, buf, sizeof(buf), 0);
+        return n == static_cast<ssize_t>(sizeof(buf));
+    };
+
+    // Discard anything the server writes back — busy exceptions, late
+    // responses, etc. We don't care about them, we only probe via the
+    // server-side callback counter.
+    auto drainSocket = [sock]() {
+        uint8_t dump[64];
+        while (::recv(sock, dump, sizeof(dump), MSG_DONTWAIT) > 0) { }
+    };
+
+    // 1) First request — transaction opens, callback fires.
+    Modbus::Logger::logln("  [step 1/4] sending req1 -> expect cb=1");
+    TEST_ASSERT_TRUE_MESSAGE(sendReadHr(1), "first raw send failed");
+    vTaskDelay(pdMS_TO_TICKS(150));
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1, safetyServerCbCount.load(),
+        "first request must reach the silent callback");
+    drainSocket();
+    Modbus::Logger::logf("  [step 1/4] OK (cb=%u)\n", (unsigned)safetyServerCbCount.load());
+
+    // 2) Second request immediately — server already in transaction →
+    //    SLAVE_DEVICE_BUSY reply, callback NOT invoked.
+    Modbus::Logger::logln("  [step 2/4] sending req2 (expect busy, cb stays at 1)");
+    TEST_ASSERT_TRUE_MESSAGE(sendReadHr(2), "second raw send failed");
+    vTaskDelay(pdMS_TO_TICKS(150));
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(1, safetyServerCbCount.load(),
+        "second request must be rejected as busy without callback");
+    drainSocket(); // discard the busy-exception response
+    Modbus::Logger::logf("  [step 2/4] OK (cb=%u, server correctly rejected)\n",
+        (unsigned)safetyServerCbCount.load());
+
+    // 3) Sleep past the safety-timeout with zero activity. Before the fix
+    //    the rxTxTask never ticks the timeout check on idle and the
+    //    transaction remains pinned forever.
+    const uint32_t safetyMs = ModbusInterface::TCP::TCP_TRANSACTION_SAFETY_TIMEOUT_MS;
+    Modbus::Logger::logf("  [step 3/4] idling %u ms (safety=%u + 500) — no activity\n",
+        (unsigned)(safetyMs + 500), (unsigned)safetyMs);
+    vTaskDelay(pdMS_TO_TICKS(safetyMs + 500));
+    drainSocket();
+    Modbus::Logger::logln("  [step 3/4] wake up, checking if txn was cleared idle...");
+
+    // 4) Third request — must go through since the transaction was
+    //    cleared autonomously by the safety-timeout tick.
+    TEST_ASSERT_TRUE_MESSAGE(sendReadHr(3), "third raw send failed");
+    vTaskDelay(pdMS_TO_TICKS(200));
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(2, safetyServerCbCount.load(),
+        "idle safety-timeout failed to clear the stale transaction");
+    drainSocket();
+    Modbus::Logger::logf("  [step 4/4] OK (cb=%u, txn was cleared without any external signal)\n",
+        (unsigned)safetyServerCbCount.load());
+
+    ::close(sock);
+    Modbus::Logger::logln("TEST_SERVER_SAFETY_TIMEOUT_CLEARS_IDLE - OK");
+    Modbus::Logger::logln();
+}
+
 void test_modbus_exceptions() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_MODBUS_EXCEPTIONS - CASE 1: READ EXCEPTION (ILLEGAL DATA ADDRESS)");
@@ -2062,6 +2181,21 @@ void setup() {
     }
     Modbus::Logger::logln("[setup] EZModbus Client initialized");
 
+    // Isolated SERVER on port 510 for the safety-timeout idle-tick regression
+    // test (no Modbus::Server on top — the callback never responds).
+    halForSafetyServer.begin();
+    safetyServerIf.setRcvCallback(
+        [](const Modbus::Frame& /*frame*/, void* /*ctx*/) { safetyServerCbCount++; },
+        nullptr);
+    auto safetyIfRes = safetyServerIf.begin();
+    if (safetyIfRes != ModbusInterface::IInterface::SUCCESS) {
+        Modbus::Logger::logln("[setup] Safety-timeout isolated SERVER interface init failed");
+        while (true) { vTaskDelay(pdMS_TO_TICKS(1000)); }
+    }
+    Modbus::Logger::logf("[setup] Safety-timeout isolated SERVER ready on port %u\n",
+                         (unsigned)SAFETY_TEST_PORT);
+    vTaskDelay(pdMS_TO_TICKS(200));
+
     // Run tests
     UNITY_BEGIN();
     
@@ -2087,6 +2221,7 @@ void setup() {
     
     RUN_TEST(test_timeout_client_interface);
     RUN_TEST(test_timeout_server);
+    RUN_TEST(test_server_safety_timeout_clears_idle);
     RUN_TEST(test_modbus_exceptions);
     RUN_TEST(test_invalid_parameters);
     RUN_TEST(test_broadcast_read_rejected);

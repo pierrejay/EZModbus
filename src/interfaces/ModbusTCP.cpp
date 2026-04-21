@@ -579,39 +579,40 @@ void TCP::rxTxTask(void* tcp) {
         // Select one of the queues (TX or RX) or timeout 100 ms
         QueueSetMemberHandle_t member = xQueueSelectFromSet(self->_eventQueueSet, pdMS_TO_TICKS(RXTX_QUEUE_CHECK_TIMEOUT_MS));
 
-        // Get out of the loop if the task is not initialized, otherwise wait for the next event
-        if (member == nullptr) {
-            if (!self->_isInitialized) { break; }
-            continue;
-        }
+        if (!self->_isInitialized) { break; }
 
-        if (member == self->_txRequestQueue) {
-            // ----------- TX path -----------
-            void* dummy;
-            xQueueReceive(self->_txRequestQueue, &dummy, 0); // clear the signal
+        // On a select() timeout (member == nullptr)
+        // we fall through to the transaction-timeout 
+        // check (emergency cleanup)
+        if (member != nullptr) {
+            if (member == self->_txRequestQueue) {
+                // ----------- TX path -----------
+                void* dummy;
+                xQueueReceive(self->_txRequestQueue, &dummy, 0); // clear the signal
 
-            // Check again if still initialized (could be a cleanup signal)
-            if (!self->_isInitialized) { break; }
+                // Check again if still initialized (could be a cleanup signal)
+                if (!self->_isInitialized) { break; }
 
-            self->handleTxRequest(); // Result is internally traced and task notified
-        } else if (member == self->_rxEventQueue) {
-            // ----------- RX path -----------
-            int sock;
-            if (xQueueReceive(self->_rxEventQueue, &sock, 0) == pdTRUE) {
-                uint16_t rcvTid;
-                Result fetchRes = self->fetchSocketData(sock, self->_rxBuffer, rcvTid);
-                if (fetchRes == SUCCESS) {
-                    ByteBuffer frameView(self->_rxBuffer.data(), self->_rxBuffer.size());
-                    self->processReceivedFrame(frameView, sock);
-                    self->_rxBuffer.clear(); // reset for next iteration
+                self->handleTxRequest(); // Result is internally traced and task notified
+            } else if (member == self->_rxEventQueue) {
+                // ----------- RX path -----------
+                int sock;
+                if (xQueueReceive(self->_rxEventQueue, &sock, 0) == pdTRUE) {
+                    uint16_t rcvTid;
+                    Result fetchRes = self->fetchSocketData(sock, self->_rxBuffer, rcvTid);
+                    if (fetchRes == SUCCESS) {
+                        ByteBuffer frameView(self->_rxBuffer.data(), self->_rxBuffer.size());
+                        self->processReceivedFrame(frameView, sock);
+                        self->_rxBuffer.clear(); // reset for next iteration
+                    }
                 }
-            }
-        } else if (member == self->_txnControlQueue) {
-            void* dummy;
-            if (xQueueReceive(self->_txnControlQueue, &dummy, 0) == pdTRUE) {
-                cleanupTxnFlag = true;
-                // Txn will be closed in default case (timeout) if it exists,
-                // otherwise this request will be ignored
+            } else if (member == self->_txnControlQueue) {
+                void* dummy;
+                if (xQueueReceive(self->_txnControlQueue, &dummy, 0) == pdTRUE) {
+                    cleanupTxnFlag = true;
+                    // Txn will be closed in the transaction-timeout block below
+                    // if it exists, otherwise this request is ignored
+                }
             }
         }
 
