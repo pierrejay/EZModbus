@@ -73,7 +73,7 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
 
 * **`EZMODBUS_RTU_TASK_STACK_SIZE`**
     * Stack size of RTU task (bytes)
-    * Default: 2048, or 4096 if debug enabled
+    * Default: 4096
 
 ### ModbusTCP.h
 

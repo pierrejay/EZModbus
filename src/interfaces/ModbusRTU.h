@@ -14,11 +14,7 @@
 #include "freertos/queue.h"
 
 #ifndef EZMODBUS_RTU_TASK_STACK_SIZE // RTU RX/TX task stack size (bytes)
-    #ifdef EZMODBUS_DEBUG
-        #define EZMODBUS_RTU_TASK_STACK_SIZE 4096
-    #else
-        #define EZMODBUS_RTU_TASK_STACK_SIZE 2048
-    #endif
+    #define EZMODBUS_RTU_TASK_STACK_SIZE 4096
 #endif
 
 
