@@ -1,0 +1,36 @@
+name: CI
+
+# Compile every examples/esp-idf app against the checked-out library sources,
+# across a matrix of ESP-IDF versions and chip targets. Each leg runs inside the
+# official espressif/idf container (IDF + toolchains pre-installed), invoking the
+# same ci/build_examples.sh used locally.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  idf-build:
+    name: ${{ matrix.idf }} / ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        idf: [release-v5.4, release-v5.5]
+        target: [esp32, esp32c6, esp32s3, esp32p4]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build ESP-IDF examples (${{ matrix.target }})
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: ${{ matrix.idf }}
+          target: ${{ matrix.target }}
+          command: bash ci/build_examples.sh ${{ matrix.target }}
