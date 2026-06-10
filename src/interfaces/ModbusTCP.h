@@ -51,7 +51,7 @@ public:
     /* @brief Stores the current transaction context */
     struct TransactionCtx {
         volatile bool active = false;
-        int startMs = 0;
+        uint32_t startMs = 0;
         int socketNum = -1;
         uint16_t tid = 0;
 
