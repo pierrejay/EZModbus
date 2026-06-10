@@ -139,17 +139,16 @@ for target in "${TARGETS[@]}"; do
     [[ -n "${CLEAN:-}" ]] && rm -rf "$dst"
     mkdir -p "$dst"
 
-    # Sync example sources; keep build cache, fetched components, and the injected
-    # components/ override across runs (excluded => not transferred, not deleted).
-    rsync -a --delete \
-        --exclude 'build' \
-        --exclude 'managed_components' \
-        --exclude 'dependencies.lock' \
-        --exclude 'components' \
-        --exclude 'sdkconfig' \
-        --exclude 'sdkconfig.old' \
-        --exclude '.DS_Store' \
-        "$src/" "$dst/"
+    # Refresh example sources while preserving generated artifacts in the work dir
+    # (build cache, fetched components, injected components/ override, sdkconfig).
+    # Portable equivalent of "rsync --delete --exclude ..." using only coreutils,
+    # since the espressif/idf container ships no rsync.
+    find "$dst" -mindepth 1 -maxdepth 1 \
+        ! -name build ! -name managed_components ! -name components \
+        ! -name dependencies.lock ! -name 'sdkconfig*' \
+        -exec rm -rf {} +
+    cp -a "$src/." "$dst/"
+    rm -f "$dst/.DS_Store"
 
     # Inject local library as an overriding project component.
     mkdir -p "$dst/components"
