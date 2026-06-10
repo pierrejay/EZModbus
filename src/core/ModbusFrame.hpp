@@ -363,9 +363,9 @@ inline std::vector<uint16_t> Modbus::Frame::getRegisters() const {
 inline size_t Modbus::Frame::getRegisters(uint16_t* dst, size_t dstLen) const {
     if (regCount == 0 || dst == nullptr || dstLen == 0) return 0;
     
-    size_t count = std::min(regCount, (uint16_t)dstLen);
+    size_t count = std::min((size_t)regCount, dstLen);
     count = std::min(count, FRAME_DATASIZE);
-    
+
     memcpy(dst, data.data(), count * sizeof(uint16_t));
     return count;
 }
@@ -411,7 +411,7 @@ inline std::vector<bool> Modbus::Frame::getCoils() const {
 inline size_t Modbus::Frame::getCoils(bool* dst, size_t dstLen) const {
     if (regCount == 0 || dst == nullptr || dstLen == 0) return 0;
     
-    size_t count = std::min(regCount, (uint16_t)(dstLen));
+    size_t count = std::min((size_t)regCount, dstLen);
     count = std::min(count, (size_t)(FRAME_DATASIZE * 16));
     
     for (size_t i = 0; i < count; i++) {

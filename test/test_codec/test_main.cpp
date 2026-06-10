@@ -1755,12 +1755,55 @@ void test_codec_write_multiple_regcount_validation() {
     }
 }
 
+// ===================================================================================
+// FRAME GETTER DESTINATION-LENGTH HANDLING TESTS
+// ===================================================================================
+
+/* @brief Frame::getRegisters/getCoils(dst, dstLen) must compare dstLen in size_t.
+ * A dstLen >= 65536 must not be truncated to 16 bits (which could spuriously reduce
+ * the returned count, e.g. dstLen == 65536 -> 0).
+ */
+void test_frame_getters_large_dstlen() {
+    using namespace Modbus;
+
+    const size_t hugeDstLen = (size_t)0x10000; // 65536: low 16 bits are 0 (the truncation trap)
+
+    // Registers
+    {
+        Frame f;
+        f.clearData();
+        uint16_t regs[5] = {1, 2, 3, 4, 5};
+        TEST_ASSERT_TRUE_MESSAGE(f.setRegisters(regs, 5), "setRegisters should succeed");
+
+        uint16_t out[5] = {0};
+        size_t n = f.getRegisters(out, hugeDstLen);
+        TEST_ASSERT_EQUAL_MESSAGE(5, n, "getRegisters must return regCount despite huge dstLen");
+        for (int i = 0; i < 5; ++i)
+            TEST_ASSERT_EQUAL_HEX16_MESSAGE(regs[i], out[i], "register value preserved");
+    }
+
+    // Coils
+    {
+        Frame f;
+        f.clearData();
+        bool coils[5] = {true, false, true, true, false};
+        TEST_ASSERT_TRUE_MESSAGE(f.setCoils(coils, 5), "setCoils should succeed");
+
+        bool out[5] = {false};
+        size_t n = f.getCoils(out, hugeDstLen);
+        TEST_ASSERT_EQUAL_MESSAGE(5, n, "getCoils must return regCount despite huge dstLen");
+        for (int i = 0; i < 5; ++i)
+            TEST_ASSERT_EQUAL_MESSAGE(coils[i], out[i], "coil value preserved");
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_codec_rtu);
     RUN_TEST(test_codec_tcp);
     RUN_TEST(test_codec_read_coils_bytecount_overflow);
     RUN_TEST(test_codec_write_multiple_regcount_validation);
+    RUN_TEST(test_frame_getters_large_dstlen);
     RUN_TEST(test_conversion_float_operations);
     RUN_TEST(test_conversion_uint32_operations);
     RUN_TEST(test_conversion_int32_operations);
