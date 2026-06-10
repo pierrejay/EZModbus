@@ -471,11 +471,21 @@ RTU::Result RTU::handleTxRequest() {
         Modbus::Debug::LOG_MSGF("rxTxTask sending raw frame (%u bytes) from port %d", (uint32_t)_txBuffer.size(), (int)_uartHAL.getPort());
         Modbus::Debug::LOG_HEXDUMP(_txBuffer);
 
-        // Wait for the silence time to pass if needed
+        // Wait for the silence time to pass if needed.
+        // The silence is a minimum gap, so over-waiting is harmless. Yield the millisecond-scale
+        // portion to the scheduler (vTaskDelay) instead of busy-waiting it, then re-measure and
+        // busy-wait only the sub-millisecond remainder for precision. Re-measuring guarantees the
+        // minimum silence regardless of tick granularity / vTaskDelay alignment.
         uint64_t lastTxElapsedUs = TIME_US() - _lastTxTimeUs;
         if (lastTxElapsedUs < _silenceTimeUs) {
-            uint32_t delayUs = static_cast<uint32_t>(_silenceTimeUs - lastTxElapsedUs);
-            WAIT_US(delayUs);
+            uint64_t remainingUs = _silenceTimeUs - lastTxElapsedUs;
+            if (remainingUs >= 1000) {
+                WAIT_MS(static_cast<uint32_t>(remainingUs / 1000));
+            }
+            lastTxElapsedUs = TIME_US() - _lastTxTimeUs;
+            if (lastTxElapsedUs < _silenceTimeUs) {
+                WAIT_US(static_cast<uint32_t>(_silenceTimeUs - lastTxElapsedUs));
+            }
         }
 
         // Send the frame & update the last TX time
