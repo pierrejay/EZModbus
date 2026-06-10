@@ -276,7 +276,12 @@ class PDU {
                     if (bytes.size() < 3) return HandleError(pdu, ERR_INVALID_LEN);
                     uint8_t byteCount = bytes[1];
                     if (bytes.size() != byteCount + 2) return HandleError(pdu, ERR_INVALID_LEN);
-                    
+                    // Bound byteCount against the data buffer capacity BEFORE extracting:
+                    // extractCoils() writes 8 bits per byte into pdu.data (FRAME_DATASIZE words = 2000 bits).
+                    // A malicious/garbled response with a valid CRC could otherwise carry byteCount up to 251
+                    // (8*251 = 2008 bits -> word index 125), writing past the 125-word data array.
+                    if ((size_t)byteCount > (Modbus::FRAME_DATASIZE * 16) / 8) return HandleError(pdu, ERR_INVALID_BYTE_COUNT);
+
                     size_t totalCoils = 0;
                     for (uint8_t i = 0; i < byteCount; i++) {
                         size_t coilsExtracted = extractCoils(bytes[2 + i], pdu.data.data(), totalCoils);

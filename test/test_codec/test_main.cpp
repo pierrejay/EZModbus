@@ -1556,10 +1556,101 @@ void test_conversion_mixed_with_raw_api() {
     TEST_ASSERT_FLOAT_WITHIN_MESSAGE(0.1f, 999.0f, floatResult, "Float should be accurate");
 }
 
+// ===================================================================================
+// COIL RESPONSE BYTECOUNT BOUNDS TESTS
+// ===================================================================================
+
+/* @brief A READ_COILS / READ_DISCRETE_INPUTS response with an oversized byteCount
+ * (valid CRC / valid MBAP length) must be rejected, NOT decoded — otherwise
+ * extractCoils() writes past the 125-word Frame::data array (out-of-bounds write).
+ */
+void test_codec_read_coils_bytecount_overflow() {
+    using namespace Modbus;
+    using namespace ModbusCodec;
+
+    // Largest byteCount the data buffer can hold: FRAME_DATASIZE words * 16 bits / 8 = 250 bytes (2000 coils)
+    constexpr uint8_t MAX_COIL_BYTES = (uint8_t)((FRAME_DATASIZE * 16) / 8);
+
+    // ---- RTU: forged READ_COILS response, byteCount = 251 (overflow), valid CRC ----
+    {
+        uint8_t _raw[256];
+        ByteBuffer raw(_raw, sizeof(_raw));
+        raw.push_back(0x01);                       // slaveId
+        raw.push_back((uint8_t)READ_COILS);        // fc = 0x01
+        raw.push_back(MAX_COIL_BYTES + 1);         // malicious byteCount = 251
+        for (int i = 0; i < MAX_COIL_BYTES + 1; ++i) raw.push_back(0xFF);
+        ModbusCodec::RTU::appendCRC(raw);          // valid CRC over the forged frame
+        TEST_ASSERT_EQUAL_MESSAGE(256, raw.size(), "forged RTU frame should be exactly 256 bytes");
+
+        Frame D;
+        auto r = ModbusCodec::RTU::decode(raw, D, RESPONSE);
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, r,
+            "RTU: oversized READ_COILS byteCount must be rejected (no OOB write)");
+    }
+
+    // ---- RTU: same path for READ_DISCRETE_INPUTS ----
+    {
+        uint8_t _raw[256];
+        ByteBuffer raw(_raw, sizeof(_raw));
+        raw.push_back(0x01);
+        raw.push_back((uint8_t)READ_DISCRETE_INPUTS); // fc = 0x02
+        raw.push_back(MAX_COIL_BYTES + 1);
+        for (int i = 0; i < MAX_COIL_BYTES + 1; ++i) raw.push_back(0xFF);
+        ModbusCodec::RTU::appendCRC(raw);
+
+        Frame D;
+        auto r = ModbusCodec::RTU::decode(raw, D, RESPONSE);
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, r,
+            "RTU: oversized READ_DISCRETE_INPUTS byteCount must be rejected (no OOB write)");
+    }
+
+    // ---- TCP: forged READ_COILS response, byteCount = 251, consistent MBAP length ----
+    {
+        uint8_t _raw[260];
+        ByteBuffer raw(_raw, sizeof(_raw));
+        // MBAP
+        raw.push_back(0x12); raw.push_back(0x34);  // transaction ID
+        raw.push_back(0x00); raw.push_back(0x00);  // protocol ID
+        // length = unitId(1) + fc(1) + byteCount(1) + data(251) = 254
+        uint16_t mbapLen = (uint16_t)(1 + 1 + 1 + (MAX_COIL_BYTES + 1));
+        raw.push_back((mbapLen >> 8) & 0xFF); raw.push_back(mbapLen & 0xFF);
+        raw.push_back(0x01);                       // unit ID
+        // PDU
+        raw.push_back((uint8_t)READ_COILS);
+        raw.push_back(MAX_COIL_BYTES + 1);
+        for (int i = 0; i < MAX_COIL_BYTES + 1; ++i) raw.push_back(0xFF);
+        TEST_ASSERT_EQUAL_MESSAGE(260, raw.size(), "forged TCP frame should be exactly 260 bytes");
+
+        Frame D;
+        auto r = ModbusCodec::TCP::decode(raw, D, RESPONSE);
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, r,
+            "TCP: oversized READ_COILS byteCount must be rejected (no OOB write)");
+    }
+
+    // ---- Regression: the maximum legal byteCount (2000 coils -> 250 bytes) still decodes ----
+    {
+        uint8_t _raw[256];
+        ByteBuffer raw(_raw, sizeof(_raw));
+        raw.push_back(0x01);
+        raw.push_back((uint8_t)READ_COILS);
+        raw.push_back(MAX_COIL_BYTES);             // 250 bytes = 2000 coils (legal max)
+        for (int i = 0; i < MAX_COIL_BYTES; ++i) raw.push_back(0xAA);
+        ModbusCodec::RTU::appendCRC(raw);
+
+        Frame D;
+        auto r = ModbusCodec::RTU::decode(raw, D, RESPONSE);
+        TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, r,
+            "RTU: maximum legal READ_COILS byteCount (250) must still decode");
+        TEST_ASSERT_EQUAL_MESSAGE(MAX_COIL_BYTES * 8, D.regCount,
+            "decoded coil count should be 2000");
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_codec_rtu);
     RUN_TEST(test_codec_tcp);
+    RUN_TEST(test_codec_read_coils_bytecount_overflow);
     RUN_TEST(test_conversion_float_operations);
     RUN_TEST(test_conversion_uint32_operations);
     RUN_TEST(test_conversion_int32_operations);
