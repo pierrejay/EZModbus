@@ -616,22 +616,43 @@ bool TCP::sendMsg(const uint8_t* payload, const size_t len, const int destSocket
 
     /* 4. Protected send */
     Modbus::Debug::LOG_MSGF("Sending %zu bytes to socket %d", len, targetSocket);
-    ssize_t sent_bytes = ::send(targetSocket, payload, len, 0);
 
-    if (sent_bytes < 0) {
-        Modbus::Debug::LOG_MSGF("send() failed, errno: %d", errno);
-        if (errno == EPIPE || errno == ECONNRESET || errno == ENOTCONN || errno == EBADF) {
+    // Send the whole payload, handling short writes. On a non-blocking socket a partial
+    // send means the kernel TX buffer is momentarily full: retry the remainder within a
+    // bounded budget. If the remainder cannot be flushed (or a non-fatal error occurs)
+    // after part of the frame has already gone out, the socket is closed to avoid leaving
+    // a truncated frame on the wire that would desynchronize the peer.
+    size_t totalSent = 0;
+    uint32_t t0 = TIME_MS();
+
+    while (totalSent < len) {
+        ssize_t sent_bytes = ::send(targetSocket, payload + totalSent, len - totalSent, 0);
+
+        if (sent_bytes > 0) {
+            totalSent += (size_t)sent_bytes;
+            continue;
+        }
+
+        // TX buffer momentarily full: retry the remainder within the budget
+        if (sent_bytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (TIME_MS() - t0 >= SEND_BUDGET_MS) {
+                Modbus::Debug::LOG_MSGF("send() timed out after %zu of %zu bytes to socket %d", totalSent, len, targetSocket);
+                if (totalSent > 0) closeSocket(targetSocket); // partial frame already on wire -> drop connection
+                return false;
+            }
+            WAIT_MS(1);
+            continue;
+        }
+
+        // Hard error (or send() == 0)
+        Modbus::Debug::LOG_MSGF("send() failed after %zu of %zu bytes, errno: %d", totalSent, len, errno);
+        if (errno == EPIPE || errno == ECONNRESET || errno == ENOTCONN || errno == EBADF || totalSent > 0) {
             closeSocket(targetSocket);
         }
         return false;
     }
 
-    if ((size_t)sent_bytes != len) {
-        Modbus::Debug::LOG_MSGF("send() incomplete: sent %zd of %zu bytes", sent_bytes, len);
-        return false;
-    }
-
-    Modbus::Debug::LOG_MSGF("Successfully sent %d bytes to socket %d", sent_bytes, targetSocket);
+    Modbus::Debug::LOG_MSGF("Successfully sent %zu bytes to socket %d", totalSent, targetSocket);
     return true;
 }
 

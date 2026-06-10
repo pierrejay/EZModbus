@@ -39,6 +39,7 @@ public:
     static constexpr size_t MAX_MODBUS_FRAME_SIZE = 260;  // Modbus TCP max frame size (MBAP + PDU)
     static constexpr uint32_t SELECT_TIMEOUT_MS = 1000; // select() timeout in milliseconds (1s = low CPU usage)
     static constexpr uint32_t CONNECT_TIMEOUT_SEC = 5;  // Connect timeout in seconds (5s)
+    static constexpr uint32_t SEND_BUDGET_MS = 50;      // Bounded retry budget to flush a short write (TX buffer full)
 
     // Recovery configuration constants
     static constexpr int MAX_SELECT_ERRORS = 5;               // Max select() errors before long sleep
