@@ -1646,11 +1646,121 @@ void test_codec_read_coils_bytecount_overflow() {
     }
 }
 
+// ===================================================================================
+// WRITE_MULTIPLE REQUEST REGCOUNT VALIDATION TESTS
+// ===================================================================================
+
+/* @brief A WRITE_MULTIPLE_COILS / WRITE_MULTIPLE_REGISTERS request must have its
+ * regCount validated against the protocol limits at decode time (like READ requests),
+ * even when its byteCount field is internally consistent. regCount = 0 or regCount
+ * above the spec maximum must be rejected.
+ */
+void test_codec_write_multiple_regcount_validation() {
+    using namespace Modbus;
+    using namespace ModbusCodec;
+
+    // ---- RTU: WRITE_MULTIPLE_COILS request with regCount = 0 (illegal) ----
+    {
+        uint8_t _raw[256];
+        ByteBuffer raw(_raw, sizeof(_raw));
+        raw.push_back(0x01);                            // slaveId
+        raw.push_back((uint8_t)WRITE_MULTIPLE_COILS);   // 0x0F
+        raw.push_back(0x00); raw.push_back(0x10);       // regAddress
+        raw.push_back(0x00); raw.push_back(0x00);       // regCount = 0
+        raw.push_back(0x00);                            // byteCount = 0 (consistent with regCount)
+        ModbusCodec::RTU::appendCRC(raw);
+
+        Frame D;
+        auto r = ModbusCodec::RTU::decode(raw, D, REQUEST);
+        TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_REG_COUNT, r,
+            "RTU: WRITE_MULTIPLE_COILS request with regCount=0 must be rejected");
+    }
+
+    // ---- RTU: WRITE_MULTIPLE_COILS request with regCount > MAX_COILS_WRITE ----
+    {
+        const uint16_t badCount = (uint16_t)(MAX_COILS_WRITE + 1); // 1969
+        const uint8_t byteCount = (uint8_t)((badCount + 7) / 8);   // 247 (internally consistent)
+        uint8_t _raw[256];
+        ByteBuffer raw(_raw, sizeof(_raw));
+        raw.push_back(0x01);
+        raw.push_back((uint8_t)WRITE_MULTIPLE_COILS);
+        raw.push_back(0x00); raw.push_back(0x00);                  // regAddress
+        raw.push_back((badCount >> 8) & 0xFF); raw.push_back(badCount & 0xFF);
+        raw.push_back(byteCount);
+        for (int i = 0; i < byteCount; ++i) raw.push_back(0xFF);
+        ModbusCodec::RTU::appendCRC(raw);
+
+        Frame D;
+        auto r = ModbusCodec::RTU::decode(raw, D, REQUEST);
+        TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_REG_COUNT, r,
+            "RTU: WRITE_MULTIPLE_COILS request with regCount > MAX_COILS_WRITE must be rejected");
+    }
+
+    // ---- RTU: WRITE_MULTIPLE_REGISTERS request with regCount = 0 (illegal) ----
+    {
+        uint8_t _raw[256];
+        ByteBuffer raw(_raw, sizeof(_raw));
+        raw.push_back(0x01);
+        raw.push_back((uint8_t)WRITE_MULTIPLE_REGISTERS); // 0x10
+        raw.push_back(0x00); raw.push_back(0x00);         // regAddress
+        raw.push_back(0x00); raw.push_back(0x00);         // regCount = 0
+        raw.push_back(0x00);                              // byteCount = 0
+        ModbusCodec::RTU::appendCRC(raw);
+
+        Frame D;
+        auto r = ModbusCodec::RTU::decode(raw, D, REQUEST);
+        TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_REG_COUNT, r,
+            "RTU: WRITE_MULTIPLE_REGISTERS request with regCount=0 must be rejected");
+    }
+
+    // ---- TCP: WRITE_MULTIPLE_REGISTERS request with regCount = 0 (illegal) ----
+    {
+        uint8_t _raw[64];
+        ByteBuffer raw(_raw, sizeof(_raw));
+        raw.push_back(0x00); raw.push_back(0x01);   // transaction ID
+        raw.push_back(0x00); raw.push_back(0x00);   // protocol ID
+        raw.push_back(0x00); raw.push_back(0x07);   // length = unitId + fc + addr + count + byteCount = 7
+        raw.push_back(0x01);                        // unit ID
+        raw.push_back((uint8_t)WRITE_MULTIPLE_REGISTERS);
+        raw.push_back(0x00); raw.push_back(0x00);   // regAddress
+        raw.push_back(0x00); raw.push_back(0x00);   // regCount = 0
+        raw.push_back(0x00);                        // byteCount = 0
+
+        Frame D;
+        auto r = ModbusCodec::TCP::decode(raw, D, REQUEST);
+        TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_REG_COUNT, r,
+            "TCP: WRITE_MULTIPLE_REGISTERS request with regCount=0 must be rejected");
+    }
+
+    // ---- Regression: valid WRITE_MULTIPLE requests still round-trip ----
+    {
+        Frame F = makeFrame(Case{REQUEST, WRITE_MULTIPLE_COILS, 1, 0, 10, false});
+        uint8_t _raw[256];
+        ByteBuffer raw(_raw, sizeof(_raw));
+        TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::RTU::encode(F, raw),
+            "encode valid WRITE_MULTIPLE_COILS");
+        Frame D;
+        TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::RTU::decode(raw, D, REQUEST),
+            "decode valid WRITE_MULTIPLE_COILS");
+        TEST_ASSERT_TRUE_MESSAGE(compareFrames(F, D), "round-trip valid WRITE_MULTIPLE_COILS");
+
+        F = makeFrame(Case{REQUEST, WRITE_MULTIPLE_REGISTERS, 1, 0, 5, false});
+        raw.clear();
+        TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::RTU::encode(F, raw),
+            "encode valid WRITE_MULTIPLE_REGISTERS");
+        Frame D2;
+        TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::RTU::decode(raw, D2, REQUEST),
+            "decode valid WRITE_MULTIPLE_REGISTERS");
+        TEST_ASSERT_TRUE_MESSAGE(compareFrames(F, D2), "round-trip valid WRITE_MULTIPLE_REGISTERS");
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_codec_rtu);
     RUN_TEST(test_codec_tcp);
     RUN_TEST(test_codec_read_coils_bytecount_overflow);
+    RUN_TEST(test_codec_write_multiple_regcount_validation);
     RUN_TEST(test_conversion_float_operations);
     RUN_TEST(test_conversion_uint32_operations);
     RUN_TEST(test_conversion_int32_operations);

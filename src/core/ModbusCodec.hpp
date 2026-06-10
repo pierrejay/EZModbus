@@ -342,6 +342,7 @@ class PDU {
                     if (bytes.size() < 6) return HandleError(pdu, ERR_INVALID_LEN);
                     pdu.regAddress = (bytes[1] << 8) | bytes[2];
                     pdu.regCount = (bytes[3] << 8) | bytes[4];
+                    if (!isValidRegisterCount((uint16_t)pdu.regCount, (uint8_t)pdu.fc, type)) return HandleError(pdu, ERR_INVALID_REG_COUNT);
                     uint8_t byteCount = bytes[5];
                     if (bytes.size() != byteCount + 6) return HandleError(pdu, ERR_INVALID_LEN);
                     if (byteCount != (pdu.regCount + 7) / 8) return HandleError(pdu, ERR_INVALID_BYTE_COUNT);
@@ -365,6 +366,7 @@ class PDU {
                     if (bytes.size() < 6) return HandleError(pdu, ERR_INVALID_LEN);
                     pdu.regAddress = (bytes[1] << 8) | bytes[2];
                     pdu.regCount = (bytes[3] << 8) | bytes[4];
+                    if (!isValidRegisterCount((uint16_t)pdu.regCount, (uint8_t)pdu.fc, type)) return HandleError(pdu, ERR_INVALID_REG_COUNT);
                     uint8_t byteCount = bytes[5];
                     if (bytes.size() != byteCount + 6) return HandleError(pdu, ERR_INVALID_LEN);
                     if (byteCount != pdu.regCount * 2) return HandleError(pdu, ERR_INVALID_BYTE_COUNT);
