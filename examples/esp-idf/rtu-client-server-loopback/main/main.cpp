@@ -36,13 +36,28 @@ using ModbusWord    = Modbus::Word;
 // UART CONFIGURATION
 // ===================================================================================
 
+// This loopback wires two on-chip UARTs together (server TX -> client RX and
+// client TX -> server RX), so it needs a chip exposing a second general-purpose
+// UART. Pins are selected per target; wire the matching pairs with two jumpers.
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32P4)
+    #define SERVER_RX_PIN GPIO_NUM_44
+    #define SERVER_TX_PIN GPIO_NUM_7
+    #define CLIENT_RX_PIN GPIO_NUM_6
+    #define CLIENT_TX_PIN GPIO_NUM_43
+#else // ESP32 (and other parts with a third UART), avoiding flash-bound pins
+    #define SERVER_RX_PIN GPIO_NUM_16
+    #define SERVER_TX_PIN GPIO_NUM_17
+    #define CLIENT_RX_PIN GPIO_NUM_18
+    #define CLIENT_TX_PIN GPIO_NUM_19
+#endif
+
 // UART Server configuration
 UARTConfig uartServerConfig = {
     .uartNum = UART_NUM_1,
     .baud = 115200,
     .config = UART::CONFIG_8N1,
-    .rxPin = GPIO_NUM_44,
-    .txPin = GPIO_NUM_7,
+    .rxPin = SERVER_RX_PIN,
+    .txPin = SERVER_TX_PIN,
     .dePin = GPIO_NUM_NC
 };
 
@@ -51,8 +66,8 @@ UARTConfig uartClientConfig = {
     .uartNum = UART_NUM_2,
     .baud = 115200,
     .config = UART::CONFIG_8N1,
-    .rxPin = GPIO_NUM_6,
-    .txPin = GPIO_NUM_43,
+    .rxPin = CLIENT_RX_PIN,
+    .txPin = CLIENT_TX_PIN,
     .dePin = GPIO_NUM_NC
 };
 
