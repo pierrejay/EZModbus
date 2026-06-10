@@ -25,6 +25,13 @@ UART::UART(uart_port_t uart_num,
       _pin_rx(pin_rx),
       _pin_tx(pin_tx),
       _is_driver_installed(false) {
+        // Reject an out-of-range port (e.g. an unrecognized Arduino HardwareSerial mapped to the
+        // UART_NUM_MAX sentinel, or a bad port number passed directly): begin() will fail cleanly
+        // instead of silently operating on the wrong port.
+        if ((int)_uart_num < 0 || (int)_uart_num >= UART_NUM_MAX) {
+            _config_valid = false;
+            Modbus::Debug::LOG_MSGF("Invalid UART port %d, interface will fail to begin()", (int)_uart_num);
+        }
         // Initialize _current_hw_config with the provided parameters
         decode_config_flags(_config_flags, _current_hw_config.data_bits, _current_hw_config.parity, _current_hw_config.stop_bits);
         _current_hw_config.baud_rate = _baud_rate;
@@ -87,6 +94,10 @@ UART::~UART() {
  */
 esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
     Lock guard(_driver_mutex);
+    if (!_config_valid) {
+        Modbus::Debug::LOG_MSGF("Port %d invalid (unrecognized Serial or out-of-range port), cannot begin", (int)_uart_num);
+        return ESP_ERR_INVALID_ARG;
+    }
     if (_is_driver_installed) {
         Modbus::Debug::LOG_MSGF("Warning: Port %d already initialized. Call end() first.", _uart_num);
         return ESP_ERR_INVALID_STATE;
@@ -143,12 +154,16 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
  */
 void UART::end() {
     Lock guard(_driver_mutex);
+    // Nothing to tear down if the driver was never installed (e.g. invalid config / never begun).
+    // This also avoids passing the UART_NUM_MAX sentinel to the IDF on destruction.
+    if (!_is_driver_installed) return;
+
     esp_err_t err = uart_driver_delete(_uart_num);
     if (err != ESP_OK) {
         Modbus::Debug::LOG_MSGF("Error: uart_driver_delete failed for port %d: %s", _uart_num, esp_err_to_name(err));
     }
     _is_driver_installed = false;
-    _internal_event_queue_handle = nullptr; 
+    _internal_event_queue_handle = nullptr;
     Modbus::Debug::LOG_MSGF("Port %d de-initialized.", _uart_num);
 }
 
@@ -507,7 +522,10 @@ uint32_t UART::convertArduinoConfig(uint32_t arduino_config) {
 
 /* @brief Map a HardwareSerial instance to its corresponding uart_port_t
  * @param serial_ptr: pointer to the HardwareSerial (Serial0, Serial1, Serial2)
- * @return uart_port_t corresponding to the hardware instance (defaults to UART_NUM_0)
+ * @return uart_port_t corresponding to the hardware instance, or UART_NUM_MAX if the
+ *         instance is not one of the global Serial0/1/2 objects (begin() will then fail)
+ * @note Only the global Serial0/1/2 objects are supported. For a manually-created
+ *       HardwareSerial, use the constructor taking an explicit uart_port_t instead.
  */
 uart_port_t UART::serialArduinoToUartPort(const HardwareSerial* serial_ptr) {
     // Serial0 always exists and is a HardwareSerial instance.
@@ -518,12 +536,11 @@ uart_port_t UART::serialArduinoToUartPort(const HardwareSerial* serial_ptr) {
     #if SOC_UART_NUM > 2
         if (serial_ptr == &Serial2) return UART_NUM_2;
     #endif
-    // Fallback or error if it's not one of the global objects.
-    // This situation should ideally not happen if users pass Serial0, Serial1, or Serial2.
-    // If they create a HardwareSerial instance manually, e.g. HardwareSerial mySerial(X); they should
-    // use the other UART constructor directly with the port number.
-    Modbus::Debug::LOG_MSG("Could not identify Serial UART port, defaulting to UART_NUM_0.");
-    return UART_NUM_0;
+    // Not one of the global objects: return an out-of-range sentinel so the constructor
+    // flags the config as invalid and begin() fails, rather than silently using UART_NUM_0
+    // (which is usually the console).
+    Modbus::Debug::LOG_MSG("Could not identify Serial UART port (use Serial0/1/2 or the explicit-port constructor)");
+    return UART_NUM_MAX;
 }
 
 #endif // ARDUINO_ARCH_ESP32

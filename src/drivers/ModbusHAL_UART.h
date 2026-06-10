@@ -176,6 +176,8 @@ private:
     int _pin_tx;
     QueueHandle_t _internal_event_queue_handle = nullptr;
     bool _is_driver_installed = false;
+    bool _config_valid = true; // false if constructed with an unrecognized Serial or out-of-range port
+
     uart_config_t _current_hw_config{};
     int8_t _rx_timeout_threshold = -1; // -1 = not set by user; >=0 = last value set via setTimeoutThreshold
     mutable Mutex _driver_mutex;
