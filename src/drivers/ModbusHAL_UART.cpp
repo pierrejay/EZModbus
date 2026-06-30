@@ -36,11 +36,20 @@ UART::UART(uart_port_t uart_num,
         decode_config_flags(_config_flags, _current_hw_config.data_bits, _current_hw_config.parity, _current_hw_config.stop_bits);
         _current_hw_config.baud_rate = _baud_rate;
         _current_hw_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
-        #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
-            _current_hw_config.source_clk = UART_SCLK_DEFAULT;
-        #else
-            _current_hw_config.source_clk = UART_SCLK_APB;
+        // Use LP source clock for UART_LP ports
+        // (enumerated after the HP ports in uart_port_t)
+        #if (SOC_UART_LP_NUM >= 1)
+        if ((int)_uart_num >= SOC_UART_HP_NUM) {
+            _current_hw_config.lp_source_clk = LP_UART_SCLK_DEFAULT;
+        } else
         #endif
+        {
+            #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+                _current_hw_config.source_clk = UART_SCLK_DEFAULT;
+            #else
+                _current_hw_config.source_clk = UART_SCLK_APB;
+            #endif
+        }
         Modbus::Debug::LOG_MSGF("Constructor for port %d", _uart_num);
 }
 
@@ -102,6 +111,16 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
         Modbus::Debug::LOG_MSGF("Warning: Port %d already initialized. Call end() first.", _uart_num);
         return ESP_ERR_INVALID_STATE;
     }
+
+    #if (SOC_UART_LP_NUM >= 1)
+    // LP-UART ports (enumerated after the HP ports) have no hardware RS485 half-duplex mode in
+    // ESP-IDF. Reject it upfront with an explicit reason instead of letting uart_set_mode() 
+    // return a generic ESP_ERR_INVALID_ARG.
+    if ((int)_uart_num >= SOC_UART_HP_NUM && _pin_rts_de != GPIO_NUM_NC) {
+        Modbus::Debug::LOG_MSGF("Port %d is an LP-UART: hardware RS485 DE pin is not supported (UART mode only)", (int)_uart_num);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    #endif
 
     esp_err_t err = uart_param_config(_uart_num, &_current_hw_config);
     if (err != ESP_OK) {

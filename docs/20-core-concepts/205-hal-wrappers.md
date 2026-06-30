@@ -107,6 +107,21 @@ ModbusHAL::UART uart(uartConfig); // Create UART instance
 uart.begin(); // Handles all UART and RS-485 configuration (returns an esp_err_t)
 ```
 
+!!! warning "LP-UART limitations (ESP32-C6 / C5 / P4)"
+    On chips that expose a low-power UART (`LP_UART_NUM_0`), the LP peripheral is more
+    constrained than a regular HP UART. EZModbus configures its clock source automatically,
+    but be aware of the following hardware/SDK limits:
+
+    * **No hardware RS485 direction control.** The ESP-IDF only allows the LP-UART in plain
+      UART mode, so a DE/RTS pin cannot be toggled automatically. Setting `dePin` on an
+      LP-UART makes `begin()` return `ESP_ERR_NOT_SUPPORTED` (WIP: implement soft DE pin).
+    * **Limited baud range.** The LP-UART clock divider cannot reach low baud rates: 1200
+      and 2400 bps are unachievable (`begin()` returns an error from the IDF). Those speeds
+      are unusual for Modbus devices anyway.
+    * **Clock accuracy.** The default LP clock source (RC_FAST, ±7%) is intended for
+      low-power operation and may be too imprecise for a reliable RTU bus. This hasn't been
+      tested yet, so take care when using RS485 with LP-UART.
+
 The HAL RTU object is then passed to the Modbus interface:
 
 ```
