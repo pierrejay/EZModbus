@@ -93,8 +93,7 @@ private:
     ModbusHAL::UART& _uartHAL;
     uint64_t _silenceTimeUs = 0;   // Sets the silence time to observe between consecutive frames (RX + TX)
     uint64_t _lastTxTimeUs = 0; // Last time a frame was sent (used to enforce the silence time for TX)
-    uint64_t _lastRxByteTimeUs = 0; // Last time bytes were pulled into _rxBuffer (software silence fallback)
-    uint64_t _rxFrameGapTimeoutUs = 0; // Backstop window to delimit a frame when no HW idle event fires (see rxTxTask)
+    uint64_t _lastRxByteTimeUs = 0; // Last time bytes were pulled into _rxBuffer (frame-gap backstop, see rxTxTask)
     bool _isInitialized = false;
 
     // Data buffers & protection

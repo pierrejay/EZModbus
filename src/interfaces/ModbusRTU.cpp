@@ -363,11 +363,8 @@ RTU::Result RTU::updateUartIdleDetection() {
         return Error(ERR_CONFIG_FAILED, esp_err_to_name(err));
     }
 
-    // Refresh the frame-gap backstop (depends on baud & the idle-timeout just configured)
-    _rxFrameGapTimeoutUs = _uartHAL.getRxFrameGapTimeoutUs();
-
     Modbus::Debug::LOG_MSGF("UART idle detection time set to: %u us (frame-gap backstop: %u us)",
-                            (uint32_t)_silenceTimeUs, (uint32_t)_rxFrameGapTimeoutUs);
+                            (uint32_t)_silenceTimeUs, (uint32_t)_uartHAL.getRxFrameGapTimeoutUs());
     return Success();
 }
 
@@ -541,6 +538,7 @@ void RTU::rxTxTask(void* rtu) {
         TickType_t waitTicks = (self->_rxBuffer.size() > 0)
             ? pdMS_TO_TICKS(1)
             : pdMS_TO_TICKS(RXTX_QUEUE_CHECK_TIMEOUT_MS);
+        if (waitTicks == 0) waitTicks = 1; // pdMS_TO_TICKS(1) rounds to 0 below a 1 kHz tick: keep it blocking
         QueueSetMemberHandle_t active_member = xQueueSelectFromSet(self->_eventQueueSet, waitTicks);
 
         // Get out of the loop if the task is not initialized, otherwise wait for the next event
@@ -549,9 +547,11 @@ void RTU::rxTxTask(void* rtu) {
             // Frame-gap backstop: delimit the buffered frame when no HW idle-timeout event arrives -
             // e.g. a frame ending exactly on a FIFO-full boundary (nothing left for idle to fire on),
             // common on the small LP-UART FIFO. Window > the normal inter-event gap, so it never
-            // fires mid-frame (see UART::getRxFrameGapTimeoutUs).
-            if (self->_rxBuffer.size() > 0 && self->_rxFrameGapTimeoutUs > 0 &&
-                (TIME_US() - self->_lastRxByteTimeUs) >= self->_rxFrameGapTimeoutUs) {
+            // fires mid-frame. Read live from the HAL so it tracks any baud/timeout reconfig (see
+            // UART::getRxFrameGapTimeoutUs).
+            uint64_t frameGapUs = self->_uartHAL.getRxFrameGapTimeoutUs();
+            if (self->_rxBuffer.size() > 0 && frameGapUs > 0 &&
+                (TIME_US() - self->_lastRxByteTimeUs) >= frameGapUs) {
                 Modbus::Debug::LOG_MSGF("Frame-gap backstop: processing RX buffer (%u bytes)", (uint32_t)self->_rxBuffer.size());
                 self->flushRxFrame();
             }
