@@ -29,6 +29,15 @@
     #define EZMODBUS_HAL_UART_SOFT_DE_GUARD_US 0
 #endif
 
+#if (SOC_UART_LP_NUM >= 1)
+// LP-UART clock source. Default (RC_FAST) works in every power mode but is imprecise (~±7%),
+// which can corrupt frames against an accurate peer. For an always-awake RTU bus, override with
+// LP_UART_SCLK_XTAL_D2 (crystal-derived, accurate; not available in deep sleep).
+#ifndef EZMODBUS_HAL_UART_LP_SCLK
+    #define EZMODBUS_HAL_UART_LP_SCLK LP_UART_SCLK_DEFAULT
+#endif
+#endif
+
 namespace ModbusHAL {
 
 class UART {

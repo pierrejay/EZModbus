@@ -41,7 +41,7 @@ UART::UART(uart_port_t uart_num,
         // (enumerated after the HP ports in uart_port_t)
         #if (SOC_UART_LP_NUM >= 1)
         if ((int)_uart_num >= SOC_UART_HP_NUM) {
-            _current_hw_config.lp_source_clk = LP_UART_SCLK_DEFAULT;
+            _current_hw_config.lp_source_clk = EZMODBUS_HAL_UART_LP_SCLK;
         } else
         #endif
         {
