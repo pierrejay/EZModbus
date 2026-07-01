@@ -66,7 +66,10 @@ ModbusHAL::UART::IDFConfig mbt_cfg = {
 };
 ModbusHAL::UART mbt_uart(mbt_cfg);
 ModbusInterface::RTU mbt(mbt_uart, Modbus::SERVER);
-Modbus::DynamicWordStore dynamicStore(10000);  // Heap-allocated store
+// Capacity follows the register count (4 word types per address). Kept in sync so a smaller
+// MBT_INIT_REG_COUNT (e.g. on RAM-constrained chips without PSRAM like the ESP32-C6) also shrinks
+// this heap reservation - a hardcoded 10000 would OOM at static-init and hang before USB comes up.
+Modbus::DynamicWordStore dynamicStore(MBT_INIT_REG_COUNT * 4);  // Heap-allocated store
 Modbus::Server server(mbt, dynamicStore);
 uint16_t serverDiscreteInputs[MBT_INIT_START_REG + MBT_INIT_REG_COUNT];
 uint16_t serverCoils[MBT_INIT_START_REG + MBT_INIT_REG_COUNT];
@@ -1437,16 +1440,25 @@ void test_broadcast() {
 
 // TEST_CONCURRENT_CALLS DATA STRUCTURES & TASKS
 
+// Second task's core affinity: on single-core targets (e.g. ESP32-C6) there is no core 1,
+// so both tasks run on core 0 (pinning to 1 would trip a configASSERT).
+#ifdef CONFIG_FREERTOS_UNICORE
+    #define TEST_SECOND_CORE 0
+#else
+    #define TEST_SECOND_CORE 1
+#endif
+
 // Synchronization data structure
 struct SyncData {
     SemaphoreHandle_t startSignal;
     SemaphoreHandle_t resultsMutex;
     SemaphoreHandle_t doneSignal;
-    Modbus::Client::Result core0Result;
-    Modbus::Client::Result core1Result;
+    int nextSlot;                        // Next result slot to claim (0 then 1), by task not by core
+    Modbus::Client::Result core0Result;  // Result of the 1st task (slot 0)
+    Modbus::Client::Result core1Result;  // Result of the 2nd task (slot 1)
 };
 
-// Task executed on each core
+// Task executed by each concurrent worker (may share a core on single-core targets)
 auto concurrentTask = [](void* pv) {
     auto sd = static_cast<SyncData*>(pv);
     int core = xPortGetCoreID();
@@ -1473,10 +1485,11 @@ auto concurrentTask = [](void* pv) {
             result == Modbus::Client::SUCCESS ? "SUCCESS" : 
             (result == Modbus::Client::ERR_BUSY ? "ERR_BUSY" : Modbus::Client::toString(result)) ); // More detailed error
 
-    // Store the result
+    // Store the result in the next free slot (claimed atomically). Slots are per-task, not
+    // per-core, so this stays correct when both tasks share core 0 on single-core targets.
     xSemaphoreTake(sd->resultsMutex, portMAX_DELAY);
-    if (core == 0) sd->core0Result = result;
-    else           sd->core1Result = result;
+    if (sd->nextSlot++ == 0) sd->core0Result = result;
+    else                     sd->core1Result = result;
     xSemaphoreGive(sd->resultsMutex);
 
     // Signal the end
@@ -1492,18 +1505,19 @@ void test_concurrent_calls() {
     sync.startSignal   = xSemaphoreCreateCounting(2, 0);
     sync.resultsMutex  = xSemaphoreCreateMutex();
     sync.doneSignal    = xSemaphoreCreateCounting(2, 0);
+    sync.nextSlot      = 0;
     sync.core0Result   = Modbus::Client::ERR_BUSY;
     sync.core1Result   = Modbus::Client::ERR_BUSY;
 
-    // Launch the task on core 0
+    // Launch the first task on core 0
     xTaskCreatePinnedToCore(
         [](void* p){ concurrentTask(p); },
         "Task0", 8192, &sync, 5, nullptr, 0
     );
-    // … and on core 1
+    // … and the second on core 1 (or core 0 on single-core targets like the ESP32-C6)
     xTaskCreatePinnedToCore(
         [](void* p){ concurrentTask(p); },
-        "Task1", 8192, &sync, 5, nullptr, 1
+        "Task1", 8192, &sync, 5, nullptr, TEST_SECOND_CORE
     );
 
     // Small delay to ensure the tasks are ready
@@ -1519,8 +1533,8 @@ void test_concurrent_calls() {
 
     // Check the results
     Modbus::Logger::logln("=== TEST_CONCURRENT_CALLS Results ===");
-    Modbus::Logger::logf("Core 0: %s\n", sync.core0Result == Modbus::Client::SUCCESS ? "SUCCESS" : "ERR_BUSY");
-    Modbus::Logger::logf("Core 1: %s\n", sync.core1Result == Modbus::Client::SUCCESS ? "SUCCESS" : "ERR_BUSY");
+    Modbus::Logger::logf("Task 0: %s\n", sync.core0Result == Modbus::Client::SUCCESS ? "SUCCESS" : "ERR_BUSY");
+    Modbus::Logger::logf("Task 1: %s\n", sync.core1Result == Modbus::Client::SUCCESS ? "SUCCESS" : "ERR_BUSY");
 
     TEST_ASSERT_START();
     TEST_ASSERT_TRUE(

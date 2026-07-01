@@ -20,7 +20,9 @@
 
 // ModbusTestServer initialization functions
 #define MBT_INIT_START_REG                  0x00         // Default start register address
-#define MBT_INIT_REG_COUNT                  2500           // Increased to cover MAX_COILS_READ (2000) from MULTI_START_ADDR (10)
+#ifndef MBT_INIT_REG_COUNT
+    #define MBT_INIT_REG_COUNT              2500           // Increased to cover MAX_COILS_READ (2000) from MULTI_START_ADDR (10). Overridable per-env (shrink on RAM-constrained chips w/o PSRAM).
+#endif
 #define MBT_INIT_COIL_VALUE(x)              true         // Default coil value : true
 #define MBT_INIT_DISCRETE_INPUT_VALUE(x)    true         // Default discrete input value : true
 #define MBT_INIT_HOLDING_REGISTER_VALUE(x)  (10 + x)     // Default holding register value : 10 + register index
