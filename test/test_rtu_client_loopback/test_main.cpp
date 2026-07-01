@@ -12,19 +12,40 @@
     #define TEST_ASSERT_START() { vTaskDelay(pdMS_TO_TICKS(50)); }
 #endif
 
-// Pin definitions
-#define MBT_RX D7
-#define MBT_TX D8
-#define EZM_RX D5
-#define EZM_TX D6
+// Pin / port / baud definitions - overridable per-environment via build flags.
+// Defaults target the Seeed XIAO ESP32-S3 loopback wiring; the *_lpuart env overrides
+// MBT_* to put the server on the LP-UART (see platformio.ini).
+#ifndef EZM_SERIAL
+    #define EZM_SERIAL Serial1        // Client HardwareSerial instance (HP UART)
+#endif
+#ifndef EZM_RX
+    #define EZM_RX D5
+#endif
+#ifndef EZM_TX
+    #define EZM_TX D6
+#endif
+#ifndef MBT_UART_NUM
+    #define MBT_UART_NUM UART_NUM_2   // Server IDF port (can be LP_UART_NUM_0)
+#endif
+#ifndef MBT_RX
+    #define MBT_RX D7
+#endif
+#ifndef MBT_TX
+    #define MBT_TX D8
+#endif
+#ifndef MBT_DE
+    #define MBT_DE -1                 // Server DE pin (-1 = none); exercises soft DE on LP-UART
+#endif
 
 // UART configurations
 #define UART_BUFFER_SIZE 512
-#define UART_BAUD_RATE 921600
+#ifndef UART_BAUD_RATE
+    #define UART_BAUD_RATE 921600
+#endif
 
 // EZModbus RTU client: use ArduinoConfig
 ModbusHAL::UART::ArduinoConfig ezm_cfg = {
-    .serial = Serial1,
+    .serial = EZM_SERIAL,
     .baud = UART_BAUD_RATE,
     .config = SERIAL_8N1,
     .rxPin = EZM_RX,
@@ -36,11 +57,12 @@ Modbus::Client client(ezm);
 
 // EZModbus RTU server for testing: use IDFConfig
 ModbusHAL::UART::IDFConfig mbt_cfg = {
-    .uartNum = UART_NUM_2,
+    .uartNum = MBT_UART_NUM,
     .baud = UART_BAUD_RATE,
     .config = ModbusHAL::UART::CONFIG_8N1,
     .rxPin = MBT_RX,
-    .txPin = MBT_TX
+    .txPin = MBT_TX,
+    .dePin = MBT_DE
 };
 ModbusHAL::UART mbt_uart(mbt_cfg);
 ModbusInterface::RTU mbt(mbt_uart, Modbus::SERVER);
@@ -122,7 +144,7 @@ void ModbusTestServerTask(void* pvParameters) {
     Modbus::Logger::logln("Adding words to ModbusTestServer...");
     uint32_t startTime = millis();    
     ssize_t freeHeapBefore = ESP.getFreeHeap();
-    ssize_t freePsramBefore = BOARD_HAS_PSRAM ? ESP.getFreePsram() : 0;
+    ssize_t freePsramBefore = ESP.getFreePsram(); // returns 0 on boards without PSRAM
     
     for (int i = MBT_INIT_START_REG; i < MBT_INIT_START_REG + MBT_INIT_REG_COUNT; i++) { // Insert in order
     // for (int i = MBT_INIT_START_REG + MBT_INIT_REG_COUNT - 1; i >= MBT_INIT_START_REG; i--) { //
@@ -149,10 +171,10 @@ void ModbusTestServerTask(void* pvParameters) {
     }
     uint32_t endTime = millis();
     ssize_t freeHeapAfter = ESP.getFreeHeap();
-    ssize_t freePsramAfter = BOARD_HAS_PSRAM ? ESP.getFreePsram() : 0;
+    ssize_t freePsramAfter = ESP.getFreePsram(); // returns 0 on boards without PSRAM
     ssize_t memoryUsed = freeHeapBefore - freeHeapAfter;
     ssize_t psramUsed = freePsramBefore - freePsramAfter;
-    if (BOARD_HAS_PSRAM) {
+    if (ESP.getPsramSize() > 0) {
         Modbus::Logger::logf("Added %d words in %d ms, consuming %zd bytes of heap and %zd bytes of PSRAM\n", MBT_INIT_REG_COUNT * 4, endTime - startTime, memoryUsed, psramUsed);
     } else {
         Modbus::Logger::logf("Added %d words in %d ms, consuming %zd bytes of heap\n", MBT_INIT_REG_COUNT * 4, endTime - startTime, memoryUsed);

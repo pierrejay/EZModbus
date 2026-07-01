@@ -581,10 +581,13 @@ uint32_t UART::convertArduinoConfig(uint32_t arduino_config) {
 uart_port_t UART::serialArduinoToUartPort(const HardwareSerial* serial_ptr) {
     // Serial0 always exists and is a HardwareSerial instance.
     if (serial_ptr == &Serial0) return UART_NUM_0;
-    #if SOC_UART_NUM > 1
+    // Guard on SOC_UART_HP_NUM, not SOC_UART_NUM: the latter also counts the LP-UART, but
+    // Serial1/Serial2 and UART_NUM_1/2 only exist for HP ports (e.g. on ESP32-C6 SOC_UART_NUM
+    // is 3 while SOC_UART_HP_NUM is 2, so UART_NUM_2 is undefined).
+    #if SOC_UART_HP_NUM > 1
         if (serial_ptr == &Serial1) return UART_NUM_1;
     #endif
-    #if SOC_UART_NUM > 2
+    #if SOC_UART_HP_NUM > 2
         if (serial_ptr == &Serial2) return UART_NUM_2;
     #endif
     // Not one of the global objects: return an out-of-range sentinel so the constructor
