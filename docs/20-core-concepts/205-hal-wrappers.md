@@ -113,8 +113,12 @@ uart.begin(); // Handles all UART and RS-485 configuration (returns an esp_err_t
     but be aware of the following hardware/SDK limits:
 
     * **No hardware RS485 direction control.** The ESP-IDF only allows the LP-UART in plain
-      UART mode, so a DE/RTS pin cannot be toggled automatically. Setting `dePin` on an
-      LP-UART makes `begin()` return `ESP_ERR_NOT_SUPPORTED` (WIP: implement soft DE pin).
+      UART mode, so the peripheral cannot toggle a DE/RTS pin automatically. When `dePin` is set
+      on an LP-UART, EZModbus falls back to **software DE**: it drives the pin as a GPIO around
+      each transmission (asserted before TX, released once the last stop bit is out). The pin is
+      active-high by default; set `EZMODBUS_HAL_UART_SOFT_DE_ACTIVE_HIGH=0` for an active-low
+      transceiver, and `EZMODBUS_HAL_UART_SOFT_DE_GUARD_US` to tune the turnaround delay: increase
+      it if the last byte gets clipped, decrease it if the line is held too long.
     * **Limited baud range.** The LP-UART clock divider cannot reach low baud rates: 1200
       and 2400 bps are unachievable (`begin()` returns an error from the IDF). Those speeds
       are unusual for Modbus devices anyway.

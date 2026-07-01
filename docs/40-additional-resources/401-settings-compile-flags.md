@@ -90,6 +90,16 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
     * Size of IDF UART event queue (# events)
     * Default: 20
 
+* **`EZMODBUS_HAL_UART_SOFT_DE_ACTIVE_HIGH`**
+    * Polarity of the software DE pin used on LP-UART ports (1 = active-high, 0 = active-low)
+    * Only used for Soft DE mode (LP-UART)
+    * Default: 1 (active-high)
+
+* **`EZMODBUS_HAL_UART_SOFT_DE_GUARD_US`**
+    * Extra delay (µs) after a transmission before releasing the software DE pin
+    * Only used for Soft DE mode (LP-UART)
+    * Default: 0 (auto: ~2 bit-times computed from the baud rate)
+
 ### ModbusHAL_TCP.h
 
 * **`EZMODBUS_HAL_TCP_RX_Q_SIZE`**

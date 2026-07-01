@@ -4,6 +4,7 @@
  */
 
 #include "ModbusHAL_UART.h"
+#include "esp_rom_sys.h" // esp_rom_delay_us() for the software-DE turnaround guard
 
 #if defined(ARDUINO_ARCH_ESP32)
     #include <Arduino.h> // Provides HardwareSerial and SERIAL_ defines
@@ -112,13 +113,14 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
         return ESP_ERR_INVALID_STATE;
     }
 
+    // DE pin management:
+    //  - HP UART -> hardware RS485 half-duplex mode
+    //  - LP UART -> soft GPIO toggling (RS485 mode unavailable)
+    const bool has_de = (_pin_rts_de != GPIO_NUM_NC);
+    _soft_de = false;
     #if (SOC_UART_LP_NUM >= 1)
-    // LP-UART ports (enumerated after the HP ports) have no hardware RS485 half-duplex mode in
-    // ESP-IDF. Reject it upfront with an explicit reason instead of letting uart_set_mode() 
-    // return a generic ESP_ERR_INVALID_ARG.
-    if ((int)_uart_num >= SOC_UART_HP_NUM && _pin_rts_de != GPIO_NUM_NC) {
-        Modbus::Debug::LOG_MSGF("Port %d is an LP-UART: hardware RS485 DE pin is not supported (UART mode only)", (int)_uart_num);
-        return ESP_ERR_NOT_SUPPORTED;
+    if (has_de && (int)_uart_num >= SOC_UART_HP_NUM) {
+        _soft_de = true;
     }
     #endif
 
@@ -128,7 +130,7 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
         return err;
     }
 
-    int rts_pin_to_set = (_pin_rts_de == GPIO_NUM_NC) ? UART_PIN_NO_CHANGE : _pin_rts_de;
+    int rts_pin_to_set = (has_de && !_soft_de) ? (int)_pin_rts_de : UART_PIN_NO_CHANGE;
     err = uart_set_pin(_uart_num, _pin_tx, _pin_rx, rts_pin_to_set, UART_PIN_NO_CHANGE /*CTS*/);
     if (err != ESP_OK) {
         Modbus::Debug::LOG_MSGF("Error: uart_set_pin FAILED for port %d with TX:%d RX:%d RTS:%d Error: %s", _uart_num, _pin_tx, _pin_rx, rts_pin_to_set, esp_err_to_name(err));
@@ -150,17 +152,16 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
          return ESP_FAIL; 
     }
 
-    // Configure RS485 mode if RTS/DE pin is specified
-    if (_pin_rts_de != GPIO_NUM_NC) {
-        err = setRS485ModeUnsafe(true);
+    if (has_de) {
+        err = _soft_de ? setupSoftDEUnsafe() : setRS485ModeUnsafe(true);
         if (err != ESP_OK) {
-            Modbus::Debug::LOG_MSGF("Error: Failed to set RS485 mode for port %d: %s", _uart_num, esp_err_to_name(err));
+            Modbus::Debug::LOG_MSGF("Error: Failed to set up RS485 direction control for port %d: %s", _uart_num, esp_err_to_name(err));
             uart_driver_delete(_uart_num);
             _internal_event_queue_handle = nullptr;
             _is_driver_installed = false;
             return err;
         }
-        Modbus::Debug::LOG_MSGF("Port %d configured for RS485 Half-Duplex with DE on pin %d", _uart_num, (int)_pin_rts_de);
+        Modbus::Debug::LOG_MSGF("Port %d configured for RS485 Half-Duplex with %s DE on pin %d", _uart_num, _soft_de ? "soft" : "hw", (int)_pin_rts_de);
     }
 
     _is_driver_installed = true;
@@ -210,29 +211,38 @@ int UART::read(uint8_t* buf_ptr, size_t max_len_to_read, TickType_t ticks_to_wai
 size_t UART::write(const uint8_t* buf, size_t size) {
     Lock guard(_driver_mutex);
     if (!_is_driver_installed || size == 0) return 0;
-    
+
+    // Soft DE : enable transceiver
+    if (_soft_de) gpio_set_level(_pin_rts_de, SOFT_DE_ACTIVE_HIGH ? 1 : 0);
+
+    size_t result = 0;
     int sent_by_driver = uart_write_bytes(_uart_num, (const char*)buf, size);
-    
-    if (sent_by_driver < 0) { 
+
+    if (sent_by_driver < 0) {
         Modbus::Debug::LOG_MSGF("Error: uart_write_bytes error on port %d: %d", _uart_num, sent_by_driver);
-        return 0; 
-    }
-    if ((size_t)sent_by_driver < size) {
-        Modbus::Debug::LOG_MSGF("Warning: uart_write_bytes partial write on port %d. Requested %d, sent to buffer %d", _uart_num, size, sent_by_driver);
-        return (size_t)sent_by_driver; // Return the number of bytes actually written
+    } else {
+        esp_err_t tx_done_err = uart_wait_tx_done(_uart_num, pdMS_TO_TICKS(WRITE_TIMEOUT_MS));
+        if (tx_done_err == ESP_ERR_TIMEOUT) {
+            Modbus::Debug::LOG_MSGF("Warning: uart_wait_tx_done timed out on port %d after %d ms for %d bytes", _uart_num, WRITE_TIMEOUT_MS, sent_by_driver);
+        } else if (tx_done_err != ESP_OK) {
+            Modbus::Debug::LOG_MSGF("Error: uart_wait_tx_done failed on port %d: %s", _uart_num, esp_err_to_name(tx_done_err));
+        } else if ((size_t)sent_by_driver < size) {
+            Modbus::Debug::LOG_MSGF("Warning: uart_write_bytes partial write on port %d. Requested %d, sent to buffer %d", _uart_num, size, sent_by_driver);
+            result = (size_t)sent_by_driver; // Number of bytes actually written
+        } else {
+            result = (size_t)sent_by_driver; // All requested bytes accepted and physically transmitted
+        }
     }
 
-    // Wait for the physical transmission to complete
-    esp_err_t tx_done_err = uart_wait_tx_done(_uart_num, pdMS_TO_TICKS(WRITE_TIMEOUT_MS)); 
-    if (tx_done_err == ESP_ERR_TIMEOUT) {
-        Modbus::Debug::LOG_MSGF("Warning: uart_wait_tx_done timed out on port %d after %d ms for %d bytes", _uart_num, WRITE_TIMEOUT_MS, sent_by_driver);
-        return 0; // Physical transmission confirmation failed
-    } else if (tx_done_err != ESP_OK) {
-        Modbus::Debug::LOG_MSGF("Error: uart_wait_tx_done failed on port %d: %s", _uart_num, esp_err_to_name(tx_done_err));
-        return 0; // Physical transmission confirmation failed
+    // Soft DE : wait guard delay & disable transceiver
+    if (_soft_de) {
+        uint32_t guard_us = SOFT_DE_GUARD_US;
+        if (guard_us == 0 && _baud_rate > 0) guard_us = (2u * 1000000u) / _baud_rate; // ~2 bit-times
+        if (guard_us) esp_rom_delay_us(guard_us);
+        gpio_set_level(_pin_rts_de, SOFT_DE_ACTIVE_HIGH ? 0 : 1);
     }
-    
-    return (size_t)sent_by_driver; // Success, all requested bytes have been accepted and physically transmitted
+
+    return result;
 }
 
 /* @brief Get the number of bytes available in the UART driver
@@ -418,6 +428,26 @@ esp_err_t UART::setRS485ModeUnsafe(bool enable) {
     return uart_set_mode(_uart_num, mode);
 }
 
+/* @brief Configure the DE/RTS pin as a GPIO output for software direction control
+ * @return ESP_OK on success
+ * @note Used on LP-UART ports, which the ESP-IDF cannot drive in hardware RS485 mode.
+ *       The pin is left idle in receive mode (DE de-asserted); write() toggles it around TX.
+ * @note _driver_mutex must be held to call this function!
+ */
+esp_err_t UART::setupSoftDEUnsafe() {
+    if (_pin_rts_de == GPIO_NUM_NC) return ESP_ERR_INVALID_ARG;
+    gpio_config_t io = {};
+    io.pin_bit_mask  = 1ULL << (uint32_t)_pin_rts_de;
+    io.mode          = GPIO_MODE_OUTPUT;
+    io.pull_up_en    = GPIO_PULLUP_DISABLE;
+    io.pull_down_en  = GPIO_PULLDOWN_DISABLE;
+    io.intr_type     = GPIO_INTR_DISABLE;
+    esp_err_t err = gpio_config(&io);
+    if (err != ESP_OK) return err;
+    // Idle in receive mode: DE de-asserted (opposite of the active level)
+    return gpio_set_level(_pin_rts_de, SOFT_DE_ACTIVE_HIGH ? 0 : 1);
+}
+
 /* @brief Set the timeout threshold for the UART driver in microseconds
  * @param timeout_us: The timeout threshold to set
  * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is not installed
@@ -469,7 +499,9 @@ esp_err_t UART::applyRuntimeConfig() {
     err = uart_set_stop_bits(_uart_num, _current_hw_config.stop_bits);
     if (err != ESP_OK) return err;
 
-    if (_pin_rts_de != GPIO_NUM_NC) {
+    // Re-assert hardware RS485 mode after a reconfig 
+    // Unneeded for Soft DE mode (GPIO stays configured)
+    if (_pin_rts_de != GPIO_NUM_NC && !_soft_de) {
         err = setRS485ModeUnsafe(true);
         if (err != ESP_OK) return err;
     }
