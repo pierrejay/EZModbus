@@ -23,14 +23,33 @@ static constexpr uint16_t  MODBUS_PORT  = 502;
 static constexpr char LOOPBACK_IP_STR[] = "127.0.0.1";
 static IPAddress LOOPBACK_IP = IPAddress(127, 0, 0, 1);
 
-// Pin definitions
-#define MBT_RX D7
-#define MBT_TX D8
-#define EZM_RX D5
-#define EZM_TX D6
+// Pin / port / baud definitions - overridable per-environment via build flags.
+// Defaults target the Seeed XIAO ESP32-S3 loopback wiring; the *_c6 env puts the
+// dummy server (MBT side) on the LP-UART (see platformio.ini).
+#ifndef EZM_UART_NUM
+    #define EZM_UART_NUM UART_NUM_1   // Bridge RTU master port
+#endif
+#ifndef EZM_RX
+    #define EZM_RX D5
+#endif
+#ifndef EZM_TX
+    #define EZM_TX D6
+#endif
+#ifndef MBT_UART_NUM
+    #define MBT_UART_NUM UART_NUM_2   // Dummy server port (can be LP_UART_NUM_0)
+#endif
+#ifndef MBT_RX
+    #define MBT_RX D7
+#endif
+#ifndef MBT_TX
+    #define MBT_TX D8
+#endif
+#ifndef UART_BAUD_RATE
+    #define UART_BAUD_RATE 9600
+#endif
 
-ModbusHAL::UART ezmUart(UART_NUM_1, 9600, ModbusHAL::UART::CONFIG_8N1, EZM_RX, EZM_TX);
-ModbusHAL::UART mbtUart(UART_NUM_2, 9600, ModbusHAL::UART::CONFIG_8N1, MBT_RX, MBT_TX);
+ModbusHAL::UART ezmUart(EZM_UART_NUM, UART_BAUD_RATE, ModbusHAL::UART::CONFIG_8N1, EZM_RX, EZM_TX);
+ModbusHAL::UART mbtUart(MBT_UART_NUM, UART_BAUD_RATE, ModbusHAL::UART::CONFIG_8N1, MBT_RX, MBT_TX);
 ModbusHAL::TCP tcpServer(MODBUS_PORT); // Server for the bridge
 WiFiClient tcpClient;             // Client for injecting requests in the bridge
 

@@ -32,6 +32,31 @@ static String clientTargetIpStr(LOOPBACK_IP_STR); // Will be initialized in setu
                                 // Let's try direct initialization here for simplicity for now:
 // static String clientTargetIpStr = LOOPBACK_IP.toString(); // This might have static init order issues with LOOPBACK_IP
 
+// RTU pin / port / baud definitions for the multi-interface tests - overridable per-environment
+// via build flags. Defaults target the Seeed XIAO ESP32-S3 wiring; the *_c6 env puts the RTU
+// client side on the LP-UART (see platformio.ini).
+#ifndef EZM_UART_NUM
+    #define EZM_UART_NUM UART_NUM_1   // Multi-interface RTU server port
+#endif
+#ifndef EZM_RX
+    #define EZM_RX D5
+#endif
+#ifndef EZM_TX
+    #define EZM_TX D6
+#endif
+#ifndef MBT_UART_NUM
+    #define MBT_UART_NUM UART_NUM_2   // Multi-interface RTU client port (can be LP_UART_NUM_0)
+#endif
+#ifndef MBT_RX
+    #define MBT_RX D7
+#endif
+#ifndef MBT_TX
+    #define MBT_TX D8
+#endif
+#ifndef UART_BAUD_RATE
+    #define UART_BAUD_RATE 9600
+#endif
+
 // HAL instances
 ModbusHAL::TCP halForClient(LOOPBACK_IP_STR, MODBUS_PORT);
 ModbusHAL::TCP halForServer(MODBUS_PORT);
@@ -141,7 +166,7 @@ void ModbusTestServerTask(void* pvParameters) {
     Modbus::Logger::logln("Adding words to ModbusTestServer...");
     uint32_t startTime = millis();
     ssize_t freeHeapBefore = ESP.getFreeHeap();
-    ssize_t freePsramBefore = BOARD_HAS_PSRAM ? ESP.getFreePsram() : 0;
+    ssize_t freePsramBefore = ESP.getFreePsram(); // returns 0 on boards without PSRAM
     
     for (int i = MBT_INIT_START_REG; i < MBT_INIT_START_REG + MBT_INIT_REG_COUNT; i++) {
         for (uint8_t rt : regTypes) {
@@ -161,10 +186,10 @@ void ModbusTestServerTask(void* pvParameters) {
     }
     uint32_t endTime = millis();
     ssize_t freeHeapAfter = ESP.getFreeHeap();
-    ssize_t freePsramAfter = BOARD_HAS_PSRAM ? ESP.getFreePsram() : 0;
+    ssize_t freePsramAfter = ESP.getFreePsram(); // returns 0 on boards without PSRAM
     ssize_t memoryUsed = freeHeapBefore - freeHeapAfter;
     ssize_t psramUsed = freePsramBefore - freePsramAfter;
-    if (BOARD_HAS_PSRAM) {
+    if (ESP.getPsramSize() > 0) {
         Modbus::Logger::logf("Added %d words in %d ms, consuming %zd bytes of heap and %zd bytes of PSRAM\n", MBT_INIT_REG_COUNT * 4, endTime - startTime, memoryUsed, psramUsed);
     } else {
         Modbus::Logger::logf("Added %d words in %d ms, consuming %zd bytes of heap\n", MBT_INIT_REG_COUNT * 4, endTime - startTime, memoryUsed);
@@ -1841,8 +1866,8 @@ ModbusInterface::TCP test2ClientTcp(test2ClientTcpHal, Modbus::CLIENT);
 Modbus::Client test2TcpClient(test2ClientTcp);
 
 // SHARED RTU instances (no conflicts on RTU, filtered by slaveId)
-ModbusHAL::UART multiInterfaceServerRtuHal(UART_NUM_1, 9600, ModbusHAL::UART::CONFIG_8N1, D5, D6);
-ModbusHAL::UART multiInterfaceClientRtuHal(UART_NUM_2, 9600, ModbusHAL::UART::CONFIG_8N1, D7, D8);
+ModbusHAL::UART multiInterfaceServerRtuHal(EZM_UART_NUM, UART_BAUD_RATE, ModbusHAL::UART::CONFIG_8N1, EZM_RX, EZM_TX);
+ModbusHAL::UART multiInterfaceClientRtuHal(MBT_UART_NUM, UART_BAUD_RATE, ModbusHAL::UART::CONFIG_8N1, MBT_RX, MBT_TX);
 ModbusInterface::RTU multiInterfaceServerRtu(multiInterfaceServerRtuHal, Modbus::SERVER);
 ModbusInterface::RTU multiInterfaceClientRtu(multiInterfaceClientRtuHal, Modbus::CLIENT);
 Modbus::Client multiInterfaceRtuClient(multiInterfaceClientRtu);

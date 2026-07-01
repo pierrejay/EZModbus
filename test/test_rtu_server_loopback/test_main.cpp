@@ -6,18 +6,35 @@
 #include "ModbusTestClient.h"
 #include <utils/ModbusLogger.hpp>
 
-// Pin definitions
-#define MBT_RX D7 // ModbusTest RX
-#define MBT_TX D8 // ModbusTest TX
-#define EZM_RX D5 // EZModbus RX
-#define EZM_TX D6 // EZModbus TX
-
-// Serial ports definitions
-#define EZM_SERIAL Serial1
-#define MBT_SERIAL Serial2
+// Pin / port / baud definitions - overridable per-environment via build flags.
+// The test AGENT needs a HardwareSerial, so it always sits on the EZM_* side (which
+// carries one on every board); the EZModbus server under test sits on the MBT_* side
+// (an IDF port, e.g. the LP-UART on the C6). Both sides are the same two ports used by
+// the other loopback suites, so one set of jumpers works. Defaults target the XIAO S3.
+#ifndef EZM_SERIAL
+    #define EZM_SERIAL Serial1        // Test agent HardwareSerial instance (HP UART)
+#endif
+#ifndef EZM_RX
+    #define EZM_RX D5                 // Test agent RX
+#endif
+#ifndef EZM_TX
+    #define EZM_TX D6                 // Test agent TX
+#endif
+#ifndef MBT_UART_NUM
+    #define MBT_UART_NUM UART_NUM_2   // EZModbus server IDF port (can be LP_UART_NUM_0)
+#endif
+#ifndef MBT_RX
+    #define MBT_RX D7                 // EZModbus server RX
+#endif
+#ifndef MBT_TX
+    #define MBT_TX D8                 // EZModbus server TX
+#endif
+#ifndef UART_BAUD_RATE
+    #define UART_BAUD_RATE 9600
+#endif
 
 // Create our test agent and client
-ModbusTestAgent agent(MBT_SERIAL, 20000);
+ModbusTestAgent agent(EZM_SERIAL, 20000);
 ModbusTestClient testClient(agent); 
 
 #define HOLDING_REGISTERS 3
@@ -27,11 +44,11 @@ ModbusTestClient testClient(agent);
 
 // EZModbus RTU server with StaticWordStore
 ModbusHAL::UART::IDFConfig ezm_cfg = {
-    .uartNum = UART_NUM_1,
-    .baud = 9600,
+    .uartNum = MBT_UART_NUM,
+    .baud = UART_BAUD_RATE,
     .config = ModbusHAL::UART::CONFIG_8N1,
-    .rxPin = EZM_RX,
-    .txPin = EZM_TX
+    .rxPin = MBT_RX,
+    .txPin = MBT_TX
 };
 ModbusHAL::UART ezm_uart(ezm_cfg);
 ModbusInterface::RTU rtu(ezm_uart, Modbus::SLAVE);
@@ -72,7 +89,7 @@ void setUp() {
     // Clear both RX buffers before each test
     vTaskDelay(pdMS_TO_TICKS(10));
     ezm_uart.flush_input();
-    flushSerialBuffer(MBT_SERIAL);
+    flushSerialBuffer(EZM_SERIAL);
     vTaskDelay(pdMS_TO_TICKS(10));
 }
 
@@ -1905,9 +1922,9 @@ void setup() {
     vTaskDelay(pdMS_TO_TICKS(1000));
 
     // ModbusTestClient init
-    MBT_SERIAL.begin(9600, SERIAL_8N1, MBT_RX, MBT_TX);
+    EZM_SERIAL.begin(UART_BAUD_RATE, SERIAL_8N1, EZM_RX, EZM_TX);
     vTaskDelay(pdMS_TO_TICKS(50));
-    flushSerialBuffer(MBT_SERIAL);
+    flushSerialBuffer(EZM_SERIAL);
 
     Modbus::Logger::logln("[setup] Initializing EzmUart...");
     esp_err_t uart_init_res = ezm_uart.begin();
