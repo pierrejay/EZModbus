@@ -100,6 +100,12 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
     * Only used for Soft DE mode (LP-UART)
     * Default: 0 (auto: ~2 bit-times computed from the baud rate)
 
+* **`EZMODBUS_HAL_UART_LP_SCLK`**
+    * Clock source for LP-UART ports (targets with an LP-UART only)
+    * `LP_UART_SCLK_DEFAULT` (RC_FAST): tested up to 115200 baud but imprecise (~±7%)
+    * `LP_UART_SCLK_XTAL_D2`: crystal-derived, more accurate
+    * Default: `LP_UART_SCLK_DEFAULT`
+
 ### ModbusHAL_TCP.h
 
 * **`EZMODBUS_HAL_TCP_RX_Q_SIZE`**

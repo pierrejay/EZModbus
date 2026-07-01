@@ -55,6 +55,9 @@ public:
     static constexpr int WRITE_TIMEOUT_MS = 1000;
     static constexpr int READ_TIMEOUT_MS = 10;
 
+    // Safety margin (symbols) on the RX frame-gap backstop for ISR/scheduler latency
+    static constexpr uint32_t RX_FRAME_GAP_MARGIN_SYMBOLS = 4;
+
     // Soft DE (RS485 direction control by GPIO for LP-UART ports)
     static constexpr bool SOFT_DE_ACTIVE_HIGH = (bool)EZMODBUS_HAL_UART_SOFT_DE_ACTIVE_HIGH;
     static constexpr uint32_t SOFT_DE_GUARD_US = (uint32_t)EZMODBUS_HAL_UART_SOFT_DE_GUARD_US;
@@ -183,6 +186,11 @@ public:
     esp_err_t getBufferedDataLen(size_t* size) const;
     esp_err_t setTimeoutThreshold(uint8_t timeout_threshold);
     esp_err_t setTimeoutMicroseconds(uint64_t timeout_us);  // Nouvelle méthode
+
+    // Max time the RX driver can stay silent (no event) while a frame is still arriving,
+    // from HW FIFO depth + idle-timeout window. Used by the RTU as a backstop when no HW
+    // idle event fires (e.g. frame ending on a FIFO-full boundary, common on LP-UART).
+    uint64_t getRxFrameGapTimeoutUs() const;
     esp_err_t enablePatternDetection(char pattern_char, uint8_t pattern_length);
     esp_err_t disablePatternDetection();
     esp_err_t flushTxFifo();

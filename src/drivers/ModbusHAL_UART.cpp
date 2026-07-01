@@ -147,9 +147,9 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
         return err;
     }
     
-    if (!_internal_event_queue_handle && DRIVER_EVENT_QUEUE_SIZE > 0) { 
+    if (!_internal_event_queue_handle && DRIVER_EVENT_QUEUE_SIZE > 0) {
          Modbus::Debug::LOG_MSGF("Error: uart_driver_install succeeded but queue handle is null for port %d", _uart_num);
-         return ESP_FAIL; 
+         return ESP_FAIL;
     }
 
     if (has_de) {
@@ -475,6 +475,25 @@ esp_err_t UART::setTimeoutMicroseconds(uint64_t timeout_us) {
         Modbus::Debug::LOG_MSGF("Failed to set UART timeout: %s", esp_err_to_name(err));
     }
     return err;
+}
+
+uint64_t UART::getRxFrameGapTimeoutUs() const {
+    if (!_is_driver_installed || _baud_rate == 0) return 0;
+
+    // 11-bit symbol (start + 8 data + parity + stop), matching setTimeoutMicroseconds()
+    uint64_t usPerSymbol = (11ULL * 1000000ULL) / _baud_rate;
+    if (usPerSymbol == 0) usPerSymbol = 1;
+
+    // Max bytes the FIFO can buffer before the driver must raise an event; it can stay silent
+    // this long mid-frame, so the backstop must exceed it.
+    uint32_t fifoLen =
+    #if (SOC_UART_LP_NUM >= 1)
+        ((int)_uart_num >= SOC_UART_HP_NUM) ? (uint32_t)SOC_LP_UART_FIFO_LEN :
+    #endif
+        (uint32_t)SOC_UART_FIFO_LEN;
+
+    uint32_t rxTimeoutSym = (_rx_timeout_threshold > 0) ? (uint32_t)_rx_timeout_threshold : 0;
+    return (uint64_t)(fifoLen + rxTimeoutSym + RX_FRAME_GAP_MARGIN_SYMBOLS) * usPerSymbol;
 }
 
 esp_err_t UART::applyRuntimeConfig() {

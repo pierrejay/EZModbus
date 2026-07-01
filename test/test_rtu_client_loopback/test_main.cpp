@@ -1796,7 +1796,7 @@ void setup() {
 
     // Run tests
     UNITY_BEGIN();
-    
+
     // Register all generated tests
     #define X(Name, ReadSingle, ReadMulti, Addr, Expect, FC) \
         RUN_TEST(test_read_##Name##_sync); \
