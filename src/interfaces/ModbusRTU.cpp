@@ -545,10 +545,7 @@ void RTU::rxTxTask(void* rtu) {
         if (active_member == nullptr) {
             if (!self->_isInitialized) { break; }
             // Frame-gap backstop: delimit the buffered frame when no HW idle-timeout event arrives -
-            // e.g. a frame ending exactly on a FIFO-full boundary (nothing left for idle to fire on),
-            // common on the small LP-UART FIFO. Window > the normal inter-event gap, so it never
-            // fires mid-frame. Read live from the HAL so it tracks any baud/timeout reconfig (see
-            // UART::getRxFrameGapTimeoutUs).
+            // Kept as a safety net, but the primary delimiter is uart_set_always_rx_timeout() (enabled in begin())
             uint64_t frameGapUs = self->_uartHAL.getRxFrameGapTimeoutUs();
             if (self->_rxBuffer.size() > 0 && frameGapUs > 0 &&
                 (TIME_US() - self->_lastRxByteTimeUs) >= frameGapUs) {

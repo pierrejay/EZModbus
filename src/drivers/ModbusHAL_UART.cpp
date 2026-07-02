@@ -165,7 +165,11 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
     }
 
     _is_driver_installed = true;
-    
+
+    // Guarantee an RX idle-timeout event at the end of every frame, even one that ends exactly
+    // on a FIFO-full boundary (required for LP-UART)
+    uart_set_always_rx_timeout(_uart_num, true);
+
     Modbus::Debug::LOG_MSGF("Port %d initialized. Baud: %d, Config: 0x%X, TX:%d, RX:%d, DE:%d", _uart_num, (int)_baud_rate, (unsigned int)_config_flags, _pin_tx, _pin_rx, (int)_pin_rts_de);
     return ESP_OK;
 }
