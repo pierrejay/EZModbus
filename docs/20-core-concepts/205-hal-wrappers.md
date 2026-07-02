@@ -122,9 +122,10 @@ uart.begin(); // Handles all UART and RS-485 configuration (returns an esp_err_t
     * **Limited baud range.** The LP-UART clock divider cannot reach low baud rates: 1200
       and 2400 bps are unachievable (`begin()` returns an error from the IDF). Those speeds
       are unusual for Modbus devices anyway.
-    * **Clock accuracy.** The default LP clock source (RC_FAST, ±7%) is intended for
-      low-power operation and may be too imprecise for a reliable RTU bus. This hasn't been
-      tested yet, so take care when using RS485 with LP-UART.
+    * **Clock accuracy.** The default LP clock source (RC_FAST) is auto-calibrated at boot and
+      has been validated in loopback at 9600 and 115200 bps (with and without software DE). For a
+      long or timing-critical external bus, set `EZMODBUS_HAL_UART_LP_SCLK=LP_UART_SCLK_XTAL_D2`
+      to derive the LP-UART clock from the crystal (more accurate, but unavailable in deep sleep).
 
 The HAL RTU object is then passed to the Modbus interface:
 
