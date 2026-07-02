@@ -80,7 +80,7 @@ ModbusHAL::UART::Config uartConfig = {
     .rxPin = 7,               // RX pin        
     .txPin = 8,               // TX pin
     .dePin = -1               // RE/DE pin (optional, -1 = disabled)
-}
+};
 
 ModbusHAL::UART uart(uartConfig); // Create UART instance
 uart.begin(); // Handles all UART and RS-485 configuration (returns an esp_err_t)
@@ -100,12 +100,32 @@ ModbusHAL::UART::Config uartConfig = {
     .config = ModbusHAL::UART::CONFIG_8N1,  // Serial config: data bits, parity, stop bits
     .rxPin = GPIO_NUM_7,                    // RX pin        
     .txPin = GPIO_NUM_8,                    // TX pin
-    .dePin = GPIO_NUM_NC                    // RE/DE pin (optional, -1 = disabled)
-}
+    .dePin = -1                             // RE/DE pin (optional, -1 = disabled)
+};
 
 ModbusHAL::UART uart(uartConfig); // Create UART instance
 uart.begin(); // Handles all UART and RS-485 configuration (returns an esp_err_t)
 ```
+
+!!! warning "LP-UART limitations (ESP32-C6 / C5 / P4)"
+    On chips that expose a low-power UART (`LP_UART_NUM_0`), the LP peripheral is more
+    constrained than a regular HP UART. EZModbus configures its clock source automatically,
+    but be aware of the following hardware/SDK limits:
+
+    * **No hardware RS485 direction control.** The ESP-IDF only allows the LP-UART in plain
+      UART mode, so the peripheral cannot toggle a DE/RTS pin automatically. When `dePin` is set
+      on an LP-UART, EZModbus falls back to **software DE**: it drives the pin as a GPIO around
+      each transmission (asserted before TX, released once the last stop bit is out). The pin is
+      active-high by default; set `EZMODBUS_HAL_UART_SOFT_DE_ACTIVE_HIGH=0` for an active-low
+      transceiver, and `EZMODBUS_HAL_UART_SOFT_DE_GUARD_US` to tune the turnaround delay (default:
+      2 bit-time periods calculated at the current baudrate).
+    * **Limited baud range.** The LP-UART clock divider cannot reach low baud rates: 1200
+      and 2400 bps are unachievable (`begin()` returns an error from the IDF). Those speeds
+      are unusual for Modbus devices anyway.
+    * **Clock accuracy.** The default LP clock source (RC_FAST) is auto-calibrated at boot and
+      has been validated in loopback at 9600 and 115200 bps (with and without software DE). For a
+      long or timing-critical external bus, set `EZMODBUS_HAL_UART_LP_SCLK=LP_UART_SCLK_XTAL_D2`
+      to derive the LP-UART clock from the crystal (more accurate, but unavailable in deep sleep).
 
 The HAL RTU object is then passed to the Modbus interface:
 

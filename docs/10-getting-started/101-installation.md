@@ -14,7 +14,7 @@ Works with all ESP32 series chip (classic, S2, S3, C3...), single or dual-core.
 ### Environment
 
 * ESP-IDF (tested on v5.4+)
-* or ESP32 Arduino Core (tested on v3.0+) & PlatformIO - see [pioarduino](https://claude.ai/chat/link-to-your-arduino-doc)
+* or ESP32 Arduino Core (tested on v3.0+) & PlatformIO - see [pioarduino](https://github.com/pioarduino/platform-espressif32/tree/55.03.39)
 * Requires C++17 or up (normally already enabled in ESP-IDF & PlatformIO)
 
 ## Installation
@@ -25,7 +25,7 @@ Works with all ESP32 series chip (classic, S2, S3, C3...), single or dual-core.
 
     ```yaml
     dependencies:
-      pierrejay/EZModbus: "^1.1.5"
+      pierrejay/EZModbus: "^1.1.7"
     ```
 
 * Build your project - the component will be downloaded automatically:

@@ -20,7 +20,15 @@
 
 // ModbusTestServer initialization functions
 #define MBT_INIT_START_REG                  0x00         // Default start register address
-#define MBT_INIT_REG_COUNT                  2100           // Default number of registers
+#ifndef MBT_INIT_REG_COUNT
+    #define MBT_INIT_REG_COUNT              2100         // Coil/discrete range (covers the 2000-coil max read)
+#endif
+// Holding/input registers only need a small range (max register read is 125), so we
+// populate far fewer of them. This keeps the Word store small enough to leave heap for
+// the Wi-Fi stack on PSRAM-less chips (e.g. the ESP32-C6), without losing coverage.
+#ifndef MBT_ANALOG_COUNT
+    #define MBT_ANALOG_COUNT               256
+#endif
 #define MBT_INIT_COIL_VALUE(x)              true         // Default coil value : true
 #define MBT_INIT_DISCRETE_INPUT_VALUE(x)    true         // Default discrete input value : true
 #define MBT_INIT_HOLDING_REGISTER_VALUE(x)  (10 + x)     // Default holding register value : 10 + register index

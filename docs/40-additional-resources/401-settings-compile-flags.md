@@ -80,7 +80,7 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
 * **`EZMODBUS_TCP_TXN_SAFETY_TIMEOUT`**
     * Timeout before closing a transaction after 1st message if no response from server or client (ms)
     * Default: 5000
-* **`EZMODBUS_TCP_TASK_STACK_SIZE`**
+* **`EZMODBUS_TCP_RXTX_TASK_STACK_SIZE`**
     * Stack size of TCP task (bytes)
     * Default: 4096, or 6144 if debug enabled
 
@@ -90,8 +90,27 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
     * Size of IDF UART event queue (# events)
     * Default: 20
 
+* **`EZMODBUS_HAL_UART_SOFT_DE_ACTIVE_HIGH`**
+    * Polarity of the software DE pin used on LP-UART ports (1 = active-high, 0 = active-low)
+    * Only used for Soft DE mode (LP-UART)
+    * Default: 1 (active-high)
+
+* **`EZMODBUS_HAL_UART_SOFT_DE_GUARD_US`**
+    * Extra delay (µs) after a transmission before releasing the software DE pin
+    * Only used for Soft DE mode (LP-UART)
+    * Default: 0 (auto: ~2 bit-times computed from the baud rate)
+
+* **`EZMODBUS_HAL_UART_LP_SCLK`**
+    * Clock source for LP-UART ports (targets with an LP-UART only)
+    * `LP_UART_SCLK_DEFAULT` (RC_FAST): tested up to 115200 baud but imprecise (~±7%)
+    * `LP_UART_SCLK_XTAL_D2`: crystal-derived, more accurate
+    * Default: `LP_UART_SCLK_DEFAULT`
+
 ### ModbusHAL_TCP.h
 
+* **`EZMODBUS_HAL_TCP_MAX_ACTIVE_SOCKETS`**
+    * Maximum number of simultaneously tracked TCP sockets
+    * Default: 4
 * **`EZMODBUS_HAL_TCP_RX_Q_SIZE`**
     * Size of TCP driver RX queue size (# frames)
     * Default: 16
@@ -122,6 +141,15 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
 * **`EZMODBUS_LOG_TASK_STACK_SIZE`**
     * Stack size of Log task (bytes)
     * Default: 4096
+* **`EZMODBUS_LOG_TASK_CORE`**
+    * Log task core affinity
+    * Default: 0 on single-core targets, 1 otherwise
 * **`EZMODBUS_LOG_OUTPUT`**
     * Log output pipe (Arduino only)
     * Default: `Serial` on Arduino. On ESP-IDF logs go to the IDF console (stdout) configured in menuconfig.
+* **`EZMODBUS_LOG_CHUNK_SIZE`**
+    * Log output chunk size for Arduino streams
+    * Default: 64 on Arduino, unused on ESP-IDF
+* **`EZMODBUS_LOG_FLUSH`**
+    * Flush operation used by the log output sink
+    * Default: `EZMODBUS_LOG_OUTPUT.flush()` on Arduino, `fflush(stdout)` otherwise

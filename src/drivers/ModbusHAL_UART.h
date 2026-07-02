@@ -21,6 +21,23 @@
     #define EZMODBUS_HAL_UART_EVT_Q_SIZE 20
 #endif
 
+#ifndef EZMODBUS_HAL_UART_SOFT_DE_ACTIVE_HIGH // Software DE polarity (1 = active-high, 0 = active-low)
+    #define EZMODBUS_HAL_UART_SOFT_DE_ACTIVE_HIGH 1
+#endif
+
+#ifndef EZMODBUS_HAL_UART_SOFT_DE_GUARD_US // Extra delay (us) after TX before releasing software DE (0 = auto, ~2 bit-times from baud)
+    #define EZMODBUS_HAL_UART_SOFT_DE_GUARD_US 0
+#endif
+
+#if (SOC_UART_LP_NUM >= 1)
+// LP-UART clock source. Default (RC_FAST) works in every power mode but is imprecise (~±7%),
+// which can corrupt frames against an accurate peer. For an always-awake RTU bus, override with
+// LP_UART_SCLK_XTAL_D2 (crystal-derived, accurate; not available in deep sleep).
+#ifndef EZMODBUS_HAL_UART_LP_SCLK
+    #define EZMODBUS_HAL_UART_LP_SCLK LP_UART_SCLK_DEFAULT
+#endif
+#endif
+
 namespace ModbusHAL {
 
 class UART {
@@ -36,7 +53,14 @@ public:
     static constexpr int DRIVER_TX_BUFFER_SIZE = 256; // Set to 0 for a blocking TX without driver buffer
     static constexpr int DRIVER_EVENT_QUEUE_SIZE = (int)EZMODBUS_HAL_UART_EVT_Q_SIZE; // Will be used internally
     static constexpr int WRITE_TIMEOUT_MS = 1000;
-    static constexpr int READ_TIMEOUT_MS = 10; 
+    static constexpr int READ_TIMEOUT_MS = 10;
+
+    // Safety margin (symbols) on the RX frame-gap backstop for ISR/scheduler latency
+    static constexpr uint32_t RX_FRAME_GAP_MARGIN_SYMBOLS = 4;
+
+    // Soft DE (RS485 direction control by GPIO for LP-UART ports)
+    static constexpr bool SOFT_DE_ACTIVE_HIGH = (bool)EZMODBUS_HAL_UART_SOFT_DE_ACTIVE_HIGH;
+    static constexpr uint32_t SOFT_DE_GUARD_US = (uint32_t)EZMODBUS_HAL_UART_SOFT_DE_GUARD_US;
 
     // Configuration flags
     static constexpr uint32_t CONFIG_5N1 = UART_DATA_5_BITS | (UART_PARITY_DISABLE << 8) | (UART_STOP_BITS_1 << 16);
@@ -155,9 +179,18 @@ public:
     // Configure UART to support RS485 features
     esp_err_t waitTxComplete(TickType_t timeout_ticks = pdMS_TO_TICKS(WRITE_TIMEOUT_MS)) const;
     esp_err_t setRS485Mode(bool enable);
+
+    // True when the DE pin is toggled by software (LP-UART)
+    bool isSoftDE() const { return _soft_de; }
+
     esp_err_t getBufferedDataLen(size_t* size) const;
     esp_err_t setTimeoutThreshold(uint8_t timeout_threshold);
     esp_err_t setTimeoutMicroseconds(uint64_t timeout_us);  // Nouvelle méthode
+
+    // Max time the RX driver can stay silent (no event) while a frame is still arriving,
+    // from HW FIFO depth + idle-timeout window. Used by the RTU as a backstop when no HW
+    // idle event fires (e.g. frame ending on a FIFO-full boundary, common on LP-UART).
+    uint64_t getRxFrameGapTimeoutUs() const;
     esp_err_t enablePatternDetection(char pattern_char, uint8_t pattern_length);
     esp_err_t disablePatternDetection();
     esp_err_t flushTxFifo();
@@ -182,12 +215,15 @@ private:
     int8_t _rx_timeout_threshold = -1; // -1 = not set by user; >=0 = last value set via setTimeoutThreshold
     mutable Mutex _driver_mutex;
 
+    bool _soft_de = false; // true when the DE pin is toggled by software (LP-UART); see SOFT_DE_* flags
+
 // ===================================================================================
 // PRIVATE METHODS
 // ===================================================================================
 
     esp_err_t applyRuntimeConfig();
     esp_err_t setRS485ModeUnsafe(bool enable);
+    esp_err_t setupSoftDEUnsafe(); // Configure the DE pin as a GPIO output, idle in RX mode
     void restoreRxTimeout();
     static void decode_config_flags(uint32_t flags, uart_word_length_t& data_bits, uart_parity_t& parity, uart_stop_bits_t& stop_bits);
 

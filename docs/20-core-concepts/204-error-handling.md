@@ -14,10 +14,10 @@ enum Result {
     ERR_BUSY,
     ERR_TX_FAILED,
     ERR_TIMEOUT,
-    ERR_INIT_FAILED,
     ERR_INVALID_RESPONSE,
     ERR_NOT_INITIALIZED,
-    ERR_INIT_FAILED
+    ERR_INIT_FAILED,
+    ERR_TIMER_FAILURE
 };
 ```
 
@@ -35,6 +35,7 @@ static constexpr const char* toString(const Result result) {
         case ERR_INVALID_RESPONSE:   return "Invalid response";
         case ERR_NOT_INITIALIZED:    return "Client not initialized";
         case ERR_INIT_FAILED:        return "Init failed";
+        case ERR_TIMER_FAILURE:      return "FreeRTOS timer failure";
         default:                     return "Unknown result";
     }
 }

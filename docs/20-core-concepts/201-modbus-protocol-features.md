@@ -6,10 +6,10 @@
 
 Both client & server supports all four Modbus register types with appropriate read/write permissions:
 
-* `COIL` (digital inputs, read-write)
-* `DISCRETE_INPUT` (digital outputs, read-only)
-* `HOLDING_REGISTER` (analog inputs, read-write)
-* `INPUT_REGISTER` (analog outputs, read-only)
+* `COIL` (digital outputs, read-write)
+* `DISCRETE_INPUT` (digital inputs, read-only)
+* `HOLDING_REGISTER` (holding registers, read-write)
+* `INPUT_REGISTER` (input registers, read-only)
 
 ### Function codes
 
@@ -24,7 +24,7 @@ The function codes supported are the following:
 * `WRITE_MULTIPLE_COILS` (FC15)
 * `WRITE_MULTIPLE_REGISTERS` (FC16, for holding registers)
 
-They are described in the `Modbus::FunctionCode` enum and can be handled in plaintext in user code. Inconsistent data trigger explicit errors, such as `ERR_INVALID_REG_COUNT` when trying to use a “single write” function code while supplying several register values.
+They are described in the `Modbus::FunctionCode` enum and can be handled by name in user code. Inconsistent frame data triggers explicit codec errors, such as `ERR_INVALID_REG_COUNT` when trying to use a single-write function code while supplying several register values.
 
 !!! note
     Out of simplicity, the function code for “Diagnostics” and “Read/Write multiple registers” have not been implemented, the current features covering most common use cases for interfacing with industrial systems.

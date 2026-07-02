@@ -363,7 +363,8 @@ RTU::Result RTU::updateUartIdleDetection() {
         return Error(ERR_CONFIG_FAILED, esp_err_to_name(err));
     }
 
-    Modbus::Debug::LOG_MSGF("UART idle detection time set to: %u us", (uint32_t)_silenceTimeUs);
+    Modbus::Debug::LOG_MSGF("UART idle detection time set to: %u us (frame-gap backstop: %u us)",
+                            (uint32_t)_silenceTimeUs, (uint32_t)_uartHAL.getRxFrameGapTimeoutUs());
     return Success();
 }
 
@@ -409,8 +410,9 @@ RTU::Result RTU::handleUartEvent(const uart_event_t& event) {
                 // & flush or let processReceivedFrame() fail).
                 if (bytesActuallyRead > 0) {
                     _rxBuffer.trim(currentSize + bytesActuallyRead);
+                    _lastRxByteTimeUs = TIME_US(); // Arm the software silence fallback (see rxTxTask)
                     Modbus::Debug::LOG_MSGF("Pulled %d bytes from UART into RX buffer, total %u", bytesActuallyRead, (uint32_t)_rxBuffer.size());
-                } 
+                }
 
                 // If read returned <0, it indicates an UART error, we flush everything
                 if (bytesActuallyRead < 0) {
@@ -429,10 +431,7 @@ RTU::Result RTU::handleUartEvent(const uart_event_t& event) {
             // If RX timeout occurred (event.timeout_flag is true), process the accumulated data as a frame
             if (event.timeout_flag) {
                 Modbus::Debug::LOG_MSGF("Silence time detected by UART driver, processing RX buffer (%u bytes)", (uint32_t)_rxBuffer.size());
-                if (_rxBuffer.size() > 0) {
-                    processReceivedFrame(_rxBuffer);
-                }
-                _rxBuffer.clear();
+                flushRxFrame();
             }
             break;
         }
@@ -458,6 +457,17 @@ RTU::Result RTU::handleUartEvent(const uart_event_t& event) {
             return Error(ERR_RX_FAILED, "unhandled UART event");
     }
     return Success();
+}
+
+/* @brief Decode the accumulated RX buffer as one complete frame, then clear it
+ * @note Called by the rxTxTask exclusively, from either the hardware idle-timeout event or the
+ *       software silence fallback. Safe to call with an empty buffer (no-op).
+ */
+void RTU::flushRxFrame() {
+    if (_rxBuffer.size() > 0) {
+        processReceivedFrame(_rxBuffer);
+    }
+    _rxBuffer.clear();
 }
 
 /* @brief Handle a TX request
@@ -522,12 +532,27 @@ void RTU::rxTxTask(void* rtu) {
     RTU* self = static_cast<RTU*>(rtu);
 
     while (self->_isInitialized) {
-        QueueSetMemberHandle_t active_member = xQueueSelectFromSet(self->_eventQueueSet, pdMS_TO_TICKS(RXTX_QUEUE_CHECK_TIMEOUT_MS)); 
+        // Block on the event queue set (no busy-wait: the task sleeps until an event or timeout).
+        // While a frame is being assembled, poll fast (1 tick) so the software silence fallback stays
+        // responsive; when idle, sleep on the long interval to yield CPU.
+        TickType_t waitTicks = (self->_rxBuffer.size() > 0)
+            ? pdMS_TO_TICKS(1)
+            : pdMS_TO_TICKS(RXTX_QUEUE_CHECK_TIMEOUT_MS);
+        if (waitTicks == 0) waitTicks = 1; // pdMS_TO_TICKS(1) rounds to 0 below a 1 kHz tick: keep it blocking
+        QueueSetMemberHandle_t active_member = xQueueSelectFromSet(self->_eventQueueSet, waitTicks);
 
         // Get out of the loop if the task is not initialized, otherwise wait for the next event
-        if (active_member == nullptr) { 
+        if (active_member == nullptr) {
             if (!self->_isInitialized) { break; }
-            continue; 
+            // Frame-gap backstop: delimit the buffered frame when no HW idle-timeout event arrives -
+            // Kept as a safety net, but the primary delimiter is uart_set_always_rx_timeout() (enabled in begin())
+            uint64_t frameGapUs = self->_uartHAL.getRxFrameGapTimeoutUs();
+            if (self->_rxBuffer.size() > 0 && frameGapUs > 0 &&
+                (TIME_US() - self->_lastRxByteTimeUs) >= frameGapUs) {
+                Modbus::Debug::LOG_MSGF("Frame-gap backstop: processing RX buffer (%u bytes)", (uint32_t)self->_rxBuffer.size());
+                self->flushRxFrame();
+            }
+            continue;
         }
 
         // If we received data from UART, push it to the rxBuffer

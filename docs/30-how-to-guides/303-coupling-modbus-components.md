@@ -12,7 +12,8 @@ You can easily create multiple server instances on a single physical RTU interfa
 
 ```cpp
 // Create one UART & RTU interface using Serial2
-ModbusHAL::UART uart(Serial2, 9600, SERIAL_8N1);
+ModbusHAL::UART uart(Serial2, 9600, SERIAL_8N1,
+                     RS485_RX_PIN, RS485_TX_PIN, RS485_DE_PIN);
 ModbusInterface::RTU rtuIface(uart, Modbus::SLAVE);
 
 // Create one store for each server
@@ -71,7 +72,8 @@ While the Modbus specification doesn’t formally support multiple masters on th
 
 ```cpp
 // Create one UART & RTU interface
-ModbusHAL::UART uart(Serial2, 9600, SERIAL_8N1);
+ModbusHAL::UART uart(Serial2, 9600, SERIAL_8N1,
+                     RS485_RX_PIN, RS485_TX_PIN, RS485_DE_PIN);
 ModbusInterface::RTU rtuIface(uart, Modbus::MASTER);
 
 // Create multiple clients
@@ -105,8 +107,10 @@ If you need to communicate with separate Modbus networks from the same MCU, simp
 
 ```cpp
 // Create multiple UART instances for two separate ports
-ModbusHAL::UART uart1(Serial1, 9600, SERIAL_8N1);
-ModbusHAL::UART uart2(Serial2, 115200, SERIAL_8E2);
+ModbusHAL::UART uart1(Serial1, 9600, SERIAL_8N1,
+                      RS485_1_RX_PIN, RS485_1_TX_PIN, RS485_1_DE_PIN);
+ModbusHAL::UART uart2(Serial2, 115200, SERIAL_8E2,
+                      RS485_2_RX_PIN, RS485_2_TX_PIN, RS485_2_DE_PIN);
 
 // Create RTU interfaces
 ModbusInterface::RTU rtuIface1(uart1, Modbus::CLIENT);

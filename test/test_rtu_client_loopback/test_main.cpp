@@ -12,19 +12,40 @@
     #define TEST_ASSERT_START() { vTaskDelay(pdMS_TO_TICKS(50)); }
 #endif
 
-// Pin definitions
-#define MBT_RX D7
-#define MBT_TX D8
-#define EZM_RX D5
-#define EZM_TX D6
+// Pin / port / baud definitions - overridable per-environment via build flags.
+// Defaults target the Seeed XIAO ESP32-S3 loopback wiring; the *_lpuart env overrides
+// MBT_* to put the server on the LP-UART (see platformio.ini).
+#ifndef EZM_SERIAL
+    #define EZM_SERIAL Serial1        // Client HardwareSerial instance (HP UART)
+#endif
+#ifndef EZM_RX
+    #define EZM_RX D5
+#endif
+#ifndef EZM_TX
+    #define EZM_TX D6
+#endif
+#ifndef MBT_UART_NUM
+    #define MBT_UART_NUM UART_NUM_2   // Server IDF port (can be LP_UART_NUM_0)
+#endif
+#ifndef MBT_RX
+    #define MBT_RX D7
+#endif
+#ifndef MBT_TX
+    #define MBT_TX D8
+#endif
+#ifndef MBT_DE
+    #define MBT_DE -1                 // Server DE pin (-1 = none); exercises soft DE on LP-UART
+#endif
 
 // UART configurations
 #define UART_BUFFER_SIZE 512
-#define UART_BAUD_RATE 921600
+#ifndef UART_BAUD_RATE
+    #define UART_BAUD_RATE 921600
+#endif
 
 // EZModbus RTU client: use ArduinoConfig
 ModbusHAL::UART::ArduinoConfig ezm_cfg = {
-    .serial = Serial1,
+    .serial = EZM_SERIAL,
     .baud = UART_BAUD_RATE,
     .config = SERIAL_8N1,
     .rxPin = EZM_RX,
@@ -36,15 +57,19 @@ Modbus::Client client(ezm);
 
 // EZModbus RTU server for testing: use IDFConfig
 ModbusHAL::UART::IDFConfig mbt_cfg = {
-    .uartNum = UART_NUM_2,
+    .uartNum = MBT_UART_NUM,
     .baud = UART_BAUD_RATE,
     .config = ModbusHAL::UART::CONFIG_8N1,
     .rxPin = MBT_RX,
-    .txPin = MBT_TX
+    .txPin = MBT_TX,
+    .dePin = MBT_DE
 };
 ModbusHAL::UART mbt_uart(mbt_cfg);
 ModbusInterface::RTU mbt(mbt_uart, Modbus::SERVER);
-Modbus::DynamicWordStore dynamicStore(10000);  // Heap-allocated store
+// Capacity follows the register count (4 word types per address). Kept in sync so a smaller
+// MBT_INIT_REG_COUNT (e.g. on RAM-constrained chips without PSRAM like the ESP32-C6) also shrinks
+// this heap reservation - a hardcoded 10000 would OOM at static-init and hang before USB comes up.
+Modbus::DynamicWordStore dynamicStore(MBT_INIT_REG_COUNT * 4);  // Heap-allocated store
 Modbus::Server server(mbt, dynamicStore);
 uint16_t serverDiscreteInputs[MBT_INIT_START_REG + MBT_INIT_REG_COUNT];
 uint16_t serverCoils[MBT_INIT_START_REG + MBT_INIT_REG_COUNT];
@@ -122,7 +147,7 @@ void ModbusTestServerTask(void* pvParameters) {
     Modbus::Logger::logln("Adding words to ModbusTestServer...");
     uint32_t startTime = millis();    
     ssize_t freeHeapBefore = ESP.getFreeHeap();
-    ssize_t freePsramBefore = BOARD_HAS_PSRAM ? ESP.getFreePsram() : 0;
+    ssize_t freePsramBefore = ESP.getFreePsram(); // returns 0 on boards without PSRAM
     
     for (int i = MBT_INIT_START_REG; i < MBT_INIT_START_REG + MBT_INIT_REG_COUNT; i++) { // Insert in order
     // for (int i = MBT_INIT_START_REG + MBT_INIT_REG_COUNT - 1; i >= MBT_INIT_START_REG; i--) { //
@@ -149,10 +174,10 @@ void ModbusTestServerTask(void* pvParameters) {
     }
     uint32_t endTime = millis();
     ssize_t freeHeapAfter = ESP.getFreeHeap();
-    ssize_t freePsramAfter = BOARD_HAS_PSRAM ? ESP.getFreePsram() : 0;
+    ssize_t freePsramAfter = ESP.getFreePsram(); // returns 0 on boards without PSRAM
     ssize_t memoryUsed = freeHeapBefore - freeHeapAfter;
     ssize_t psramUsed = freePsramBefore - freePsramAfter;
-    if (BOARD_HAS_PSRAM) {
+    if (ESP.getPsramSize() > 0) {
         Modbus::Logger::logf("Added %d words in %d ms, consuming %zd bytes of heap and %zd bytes of PSRAM\n", MBT_INIT_REG_COUNT * 4, endTime - startTime, memoryUsed, psramUsed);
     } else {
         Modbus::Logger::logf("Added %d words in %d ms, consuming %zd bytes of heap\n", MBT_INIT_REG_COUNT * 4, endTime - startTime, memoryUsed);
@@ -1415,16 +1440,25 @@ void test_broadcast() {
 
 // TEST_CONCURRENT_CALLS DATA STRUCTURES & TASKS
 
+// Second task's core affinity: on single-core targets (e.g. ESP32-C6) there is no core 1,
+// so both tasks run on core 0 (pinning to 1 would trip a configASSERT).
+#ifdef CONFIG_FREERTOS_UNICORE
+    #define TEST_SECOND_CORE 0
+#else
+    #define TEST_SECOND_CORE 1
+#endif
+
 // Synchronization data structure
 struct SyncData {
     SemaphoreHandle_t startSignal;
     SemaphoreHandle_t resultsMutex;
     SemaphoreHandle_t doneSignal;
-    Modbus::Client::Result core0Result;
-    Modbus::Client::Result core1Result;
+    int nextSlot;                        // Next result slot to claim (0 then 1), by task not by core
+    Modbus::Client::Result core0Result;  // Result of the 1st task (slot 0)
+    Modbus::Client::Result core1Result;  // Result of the 2nd task (slot 1)
 };
 
-// Task executed on each core
+// Task executed by each concurrent worker (may share a core on single-core targets)
 auto concurrentTask = [](void* pv) {
     auto sd = static_cast<SyncData*>(pv);
     int core = xPortGetCoreID();
@@ -1451,10 +1485,11 @@ auto concurrentTask = [](void* pv) {
             result == Modbus::Client::SUCCESS ? "SUCCESS" : 
             (result == Modbus::Client::ERR_BUSY ? "ERR_BUSY" : Modbus::Client::toString(result)) ); // More detailed error
 
-    // Store the result
+    // Store the result in the next free slot (claimed atomically). Slots are per-task, not
+    // per-core, so this stays correct when both tasks share core 0 on single-core targets.
     xSemaphoreTake(sd->resultsMutex, portMAX_DELAY);
-    if (core == 0) sd->core0Result = result;
-    else           sd->core1Result = result;
+    if (sd->nextSlot++ == 0) sd->core0Result = result;
+    else                     sd->core1Result = result;
     xSemaphoreGive(sd->resultsMutex);
 
     // Signal the end
@@ -1470,18 +1505,19 @@ void test_concurrent_calls() {
     sync.startSignal   = xSemaphoreCreateCounting(2, 0);
     sync.resultsMutex  = xSemaphoreCreateMutex();
     sync.doneSignal    = xSemaphoreCreateCounting(2, 0);
+    sync.nextSlot      = 0;
     sync.core0Result   = Modbus::Client::ERR_BUSY;
     sync.core1Result   = Modbus::Client::ERR_BUSY;
 
-    // Launch the task on core 0
+    // Launch the first task on core 0
     xTaskCreatePinnedToCore(
         [](void* p){ concurrentTask(p); },
         "Task0", 8192, &sync, 5, nullptr, 0
     );
-    // … and on core 1
+    // … and the second on core 1 (or core 0 on single-core targets like the ESP32-C6)
     xTaskCreatePinnedToCore(
         [](void* p){ concurrentTask(p); },
-        "Task1", 8192, &sync, 5, nullptr, 1
+        "Task1", 8192, &sync, 5, nullptr, TEST_SECOND_CORE
     );
 
     // Small delay to ensure the tasks are ready
@@ -1497,8 +1533,8 @@ void test_concurrent_calls() {
 
     // Check the results
     Modbus::Logger::logln("=== TEST_CONCURRENT_CALLS Results ===");
-    Modbus::Logger::logf("Core 0: %s\n", sync.core0Result == Modbus::Client::SUCCESS ? "SUCCESS" : "ERR_BUSY");
-    Modbus::Logger::logf("Core 1: %s\n", sync.core1Result == Modbus::Client::SUCCESS ? "SUCCESS" : "ERR_BUSY");
+    Modbus::Logger::logf("Task 0: %s\n", sync.core0Result == Modbus::Client::SUCCESS ? "SUCCESS" : "ERR_BUSY");
+    Modbus::Logger::logf("Task 1: %s\n", sync.core1Result == Modbus::Client::SUCCESS ? "SUCCESS" : "ERR_BUSY");
 
     TEST_ASSERT_START();
     TEST_ASSERT_TRUE(
@@ -1760,7 +1796,7 @@ void setup() {
 
     // Run tests
     UNITY_BEGIN();
-    
+
     // Register all generated tests
     #define X(Name, ReadSingle, ReadMulti, Addr, Expect, FC) \
         RUN_TEST(test_read_##Name##_sync); \

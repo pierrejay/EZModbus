@@ -26,7 +26,8 @@ It relies on the same interface components as you would use for a client or serv
 
 ```cpp
 // Create instances of your physical interfaces with HAL
-ModbusHAL::UART uart(RS485_SERIAL, RS485_BAUD, RS485_CONFIG);
+ModbusHAL::UART uart(RS485_SERIAL, RS485_BAUD, RS485_CONFIG,
+                     RS485_RX_PIN, RS485_TX_PIN, RS485_DE_PIN);
 ModbusHAL::TCP  tcpServer(PORT);
 
 // Create interfaces with complementary roles

@@ -141,7 +141,7 @@ client.sendRequest(request, cb); // request + cb = async with callback (you can 
 Basically, there is nothing to do after calling `sendRequest()` : the handler will take care of everything when the response arrives or if an error occurs! This methods allows you to totally decouple the request from the response handling, and even transmit a "transmission ID" (through `userCtx`) so that the thread handling the response can identify it.
 
 !!! note "Note on memory usage"
-    Callbacks are the most memory-efficient method because you don't need to allocate room for the response `Frame`. Inside the callback, you are directly reading into the server's internal response buffer, so a local copy isn't necessary.
+    Callbacks are the most memory-efficient method because you don't need to allocate room for the response `Frame`. Inside the callback, you are reading the client-managed response frame directly, so a local copy usually isn't necessary. The pointer is only guaranteed to be valid until the callback returns.
 
 ### Understanding the callback system
 
@@ -155,16 +155,16 @@ As stated before, the callback allows you to define a custom function that will 
 The callback function follows a specific signature defined by the `ResponseCallback` type:
 
 ```cpp
-using ResponseCallback = void (*)(Result result,
+using ResponseCallback = void (*)(Modbus::Client::Result result,
                                  const Modbus::Frame* response, // nullptr if no response
                                  void* userCtx);
 ```
 
 **Parameters explained:**
 
-* `Result result`: The outcome of the Modbus transaction (similar to Result Tracker)
+* `Modbus::Client::Result result`: The outcome of the Modbus transaction (similar to Result Tracker)
 * `const Modbus::Frame* response`: Pointer to the response frame
-    * **Valid pointer**: When `result == SUCCESS`, contains the actual response data or exception code
+    * **Valid pointer**: When `result == Modbus::Client::SUCCESS`, contains the actual response data or exception code
     * **`nullptr`**: When the request failed (timeout, TX error) or for broadcast requests
 * `void* userCtx`: User-defined context pointer passed-through unchanged
     * Allows sharing callbacks between multiple requests while maintaining context
@@ -192,13 +192,13 @@ struct RequestContext {
 };
 
 // Callback definition
-void myCallback(Result result, const Frame* response, void* userCtx) {
+void myCallback(Modbus::Client::Result result, const Modbus::Frame* response, void* userCtx) {
     // Cast back to your specific context type
     RequestContext* ctx = static_cast<RequestContext*>(userCtx);
     
     // Define the processing logic
     // 1. Error path
-    if (result != SUCCESS) {
+    if (result != Modbus::Client::SUCCESS) {
         logModbusResult("Request %d failed: %s\n", 
                  ctx->requestId, 
                  Modbus::Client::toString(result));
@@ -213,13 +213,13 @@ void myCallback(Result result, const Frame* response, void* userCtx) {
         return;
     }
     // 3. Success path with response
-    Modbus::ExceptionCode ec = response.exceptionCode;
+    Modbus::ExceptionCode ec = response->exceptionCode;
      // Exception response
     if (ec != Modbus::NULL_EXCEPTION) {
         logModbusResult("Request %d (%s): Exception = %s (RTT: %d ms)\n", 
                  ctx->requestId, 
                  ctx->description,
-                 Modbus::ExceptionCode::toString(ec), 
+                 Modbus::toString(ec),
                  TIME_MS() - ctx->timestamp);
         return;
       // Response with data
@@ -255,13 +255,13 @@ Here, we showcased an example of a simple context with a "catch-all" callback th
 
 ```cpp
 // Global/static function
-void myResponseHandler(Result result, const Frame* response, void* ctx) {
+void myResponseHandler(Modbus::Client::Result result, const Modbus::Frame* response, void* ctx) {
     // Handle response
 }
 client.sendRequest(request, myResponseHandler);
 
 // Non-capturing lambda (decays to function pointer)
-client.sendRequest(request, [](Result result, const Frame* response, void* ctx) {
+client.sendRequest(request, [](Modbus::Client::Result result, const Modbus::Frame* response, void* ctx) {
     // Handle response
 });
 ```
@@ -271,7 +271,7 @@ client.sendRequest(request, [](Result result, const Frame* response, void* ctx) 
 ```cpp
 int localVar = 42;
 // This won't compile - capturing lambdas cannot convert to function pointers
-client.sendRequest(request, [localVar](Result result, const Frame* response, void* ctx) {
+client.sendRequest(request, [localVar](Modbus::Client::Result result, const Modbus::Frame* response, void* ctx) {
     // Cannot capture localVar
 });
 ```
@@ -282,7 +282,7 @@ client.sendRequest(request, [localVar](Result result, const Frame* response, voi
 int localVar = 42;
 // Pass local data through context when calling sendRequest
 client.sendRequest(request, 
-                  [](Result result, const Frame* response, void* ctx) {
+                  [](Modbus::Client::Result result, const Modbus::Frame* response, void* ctx) {
                       int* value = static_cast<int*>(ctx);
                       // Use *value instead of captured variable
                   }, 
@@ -297,15 +297,14 @@ client.sendRequest(request,
 **Good callback practices:**
 
 ```cpp
-void quickCallback(Result result, const Frame* response, void* ctx) {
-    if (result == SUCCESS && response) {
+void quickCallback(Modbus::Client::Result result, const Modbus::Frame* response, void* ctx) {
+    if (result == Modbus::Client::SUCCESS && response) {
         // ✅ Fast operations: variable updates, simple calculations
         volatile uint32_t* targetVar = static_cast<volatile uint32_t*>(ctx);
         *targetVar = response->getRegister(0);
         
         // ✅ Non-blocking notifications
-        BaseType_t higherPriorityTaskWoken = pdFALSE;
-        xTaskNotifyFromISR(processingTask, 1, eSetBits, &higherPriorityTaskWoken);
+        xTaskNotify(processingTask, 1, eSetBits);
     }
 }
 ```
@@ -313,7 +312,7 @@ void quickCallback(Result result, const Frame* response, void* ctx) {
 **Operations to avoid in callbacks:**
 
 ```cpp
-void problematicCallback(Result result, const Frame* response, void* ctx) {
+void problematicCallback(Modbus::Client::Result result, const Modbus::Frame* response, void* ctx) {
     // ❌ Avoid blocking operations
     vTaskDelay(100);  // Don't block the Modbus task
     

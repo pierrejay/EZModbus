@@ -34,6 +34,13 @@
 #ifndef EZMODBUS_LOG_TASK_STACK_SIZE // Log task stack size (bytes)
     #define EZMODBUS_LOG_TASK_STACK_SIZE 4096
 #endif
+#ifndef EZMODBUS_LOG_TASK_CORE // Log task core affinity (single-core targets like ESP32-C6 have no core 1)
+    #if defined(CONFIG_FREERTOS_UNICORE)
+        #define EZMODBUS_LOG_TASK_CORE 0
+    #else
+        #define EZMODBUS_LOG_TASK_CORE 1
+    #endif
+#endif
 
 
 // =============================================================================
@@ -74,6 +81,7 @@ public:
     static constexpr size_t MAX_MSG_SIZE = (size_t)EZMODBUS_LOG_MAX_MSG_SIZE;
     static constexpr size_t TASK_PRIORITY = (size_t)EZMODBUS_LOG_TASK_PRIORITY;
     static constexpr uint32_t STACK_SIZE = (uint32_t)EZMODBUS_LOG_TASK_STACK_SIZE;
+    static constexpr BaseType_t TASK_CORE = (BaseType_t)EZMODBUS_LOG_TASK_CORE;
     static constexpr uint32_t CHECK_INTERVAL_MS = 100;
     
     // Event bits for queue status
@@ -100,7 +108,7 @@ public:
                 NULL,
                 TASK_PRIORITY,
                 &logTaskHandle,
-                1
+                TASK_CORE
             );
             
             if (logQueue && queueEventGroup && taskCreated == pdPASS) {

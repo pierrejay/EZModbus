@@ -38,7 +38,7 @@ Those tasks use an event-driven logic (fed by the driver & application layers ev
 Application classes do not rely on additional tasks to reduce overhead as much as possible:
 
 * The `Bridge` is just an overlay for the underlying transport layers, it only forwards messages between the two.
-* The `Client` is purely asynchronous: it uses internal callbacks & event groups to handle outcome of TX requests asynchronously, without spinning up a task, and relies on a FreeRTOS timer to cleanup timeouted requests.
+* The `Client` is purely asynchronous: it uses internal callbacks & event groups to handle outcome of TX requests asynchronously, without spinning up a task, and relies on a FreeRTOS timer to clean up timed-out requests.
 * The `Server` is also purely asynchronous, it is fed by the requests forwarded by the transport layer and does not use any FreeRTOS task internally either.
 
 The main execution context that handles Modbus transactions is the task running in the transport layers.

@@ -20,7 +20,12 @@
 
 // ModbusTestServer initialization functions
 #define MBT_INIT_START_REG                  0x00         // Default start register address
-#define MBT_INIT_REG_COUNT                  2100           // Default number of registers
+// The bridge suite only exercises single-register reads over a small address span, so a
+// modest range is plenty. Keeping it small keeps the Word store off the internal heap the
+// Wi-Fi stack needs on PSRAM-less chips (e.g. the ESP32-C6).
+#ifndef MBT_INIT_REG_COUNT
+    #define MBT_INIT_REG_COUNT              256          // Default number of registers
+#endif
 #define MBT_INIT_COIL_VALUE(x)              true         // Default coil value : true
 #define MBT_INIT_DISCRETE_INPUT_VALUE(x)    true         // Default discrete input value : true
 #define MBT_INIT_HOLDING_REGISTER_VALUE(x)  (10 + x)     // Default holding register value : 10 + register index
