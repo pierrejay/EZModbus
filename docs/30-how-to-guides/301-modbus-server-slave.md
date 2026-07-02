@@ -99,16 +99,16 @@ This is useful for devices that allow their Modbus address to be reconfigured ov
 
 ### Words storage & memory management
 
-Words are stored on the server inside a `Modbus::WordStore` container which can store an arbitrary number of `Word` objects regardless of their underlying `RegisterType`. This container is created in user code space (to keep in control of memory allocation) but directly managed by the Server.
+Words are stored on the server inside a `Modbus::IWordStore` implementation (`StaticWordStore` or `DynamicWordStore`) which can store `Word` objects regardless of their underlying `RegisterType`. This container is created in user code space (to keep in control of memory allocation) but directly managed by the Server.
 
 The optimal process is the following :
 
-1. Create the `WordStore` object on the stack or on the heap (see above example)
-2. Pass the `WordStore` to the `Server` constructor
+1. Create the Word store object on the stack or on the heap (see above example)
+2. Pass the Word store to the `Server` constructor
 3. Register your Words on the server with the `Server::addWord()` method
 4. Finally, call `Server::begin()` after adding all your Words
 
-To guarantee performance with a low RAM footprint & simple API, the Server's `WordStore` must stay sorted at all times (enables binary search), as it relies on a raw buffer/`std::vector` instead of more engineered STL containers such as `std::map`. Adding a Word to the store also implies collision checks to detect a conflict (address overlap with an existing Word) which are highly time-consuming if not done on contiguous Words.
+To guarantee performance with a low RAM footprint & simple API, the Server's Word store must stay sorted at all times (enables binary search), as it relies on a raw buffer/`std::vector` instead of more engineered STL containers such as `std::map`. Adding a Word to the store also implies collision checks to detect a conflict (address overlap with an existing Word) which are highly time-consuming if not done on contiguous Words.
 
 The following process is observed to optimize computation overhead:
 
@@ -124,7 +124,7 @@ The following process is observed to optimize computation overhead:
 
 ### Capacity limit
 
-The capacity defined in `WordStore` instanciation will be enforced by the server: you won't be able to add more Words after the capacity is reached, so size it carefully.
+The capacity defined in the Word store instantiation will be enforced by the server: you won't be able to add more Words after the capacity is reached, so size it carefully.
 
 ### Notes on `DynamicWordStore`
 
@@ -308,10 +308,10 @@ Modbus::ExceptionCode dmxReadCb(const Modbus::Word& reqWord,
                                uint16_t* outVals,
                                void* userCtx) {
    // Check if requested DMX channel is valid
-   if (rcvWord.startAddr >= DMX_CHANNELS) return Modbus::ILLEGAL_DATA_ADDRESS;
+   if (reqWord.startAddr >= DMX_CHANNELS) return Modbus::ILLEGAL_DATA_ADDRESS;
    
    // Read DMX output value for this channel
-   outVals[0] = (uint16_t)dmx.get(rcvWord.startAddr);
+   outVals[0] = (uint16_t)dmx.get(reqWord.startAddr);
    
    return Modbus::NULL_EXCEPTION; // OK
 }
@@ -321,13 +321,13 @@ Modbus::ExceptionCode dmxWriteCb(const uint16_t* writeVals,
                                 const Modbus::Word& reqWord,
                                 void* userCtx) {
    // Check if requested DMX channel is valid
-   if (rcvWord.startAddr >= DMX_CHANNELS) return Modbus::ILLEGAL_DATA_ADDRESS;
+   if (reqWord.startAddr >= DMX_CHANNELS) return Modbus::ILLEGAL_DATA_ADDRESS;
    
    // Check if requested output value is valid
    if (writeVals[0] > 255) return Modbus::ILLEGAL_DATA_VALUE;
    
    // Write DMX output value for this channel (exception returned upon failure)
-   if (!dmx.set(rcvWord.startAddr, (uint8_t)writeVals[0])) return Modbus::SLAVE_DEVICE_FAILURE;
+   if (!dmx.set(reqWord.startAddr, (uint8_t)writeVals[0])) return Modbus::SLAVE_DEVICE_FAILURE;
    
    return Modbus::NULL_EXCEPTION; // OK
 }
@@ -397,7 +397,7 @@ Let's say you have a `TempController` class, and you want to expose a method tha
 
 ```cpp
 class TempController;
-TempController myTempCtrl();
+TempController myTempCtrl;
 
 // Generic handler for all TempController instances
 Modbus::ExceptionCode readTemperature(const Modbus::Word& reqWord, 
@@ -446,6 +446,7 @@ server.addWord({
 enum Result {
     // Success
     SUCCESS,                        // Success
+    NODATA,                         // No data
     // addWord errors
     ERR_WORD_BUSY,                  // Busy word store
     ERR_WORD_OVERFLOW,              // Stored too many words

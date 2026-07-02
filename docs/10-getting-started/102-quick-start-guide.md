@@ -24,7 +24,7 @@ ModbusHAL::UART::Config uartConfig = {
     .rxPin = 15,
     .txPin = 14,
     .dePin = 5
-}
+};
 
 // Instantiate UART, interface and client
 ModbusHAL::UART         uart(uartConfig);
@@ -81,7 +81,7 @@ ModbusHAL::UART::Config uartConfig = {
     .rxPin = 15,     
     .txPin = 14,
     .dePin = 5
-}
+};
 
 // Store to hold Modbus register map
 Modbus::StaticWordStore<10> store;
@@ -143,7 +143,7 @@ ModbusHAL::UART::Config uartConfig = {
     .rxPin = 15,     
     .txPin = 14,
     .dePin = 5
-}
+};
 
 // Create TCP server on port 502 (standard Modbus TCP port) 
 // & setup UART port with RS485 config

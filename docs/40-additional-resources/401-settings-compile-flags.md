@@ -80,7 +80,7 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
 * **`EZMODBUS_TCP_TXN_SAFETY_TIMEOUT`**
     * Timeout before closing a transaction after 1st message if no response from server or client (ms)
     * Default: 5000
-* **`EZMODBUS_TCP_TASK_STACK_SIZE`**
+* **`EZMODBUS_TCP_RXTX_TASK_STACK_SIZE`**
     * Stack size of TCP task (bytes)
     * Default: 4096, or 6144 if debug enabled
 
@@ -108,6 +108,9 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
 
 ### ModbusHAL_TCP.h
 
+* **`EZMODBUS_HAL_TCP_MAX_ACTIVE_SOCKETS`**
+    * Maximum number of simultaneously tracked TCP sockets
+    * Default: 4
 * **`EZMODBUS_HAL_TCP_RX_Q_SIZE`**
     * Size of TCP driver RX queue size (# frames)
     * Default: 16
@@ -138,6 +141,15 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
 * **`EZMODBUS_LOG_TASK_STACK_SIZE`**
     * Stack size of Log task (bytes)
     * Default: 4096
+* **`EZMODBUS_LOG_TASK_CORE`**
+    * Log task core affinity
+    * Default: 0 on single-core targets, 1 otherwise
 * **`EZMODBUS_LOG_OUTPUT`**
     * Log output pipe (Arduino only)
     * Default: `Serial` on Arduino. On ESP-IDF logs go to the IDF console (stdout) configured in menuconfig.
+* **`EZMODBUS_LOG_CHUNK_SIZE`**
+    * Log output chunk size for Arduino streams
+    * Default: 64 on Arduino, unused on ESP-IDF
+* **`EZMODBUS_LOG_FLUSH`**
+    * Flush operation used by the log output sink
+    * Default: `EZMODBUS_LOG_OUTPUT.flush()` on Arduino, `fflush(stdout)` otherwise

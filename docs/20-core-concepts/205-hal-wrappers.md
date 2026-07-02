@@ -80,7 +80,7 @@ ModbusHAL::UART::Config uartConfig = {
     .rxPin = 7,               // RX pin        
     .txPin = 8,               // TX pin
     .dePin = -1               // RE/DE pin (optional, -1 = disabled)
-}
+};
 
 ModbusHAL::UART uart(uartConfig); // Create UART instance
 uart.begin(); // Handles all UART and RS-485 configuration (returns an esp_err_t)
@@ -100,8 +100,8 @@ ModbusHAL::UART::Config uartConfig = {
     .config = ModbusHAL::UART::CONFIG_8N1,  // Serial config: data bits, parity, stop bits
     .rxPin = GPIO_NUM_7,                    // RX pin        
     .txPin = GPIO_NUM_8,                    // TX pin
-    .dePin = GPIO_NUM_NC                    // RE/DE pin (optional, -1 = disabled)
-}
+    .dePin = -1                             // RE/DE pin (optional, -1 = disabled)
+};
 
 ModbusHAL::UART uart(uartConfig); // Create UART instance
 uart.begin(); // Handles all UART and RS-485 configuration (returns an esp_err_t)

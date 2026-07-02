@@ -1,6 +1,8 @@
 # API Reference
 
-Summary of the main EZModbus types & overview of APIs used in application code, organized by component with clear signatures and usage patterns.
+Summary of the main EZModbus types and APIs used in application code, organized by component.
+
+This page focuses on the public, user-facing API. Low-level hooks used internally by the built-in interfaces are intentionally omitted unless they are useful for normal application integration.
 
 ## Core Types & Enums
 
@@ -11,12 +13,13 @@ namespace Modbus {
         NULL_RT = 0,            // Invalid/null register type
         COIL,                   // Read/write binary outputs
         DISCRETE_INPUT,         // Read-only binary inputs
-        HOLDING_REGISTER,       // Read/write 16-bit registers  
+        HOLDING_REGISTER,       // Read/write 16-bit registers
         INPUT_REGISTER          // Read-only 16-bit registers
     };
 
     // Function codes
     enum FunctionCode {
+        NULL_FC = 0x00,
         READ_COILS                 = 0x01,
         READ_DISCRETE_INPUTS       = 0x02,
         READ_HOLDING_REGISTERS     = 0x03,
@@ -24,29 +27,55 @@ namespace Modbus {
         WRITE_COIL                 = 0x05,
         WRITE_REGISTER             = 0x06,
         WRITE_MULTIPLE_COILS       = 0x0F,
-        WRITE_MULTIPLE_REGISTERS   = 0x10
+        WRITE_MULTIPLE_REGISTERS   = 0x10,
+        NB_FC
     };
 
-    // Exception codes  
+    // Exception codes
     enum ExceptionCode {
         NULL_EXCEPTION         = 0x00,
         ILLEGAL_FUNCTION       = 0x01,
         ILLEGAL_DATA_ADDRESS   = 0x02,
         ILLEGAL_DATA_VALUE     = 0x03,
         SLAVE_DEVICE_FAILURE   = 0x04,
-        SLAVE_DEVICE_BUSY      = 0x06
-        // ... others
+        ACKNOWLEDGE            = 0x05,
+        SLAVE_DEVICE_BUSY      = 0x06,
+        NEGATIVE_ACKNOWLEDGE   = 0x07,
+        MEMORY_PARITY_ERROR    = 0x08,
+        NB_EC
+    };
+
+    // Message type
+    enum MsgType {
+        NULL_MSG,
+        REQUEST,
+        RESPONSE
     };
 
     // Device roles
     enum Role {
-        CLIENT = 1,              // Master device (initiates requests)
-        SERVER = 0               // Slave device (responds to requests)
+        SLAVE = 0,
+        SERVER = SLAVE,
+        MASTER = 1,
+        CLIENT = MASTER
     };
+
+    // Helpers
+    const char* toString(RegisterType type);
+    const char* toString(FunctionCode fc);
+    const char* toString(ExceptionCode ec);
+    const char* toString(MsgType type);
+    bool isValid(RegisterType type);
+    bool isValid(FunctionCode fc);
+    bool isValid(ExceptionCode ec);
+    bool isValid(MsgType type);
+    bool isValid(Role role);
+    RegisterType toRegisterType(FunctionCode fc);
+    bool isBroadcastId(uint8_t slaveId);
 }
 ```
 
-## HAL Layer (Hardware Abstraction)
+## HAL Layer
 
 ### UART/RS485 Driver
 
@@ -56,92 +85,164 @@ namespace ModbusHAL {
     public:
         // Serial config constants (data bits / parity / stop bits)
         // Format: CONFIG_<data><parity><stop>
-        //   data:   5, 6, 7, 8
-        //   parity: N (none), E (even), O (odd)
-        //   stop:   1, 2
-        static constexpr uint32_t CONFIG_8N1;   // 8 data, no parity, 1 stop (default)
-        static constexpr uint32_t CONFIG_8E1;   // 8 data, even parity, 1 stop
-        static constexpr uint32_t CONFIG_8O1;   // 8 data, odd parity, 1 stop
-        static constexpr uint32_t CONFIG_8N2;   // 8 data, no parity, 2 stop
-        static constexpr uint32_t CONFIG_8E2;   // 8 data, even parity, 2 stop
-        static constexpr uint32_t CONFIG_8O2;   // 8 data, odd parity, 2 stop
-        // etc.
+        // Available for 5, 6, 7 and 8 data bits, N/E/O parity, 1/2 stop bits.
+        static constexpr uint32_t CONFIG_8N1;
+        static constexpr uint32_t CONFIG_8E1;
+        static constexpr uint32_t CONFIG_8O1;
+        static constexpr uint32_t CONFIG_8N2;
+        static constexpr uint32_t CONFIG_8E2;
+        static constexpr uint32_t CONFIG_8O2;
 
-        // Configuration structures
-        struct ArduinoConfig {           // Arduino API
-            HardwareSerial& serial;      // Serial1, Serial2, etc.
-            uint32_t baud;               // Baud rate (9600, 19200...)
-            uint32_t config;             // SERIAL_8N1, SERIAL_8E1...
-            int rxPin, txPin;            // GPIO pins
-            int dePin;                   // DE/RE pin (-1 = disabled)
+        #if defined(ARDUINO_ARCH_ESP32)
+        struct ArduinoConfig {
+            HardwareSerial& serial = Serial0;
+            uint32_t baud = 115200;
+            uint32_t config = SERIAL_8N1;
+            int rxPin = UART_PIN_NO_CHANGE;
+            int txPin = UART_PIN_NO_CHANGE;
+            int dePin = -1;              // -1 disables RS485 direction control
         };
-        
-        struct IDFConfig {               // ESP-IDF API  
-            uart_port_t uartNum;         // UART_NUM_0, UART_NUM_1...
-            uint32_t baud;               // Baud rate
-            uint32_t config;             // CONFIG_8N1, CONFIG_8E1...
-            gpio_num_t rxPin, txPin;     // GPIO pins
-            gpio_num_t dePin;            // DE/RE pin (GPIO_NUM_NC = disabled)
+        #endif
+
+        struct IDFConfig {
+            uart_port_t uartNum = UART_NUM_0;
+            uint32_t baud = 115200;
+            uint32_t config = CONFIG_8N1;
+            int rxPin = UART_PIN_NO_CHANGE;
+            int txPin = UART_PIN_NO_CHANGE;
+            int dePin = -1;              // -1 disables RS485 direction control
         };
-        
-        using Config = ArduinoConfig;    // Default (Arduino builds)
-        using Config = IDFConfig;        // Default (ESP-IDF builds)
+
+        #if defined(ARDUINO_ARCH_ESP32)
+        using Config = ArduinoConfig;
+        #else
+        using Config = IDFConfig;
+        #endif
 
         // Constructors
-        UART(const Config& config);
-        UART(HardwareSerial& serial, uint32_t baud, uint32_t config,
-             int rxPin, int txPin, int dePin = -1);
+        UART(uart_port_t uartNum,
+             uint32_t baud,
+             uint32_t config = CONFIG_8N1,
+             int rxPin = UART_PIN_NO_CHANGE,
+             int txPin = UART_PIN_NO_CHANGE,
+             int dePin = -1);
+        explicit UART(const IDFConfig& cfg);
 
-        // Methods
-        esp_err_t begin();               // Initialize UART
-        void stop();                     // Stop UART
+        #if defined(ARDUINO_ARCH_ESP32)
+        UART(HardwareSerial& serial,
+             uint32_t baud,
+             uint32_t config,
+             int rxPin,
+             int txPin,
+             int dePin = -1);
+        explicit UART(const ArduinoConfig& cfg);
+        #endif
 
-        // Runtime configuration (can be called before or after begin())
+        ~UART();
+
+        // Lifecycle
+        esp_err_t begin();
+        void end();
+
+        // Runtime configuration
         uint32_t getBaudrate() const;
-        esp_err_t setBaudrate(uint32_t baud_rate);
-        uint32_t getConfig() const;                    // Packed config flags
-        esp_err_t setConfig(uint32_t config_flags);    // CONFIG_8N1, CONFIG_8E1...
+        esp_err_t setBaudrate(uint32_t baud);
+        uint32_t getConfig() const;
+        esp_err_t setConfig(uint32_t config);
         esp_err_t setParity(uart_parity_t parity);
-        esp_err_t setStopBits(uart_stop_bits_t stop_bits);
-        esp_err_t setDataBits(uart_word_length_t data_bits);
-
-        // Build config flags from individual parameters
+        esp_err_t setStopBits(uart_stop_bits_t stopBits);
+        esp_err_t setDataBits(uart_word_length_t dataBits);
         static constexpr uint32_t makeConfig(
             uart_word_length_t data,
             uart_parity_t parity,
             uart_stop_bits_t stop);
+
+        // Port and RS485 helpers
+        uart_port_t getPort() const;
+        esp_err_t setRS485Mode(bool enable);
+        bool isSoftDE() const;
     };
 }
 ```
 
 ### TCP Socket Driver
 
-Initialized from application code, hands management to the Interface layer.
+Initialized from application code, then handed to the Interface layer.
 
 ```cpp
 namespace ModbusHAL {
     class TCP {
     public:
+        enum CfgMode { UNINIT, SERVER, CLIENT };
 
-        TCP();                           // Default (call begin() manually)
-        TCP(uint16_t serverPort);        // Server mode
-        TCP(const char* serverIP,        // Client mode
-            uint16_t port);
+        TCP();                            // Default, call beginServer/beginClient
+        explicit TCP(uint16_t serverPort);
+        TCP(const char* serverIP, uint16_t port);
+        ~TCP();
 
-        // Methods  
-        bool begin();    // Initialize based on constructor mode
-        void stop();     // Close connections
-        
+        TCP(const TCP&) = delete;
+        TCP& operator=(const TCP&) = delete;
+
+        // Lifecycle
+        bool begin();                     // Initialize from constructor mode
+        bool beginServer(uint16_t port, uint32_t ip = INADDR_ANY);
+        bool beginClient(const char* serverIP, uint16_t port);
+        void stop();
+
         // Status
+        size_t getActiveSocketCount();
         bool isServerRunning() const;
         bool isClientConnected();
-        size_t getActiveSocketCount();
+        bool isReady();
+        CfgMode getMode() const;
     };
 }
 ```
 
-
 ## Interface Layer
+
+### Common Interface API
+
+```cpp
+namespace ModbusInterface {
+    using RcvCallbackFn = void (*)(const Modbus::Frame& frame, void* ctx);
+
+    class IInterface {
+    public:
+        enum Result {
+            SUCCESS,
+            NODATA,
+            ERR_INIT_FAILED,
+            ERR_INVALID_FRAME,
+            ERR_BUSY,
+            ERR_RX_FAILED,
+            ERR_SEND_FAILED,
+            ERR_INVALID_MSG_TYPE,
+            ERR_INVALID_TRANSACTION_ID,
+            ERR_TIMEOUT,
+            ERR_INVALID_ROLE,
+            ERR_ADD_CALLBACK_BUSY,
+            ERR_TOO_MANY_CALLBACKS,
+            ERR_NO_CALLBACKS,
+            ERR_NOT_INITIALIZED,
+            ERR_CONNECTION_FAILED,
+            ERR_CONFIG_FAILED
+        };
+
+        using TxResultCallback = void (*)(Result result, void* ctx);
+
+        virtual ~IInterface() = default;
+
+        virtual Result begin() = 0;
+        virtual Result sendFrame(const Modbus::Frame& frame,
+                                 TxResultCallback txCallback = nullptr,
+                                 void* ctx = nullptr) = 0;
+        virtual bool isReady() = 0;
+        Modbus::Role getRole() const;
+        Result setRcvCallback(RcvCallbackFn fn, void* ctx = nullptr);
+    };
+}
+```
 
 ### ModbusInterface::RTU
 
@@ -149,14 +250,14 @@ namespace ModbusHAL {
 namespace ModbusInterface {
     class RTU : public IInterface {
     public:
-        // Constructor
-        RTU(ModbusHAL::UART& uart,       // HAL UART driver
-            Modbus::Role role);          // CLIENT/MASTER or SERVER/SLAVE
-        
-        // Methods
-        Result begin();                  // Initialize interface
-        Result setSilenceTimeMs(uint32_t ms);  // Set custom silence time
-        Result setSilenceTimeBaud();     // Reset to default (3.5 char times)
+        explicit RTU(ModbusHAL::UART& uart,
+                     Modbus::Role role = Modbus::MASTER);
+        ~RTU() override;
+
+        Result begin() override;
+        Result setSilenceTimeMs(uint32_t silenceTimeMs);
+        Result setSilenceTimeBaud();
+        bool isReady() override;
     };
 }
 ```
@@ -167,16 +268,14 @@ namespace ModbusInterface {
 namespace ModbusInterface {
     class TCP : public IInterface {
     public:
-        // Constructor
-        TCP(ModbusHAL::TCP& hal,         // HAL TCP driver
-            Modbus::Role role);          // CLIENT/MASTER or SERVER/SLAVE
-        
-        // Methods
-        Result begin();                  // Initialize interface
+        explicit TCP(ModbusHAL::TCP& hal, Modbus::Role role);
+        ~TCP() override;
+
+        Result begin() override;
+        bool isReady() override;
     };
 }
 ```
-
 
 ## Application Layer
 
@@ -186,65 +285,57 @@ namespace ModbusInterface {
 namespace Modbus {
     class Client {
     public:
-        // Result codes
         enum Result {
-            SUCCESS,                    // Operation completed successfully
-            NODATA,                     // Waiting for response...
-            ERR_INVALID_FRAME,          // Invalid frame
-            ERR_BUSY,                   // Client busy with another request
-            ERR_TX_FAILED,              // Transmission failed
-            ERR_TIMEOUT,                // Request timeout
-            ERR_INVALID_RESPONSE,       // Invalid response
-            ERR_NOT_INITIALIZED,        // Client not initialized
-            ERR_INIT_FAILED             // Init failed
+            SUCCESS,
+            NODATA,
+            ERR_INVALID_FRAME,
+            ERR_BUSY,
+            ERR_TX_FAILED,
+            ERR_TIMEOUT,
+            ERR_INVALID_RESPONSE,
+            ERR_NOT_INITIALIZED,
+            ERR_INIT_FAILED,
+            ERR_TIMER_FAILURE
         };
 
-        // Constructor
-        Client(ModbusInterface::IInterface& interface,
-               uint32_t timeoutMs = 1000);
+        using ResponseCallback = void (*)(Result result,
+                                          const Modbus::Frame* response,
+                                          void* userCtx);
 
-        // Initialization
+        Client(ModbusInterface::IInterface& interface,
+               uint32_t timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS);
+        ~Client();
+
         Result begin();
         bool isReady();
 
-        // =================================================================
-        // SIMPLE HELPER API (recommended for basic sync use cases)
-        // =================================================================
+        // Sync request. If userTracker is provided, it is updated with
+        // the final request status.
+        Result sendRequest(const Modbus::Frame& request,
+                           Modbus::Frame& response,
+                           Result* userTracker = nullptr);
 
-        // Read helper - automatic Frame construction and parsing
+        // Async request.
+        Result sendRequest(const Modbus::Frame& request,
+                           ResponseCallback cb,
+                           void* userCtx = nullptr);
+
+        // Convenience helpers.
         template<typename T>
         Result read(uint8_t slaveId,
-                   RegisterType regType,
-                   uint16_t startAddr,
-                   uint16_t qty,
-                   T* dst,
-                   ExceptionCode* rspExcep = nullptr);
-
-        // Write helper - automatic Frame construction
-        template<typename T>
-        Result write(uint8_t slaveId,
                     RegisterType regType,
                     uint16_t startAddr,
                     uint16_t qty,
-                    const T* src,
+                    T* dst,
                     ExceptionCode* rspExcep = nullptr);
 
-        // =================================================================
-        // FRAME-BASED API (for advanced control)
-        // =================================================================
-
-        // Sync (tracker = nullptr) / async (tracker defined)
-        Result sendRequest(const Modbus::Frame& request,
-                          Modbus::Frame& response,
-                          Result* tracker = nullptr);
-
-        // Async with callback
-        using ResponseCallback = void (*)(Result result,
-                                         const Modbus::Frame* response,
-                                         void* userCtx);
-        Result sendRequest(const Modbus::Frame& request,
-                          ResponseCallback callback,
-                          void* userCtx = nullptr);
+        template<typename T>
+        Result write(uint8_t slaveId,
+                     RegisterType regType,
+                     uint16_t startAddr,
+                     uint16_t qty,
+                     const T* src,
+                     ExceptionCode* rspExcep = nullptr);
     };
 }
 ```
@@ -255,7 +346,6 @@ namespace Modbus {
 namespace Modbus {
     class Server {
     public:
-        // Result codes
         enum Result {
             SUCCESS,
             NODATA,
@@ -278,76 +368,76 @@ namespace Modbus {
             ERR_INIT_FAILED
         };
 
-        // Constructors
-        // Single interface
         Server(ModbusInterface::IInterface& interface,
-               IWordStore& store,                           // Register storage
-               uint8_t slaveId = 1,                         // Device slave ID
-               bool rejectUndefined = true);                // Reject undefined registers
+               IWordStore& store,
+               uint8_t slaveId = 1,
+               bool rejectUndefined = true,
+               uint32_t reqMutexTimeoutMs = DEFAULT_REQ_MUTEX_TIMEOUT_MS);
 
-        // Multi-interface
         Server(std::initializer_list<ModbusInterface::IInterface*> interfaces,
-               IWordStore& store,                            // Register storage
-               uint8_t slaveId = 1,                          // Device slave ID
-               bool rejectUndefined = true,                  // Reject undefined registers
-               uint32_t requestMutexTimeoutMs = UINT32_MAX); // Mutex timeout
+               IWordStore& store,
+               uint8_t slaveId = 1,
+               bool rejectUndefined = true,
+               uint32_t reqMutexTimeoutMs = DEFAULT_REQ_MUTEX_TIMEOUT_MS);
 
-        // Initialization  
+        ~Server();
+
         Result begin();
 
-        // =================================================================
-        // WORD/REGISTER API
-        // =================================================================
-        
-        // Single word
         Result addWord(const Word& word);
-        
-        // Multiple words  
         Result addWords(const std::vector<Word>& words);
         Result addWords(const Word* words, size_t count);
-        
-        // Management
         Result clearAllWords();
         Word getWord(RegisterType type, uint16_t startAddr);
 
-        // Runtime configuration
+        bool isBusy();
         uint8_t getSlaveId() const;
-        void setSlaveId(uint8_t id);   // Thread-safe (acquires server mutex)
-
-        // =================================================================
-        // WORD STORE TYPES
-        // =================================================================
-        
-        // Stack-based storage (compile-time size)
-        template<size_t N>
-        class StaticWordStore : public IWordStore { /* ... */ };
-        
-        // Heap-based storage (runtime size)  
-        class DynamicWordStore : public IWordStore { /* ... */ };
+        void setSlaveId(uint8_t id);
     };
+}
+```
 
-    // Handler function types for custom read/write
-    using ReadWordHandler = ExceptionCode (*)(const Word& word, 
-                                             uint16_t* outVals, 
+### Word Store API
+
+```cpp
+namespace Modbus {
+    using ReadWordHandler = ExceptionCode (*)(const Word& word,
+                                             uint16_t* outVals,
                                              void* userCtx);
-    using WriteWordHandler = ExceptionCode (*)(const uint16_t* writeVals, 
-                                              const Word& word, 
+    using WriteWordHandler = ExceptionCode (*)(const uint16_t* writeVals,
+                                              const Word& word,
                                               void* userCtx);
 
-    // Word definition
     struct Word {
-        RegisterType type = NULL_RT;    // COIL, HOLDING_REGISTER, etc.
-        uint16_t startAddr = 0;         // Starting address
-        uint16_t nbRegs = 0;            // Number of registers
-        
-        // Data access (choose one approach)
-        volatile uint16_t* value = nullptr;      // Direct pointer (single register only)
-        ReadWordHandler readHandler = nullptr;   // Custom read function
-        WriteWordHandler writeHandler = nullptr; // Custom write function
-        void* userCtx = nullptr;                 // User context for handlers
-        
-        // Validation
-        operator bool() const { return isValid(type) && nbRegs > 0; }
+        RegisterType type = NULL_RT;
+        uint16_t startAddr = 0;
+        uint16_t nbRegs = 0;
+
+        // Direct pointer access is allowed only for single-register words.
+        volatile uint16_t* value = nullptr;
+
+        // Handler access is required for multi-register words.
+        ReadWordHandler readHandler = nullptr;
+        WriteWordHandler writeHandler = nullptr;
+        void* userCtx = nullptr;
+
+        operator bool() const;
+    };
+
+    class IWordStore {
+    public:
+        virtual ~IWordStore() = default;
+    };
+
+    template<size_t N>
+    class StaticWordStore : public IWordStore {
+    public:
+        StaticWordStore();
+    };
+
+    class DynamicWordStore : public IWordStore {
+    public:
+        explicit DynamicWordStore(size_t totalCapacity = 100);
     };
 }
 ```
@@ -355,8 +445,8 @@ namespace Modbus {
 **Usage Patterns:**
 
 ```cpp
-// Direct pointer access (simple - single register only)
-volatile uint16_t temperature = 250;  // 25.0°C
+// Direct pointer access (single register only)
+volatile uint16_t temperature = 250;  // 25.0 deg C
 Modbus::Word tempWord = {
     .type = Modbus::HOLDING_REGISTER,
     .startAddr = 100,
@@ -365,11 +455,11 @@ Modbus::Word tempWord = {
 };
 server.addWord(tempWord);
 
-// Callback-based access (advanced - single or multiple registers)
+// Callback-based access (single or multiple registers)
 Modbus::Word configWord = {
     .type = Modbus::HOLDING_REGISTER,
     .startAddr = 200,
-    .nbRegs = 3,  // Multi-register word
+    .nbRegs = 3,
     .readHandler = readConfig,
     .writeHandler = writeConfig,
     .userCtx = &myContext
@@ -383,27 +473,24 @@ server.addWord(configWord);
 namespace Modbus {
     class Bridge {
     public:
-        // Result codes
         enum Result {
             SUCCESS,
-            ERR_INIT_FAILED              // Interfaces have same role
+            ERR_INIT_FAILED
         };
 
-        // Constructor
         Bridge(ModbusInterface::IInterface& interface1,
                ModbusInterface::IInterface& interface2);
 
-        // Methods
-        Result begin();                  // Start bidirectional forwarding
+        Result begin();
     };
 }
 ```
 
 **Requirements:**
 
-- Interfaces must have **different roles** (one CLIENT, one SERVER)
-- Bridge automatically forwards requests/responses between interfaces
-- Supports any combination: RTU↔TCP, RTU↔RTU, TCP↔TCP
+- Interfaces must have different roles, one `CLIENT`/`MASTER` and one `SERVER`/`SLAVE`.
+- Bridge forwards requests/responses between interfaces.
+- Supported combinations include RTU<->TCP, RTU<->RTU and TCP<->TCP.
 
 ## Common Type Aliases & Patterns
 
@@ -431,18 +518,69 @@ using ModbusWord = Modbus::Word;
 
 ```cpp
 namespace Modbus {
+    enum class ByteOrder {
+        AB,       // 16-bit big endian
+        BA,       // 16-bit little endian
+        ABCD,     // 32-bit big endian
+        CDAB,     // 32-bit word swap
+        BADC,     // 32-bit byte + word swap
+        DCBA      // 32-bit little endian
+    };
+
     struct Frame {
-        MsgType type;                    // REQUEST or RESPONSE
-        uint8_t slaveId;                // Target/source slave ID
-        FunctionCode fc;                // Function code (0x01-0x10)
-        uint16_t regAddress;            // Starting register address
-        uint16_t regCount;              // Number of registers/coils
-        std::array<uint16_t, FRAME_DATASIZE> data; // Response data
-        ExceptionCode exceptionCode;     // Exception if any
-        
-        // Utility methods
-        bool isValid() const;
+        MsgType type = NULL_MSG;
+        FunctionCode fc = NULL_FC;
+        uint8_t slaveId = 0;
+        uint16_t regAddress = 0;
+        uint16_t regCount = 0;
+        std::array<uint16_t, FRAME_DATASIZE> data = {};
+        ExceptionCode exceptionCode = NULL_EXCEPTION;
+
         void clear();
+        void clearData(bool resetRegCount = true);
+
+        uint16_t getRegister(size_t index) const;
+        std::vector<uint16_t> getRegisters() const;
+        size_t getRegisters(uint16_t* dst, size_t dstSize) const;
+        bool getCoil(size_t index) const;
+        std::vector<bool> getCoils() const;
+        size_t getCoils(bool* dst, size_t dstSize) const;
+
+        bool setRegisters(const std::vector<uint16_t>& src);
+        bool setRegisters(const std::initializer_list<uint16_t>& src);
+        bool setRegisters(const uint16_t* src, size_t len);
+        bool setRegisters(const uint16_t* src, size_t len, size_t startRegIndex);
+
+        bool setCoils(const std::vector<bool>& src);
+        bool setCoils(const std::vector<uint16_t>& src);
+        bool setCoils(const std::initializer_list<bool>& src);
+        bool setCoils(const std::initializer_list<uint16_t>& src);
+        bool setCoils(const bool* src, size_t len);
+        bool setCoils(const uint16_t* src, size_t len);
+        bool setCoils(const std::vector<bool>& src, size_t startCoilIndex);
+        bool setCoils(const bool* src, size_t len, size_t startCoilIndex);
+
+        size_t setFloat(float value, size_t regIndex,
+                        ByteOrder order = ByteOrder::ABCD);
+        size_t setUint32(uint32_t value, size_t regIndex,
+                         ByteOrder order = ByteOrder::ABCD);
+        size_t setInt32(int32_t value, size_t regIndex,
+                        ByteOrder order = ByteOrder::ABCD);
+        size_t setUint16(uint16_t value, size_t regIndex,
+                         ByteOrder order = ByteOrder::AB);
+        size_t setInt16(int16_t value, size_t regIndex,
+                        ByteOrder order = ByteOrder::AB);
+
+        bool getFloat(float& target, size_t regIndex,
+                      ByteOrder order = ByteOrder::ABCD) const;
+        bool getUint32(uint32_t& target, size_t regIndex,
+                       ByteOrder order = ByteOrder::ABCD) const;
+        bool getInt32(int32_t& target, size_t regIndex,
+                      ByteOrder order = ByteOrder::ABCD) const;
+        bool getUint16(uint16_t& target, size_t regIndex,
+                       ByteOrder order = ByteOrder::AB) const;
+        bool getInt16(int16_t& target, size_t regIndex,
+                      ByteOrder order = ByteOrder::AB) const;
     };
 }
 ```
