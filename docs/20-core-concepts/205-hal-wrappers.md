@@ -117,8 +117,8 @@ uart.begin(); // Handles all UART and RS-485 configuration (returns an esp_err_t
       on an LP-UART, EZModbus falls back to **software DE**: it drives the pin as a GPIO around
       each transmission (asserted before TX, released once the last stop bit is out). The pin is
       active-high by default; set `EZMODBUS_HAL_UART_SOFT_DE_ACTIVE_HIGH=0` for an active-low
-      transceiver, and `EZMODBUS_HAL_UART_SOFT_DE_GUARD_US` to tune the turnaround delay: increase
-      it if the last byte gets clipped, decrease it if the line is held too long.
+      transceiver, and `EZMODBUS_HAL_UART_SOFT_DE_GUARD_US` to tune the turnaround delay (default:
+      2 bit-time periods calculated at the current baudrate).
     * **Limited baud range.** The LP-UART clock divider cannot reach low baud rates: 1200
       and 2400 bps are unachievable (`begin()` returns an error from the IDF). Those speeds
       are unusual for Modbus devices anyway.
