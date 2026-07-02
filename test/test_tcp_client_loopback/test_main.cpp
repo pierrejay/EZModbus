@@ -81,7 +81,10 @@ Modbus::Client client(ezm);
 
 // EZModbus TCP server for testing with DynamicWordStore (heap allocation)
 ModbusInterface::TCP mbt(halForServer, Modbus::SERVER);
-Modbus::DynamicWordStore dynamicStore(10000);  // Heap-allocated store for TCP server
+// Coils + discrete inputs over the full range, holding + input registers over the small
+// analog range (see MBT_ANALOG_COUNT). Sized exactly so the store stays off the internal
+// heap budget the Wi-Fi stack needs on PSRAM-less chips.
+Modbus::DynamicWordStore dynamicStore(2 * MBT_INIT_REG_COUNT + 2 * MBT_ANALOG_COUNT);
 Modbus::Server server(mbt, dynamicStore);
 
 uint16_t serverDiscreteInputs[MBT_INIT_START_REG + MBT_INIT_REG_COUNT];
@@ -170,6 +173,9 @@ void ModbusTestServerTask(void* pvParameters) {
     
     for (int i = MBT_INIT_START_REG; i < MBT_INIT_START_REG + MBT_INIT_REG_COUNT; i++) {
         for (uint8_t rt : regTypes) {
+            // Holding/input registers only span the small analog range (see MBT_ANALOG_COUNT).
+            bool isAnalog = (rt == Modbus::HOLDING_REGISTER || rt == Modbus::INPUT_REGISTER);
+            if (isAnalog && i >= MBT_INIT_START_REG + MBT_ANALOG_COUNT) continue;
             Modbus::Word word;
             word.type = (Modbus::RegisterType)rt;
             word.startAddr = i;

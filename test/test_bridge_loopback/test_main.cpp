@@ -64,7 +64,7 @@ Modbus::Bridge bridge(ezm1, ezm2);
 
 // EZModbus RTU server acting as a remote Modbus RTU server + list of registers
 ModbusInterface::RTU mbt(mbtUart, Modbus::SERVER);
-Modbus::DynamicWordStore wordStore(10000);
+Modbus::DynamicWordStore wordStore(MBT_INIT_REG_COUNT * 4);
 Modbus::Server server(mbt, wordStore);
 uint16_t serverDiscreteInputs[MBT_INIT_START_REG + MBT_INIT_REG_COUNT];
 uint16_t serverCoils[MBT_INIT_START_REG + MBT_INIT_REG_COUNT];
