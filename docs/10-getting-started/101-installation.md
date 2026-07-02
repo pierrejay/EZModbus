@@ -25,7 +25,7 @@ Works with all ESP32 series chip (classic, S2, S3, C3...), single or dual-core.
 
     ```yaml
     dependencies:
-      pierrejay/EZModbus: "^1.1.7"
+      pierrejay/EZModbus: "^1.1.8"
     ```
 
 * Build your project - the component will be downloaded automatically:
