@@ -319,11 +319,12 @@ static void writeSetpoints_Callback(ModbusClient& client)
         .data       = Modbus::packRegisters({225, 450})
     };
 
-    // Simple context shared with the callback
+    // Keep the callback context alive after this function returns.
     struct CbCtx {
         volatile uint32_t& nb = totalUpdates;
         volatile uint32_t& time = lastUpdateTime;
-    } ctx;
+    };
+    static CbCtx ctx;
 
     // Static, non-capturing lambda -> decays to a function pointer
     static auto cb = [](ModbusClient::Result res, const Modbus::Frame* resp, void* ctx) {

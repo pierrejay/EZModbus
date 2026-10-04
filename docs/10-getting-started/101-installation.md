@@ -13,7 +13,7 @@ Works with all ESP32 series chip (classic, S2, S3, C3...), single or dual-core.
 
 ### Environment
 
-* ESP-IDF (tested on v5.4+)
+* ESP-IDF v5.4+ (CI-tested on v5.4, v5.5 and v6.1 - see [Testing](../40-additional-resources/403-testing.md))
 * or ESP32 Arduino Core (tested on v3.0+) & PlatformIO - see [pioarduino](https://github.com/pioarduino/platform-espressif32/tree/55.03.39)
 * Requires C++17 or up (normally already enabled in ESP-IDF & PlatformIO)
 
@@ -21,11 +21,13 @@ Works with all ESP32 series chip (classic, S2, S3, C3...), single or dual-core.
 
 ### Component Manager installation
 
+ESP-IDF 6.x is supported starting with EZModbus 1.1.9.
+
 * Add the dependency to your project's `idf_component.yml`:
 
     ```yaml
     dependencies:
-      pierrejay/EZModbus: "^1.1.8"
+      pierrejay/ezmodbus: "^1.1.9"
     ```
 
 * Build your project - the component will be downloaded automatically:
@@ -49,10 +51,12 @@ Works with all ESP32 series chip (classic, S2, S3, C3...), single or dual-core.
     git clone https://github.com/pierrejay/EZModbus.git ezmodbus
     ```
 
-* Include the component in your project's root `CMakeLists.txt`:
+* Declare the dependency in your application's component `CMakeLists.txt` (normally `main/CMakeLists.txt`):
 
     ```cmake
-    idf_component_register(SRCS "main.cpp" PRIV_REQUIRES ezmodbus ... # <- add here INCLUDE_DIRS "")
+    idf_component_register(SRCS "main.cpp"
+                           INCLUDE_DIRS "."
+                           PRIV_REQUIRES ezmodbus)
     ```
 
 * Include in your code:

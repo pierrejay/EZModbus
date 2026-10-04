@@ -42,18 +42,27 @@ For more details on the testing methodology, see the `test/` directory of the li
 
 ## Running tests with PlatformIO
 
-The `platformio.ini` file is configured with one environment for each test.
+The `platformio.ini` file defines a host environment (`native`) and one environment
+per hardware board (`s3` and `c6`). Each board environment runs all hardware suites;
+use `-f` to select an individual suite.
 
 It requires [pioarduino](https://github.com/pioarduino)'s `espressif32` platform to be installed before running the tests  (except `test_codec` which is compiled & run on the host machine), and the ESP32 board to be properly wired & connected via USB to the computer.
 
 ```bash
-# Run individual tests
-pio test -e test_codec
-pio test -e test_rtu_client_loopback
-pio test -e test_rtu_server_loopback
-pio test -e test_tcp_client_loopback
-pio test -e test_bridge_loopback
+# Run codec tests on the host
+pio test -e native
 
-# Run the full test suite
-pio test
+# Run all hardware suites on a wired XIAO ESP32-S3 or ESP32-C6
+pio test -e s3
+pio test -e c6
+
+# Run one hardware suite on a selected board
+pio test -e s3 -f test_rtu_client_loopback
+pio test -e c6 -f test_rtu_server_loopback
 ```
+
+## ESP-IDF example compile checks
+
+The ESP-IDF examples are compile-checked in CI against the local library sources.
+See [ci/README.md](https://github.com/pierrejay/EZModbus/blob/main/ci/README.md)
+to run the same checks locally.
