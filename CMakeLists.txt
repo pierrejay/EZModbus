@@ -11,7 +11,9 @@ set(SRCS
 
 set(INCLUDE_DIRS "src")
 
+# IDF 6 no longer exposes UART/GPIO through driver. Keep driver for consumers
+# that rely on its other transitive dependencies in IDF 5.
 idf_component_register(SRCS "${SRCS}"
                        INCLUDE_DIRS "${INCLUDE_DIRS}"
-                       REQUIRES driver freertos lwip esp_timer esp_netif esp_rom
+                       REQUIRES driver esp_driver_uart esp_driver_gpio freertos lwip esp_timer esp_netif esp_rom
                        )

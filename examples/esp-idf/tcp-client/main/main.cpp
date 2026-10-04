@@ -353,7 +353,7 @@ static void writeSetpoints_Callback(ModbusClient& client)
         }
 
         if (c) {
-            c->nb++;
+            c->nb = c->nb + 1;
             c->time = xTaskGetTickCount() * portTICK_PERIOD_MS;
         }
     };

@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        idf: [release-v5.4, release-v5.5]
+        idf: [release-v5.4, release-v5.5, v6.1]
         target: [esp32, esp32c6, esp32s3, esp32p4]
     steps:
       - uses: actions/checkout@v4
