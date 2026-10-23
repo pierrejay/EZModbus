@@ -580,26 +580,32 @@ void TCP::closeSocket(int sock) {
     }
 }
 
+/* @brief (Client mode) Make sure the client socket is connected, reconnecting if needed
+ * @return True if connected
+ * @note May block up to CONNECT_TIMEOUT_SEC while reconnecting (outside the socket mutex)
+ */
+bool TCP::ensureClientConnected() {
+    if (!_isRunning || _isServer) return false;
+    {
+        Lock guard(_socketsMutex);
+        if (_clientSocket != -1) return true;
+    }
+
+    Modbus::Debug::LOG_MSGF("Client disconnected, attempting reconnect to %s:%u", _cfgIP, _cfgPort);
+    if (!setupClientSocket(_cfgIP, _cfgPort)) {
+        Modbus::Debug::LOG_MSGF("Auto-reconnection failed");
+        return false;
+    }
+    Modbus::Debug::LOG_MSGF("Auto-reconnection successful");
+    return _isRunning;
+}
+
 bool TCP::sendMsg(const uint8_t* payload, const size_t len, const int destSocket, int* actualSocket) {
     if (!_isRunning) return false;
 
-    /* 1. Check reconnection needed */
-    bool needReconnect = false;
-    {
-        Lock guard(_socketsMutex);
-        needReconnect = (!_isServer && destSocket == -1 && _clientSocket == -1);
-    }
-
-    /* 2. Reconnect OUTSIDE mutex if needed */
-    if (needReconnect) {
-        Modbus::Debug::LOG_MSGF("Client disconnected, attempting reconnect to %s:%u", _cfgIP, _cfgPort);
-        if (!setupClientSocket(_cfgIP, _cfgPort)) {
-            Modbus::Debug::LOG_MSGF("Auto-reconnection failed");
-            return false;
-        }
-        Modbus::Debug::LOG_MSGF("Auto-reconnection successful");
-        
-        if (!_isRunning) return false;
+    /* 1-2. Reconnect if needed (client mode) */
+    if (!_isServer && destSocket == -1 && !ensureClientConnected()) {
+        return false;
     }
 
     /* 3. Send phase - re-lock and re-read socket */

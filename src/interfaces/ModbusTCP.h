@@ -69,6 +69,7 @@ public:
         bool isBroadcast = false;
         TxResultCallback txCallback = nullptr;
         void* ctx = nullptr;
+        uint32_t abortCount = 0; // Value of _abortCount when the frame was queued
 
         void set(uint16_t tid, int socketNum, bool isBroadcast = false, TxResultCallback txCallback = nullptr, void* ctx = nullptr) { 
             this->tid = tid; 
@@ -77,7 +78,14 @@ public:
             this->txCallback = txCallback;
             this->ctx = ctx;
         }
-        void clear() { tid=0; destSock=-1; isBroadcast=false; txCallback=nullptr; ctx=nullptr; }
+        void clear() { 
+            tid=0;
+            destSock=-1;
+            isBroadcast=false;
+            txCallback=nullptr;
+            ctx=nullptr;
+            abortCount=0; 
+        }
     };
 
     // ===================================================================================
@@ -113,6 +121,7 @@ private:
     // Transaction management
     TransactionCtx _currentTransaction; // IMPORTANT: must ONLY be written from rxTxTask context!
     uint16_t _lastOutgoingTid = 0; // Client TID counter, independent from _currentTransaction (written under _txMutex)
+    std::atomic<uint32_t> _abortCount{0}; // Incremented by abortCurrentTransaction(), checked before sending
 
     // Data processing
     // _rxEventQueue: receives RX events from HAL (only the handle, belongs to HAL layer)

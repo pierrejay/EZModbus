@@ -1555,6 +1555,78 @@ void test_client_rx_coalesced_responses() {
     Modbus::Logger::logln();
 }
 
+// Regression: when the client was disconnected, the request was handed to the HAL
+// which reconnected (up to 5 s) and then sent it, even if the Client had already
+// reported ERR_TIMEOUT to the application meanwhile: a write could reach the
+// device after the application was told it had failed.
+// A slow connect is obtained by filling the raw server's listen backlog: lwIP
+// then ignores the SYN, and the connection completes on its retransmission (~3 s).
+static constexpr uint16_t LATE_WRITE_TEST_PORT = 516;
+static constexpr uint32_t LATE_WRITE_CLIENT_TIMEOUT_MS = 500;
+
+void test_client_no_late_write_after_reconnect() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_CLIENT_NO_LATE_WRITE_AFTER_RECONNECT");
+
+    // Client started while nothing listens: it stays disconnected
+    static ModbusHAL::TCP lateWriteHal(LOOPBACK_IP_STR, LATE_WRITE_TEST_PORT);
+    static ModbusInterface::TCP lateWriteIfc(lateWriteHal, Modbus::CLIENT);
+    static Modbus::Client lateWriteClient(lateWriteIfc, LATE_WRITE_CLIENT_TIMEOUT_MS);
+    lateWriteHal.begin();
+    lateWriteIfc.begin();
+    lateWriteClient.begin();
+    TEST_ASSERT_FALSE_MESSAGE(lateWriteHal.isClientConnected(), "client should start disconnected");
+
+    // Raw server whose backlog (1) is filled by a connection we don't accept yet
+    int listenSock = rawListen(LATE_WRITE_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0, "raw server listen failed");
+    int filler = rawConnect(LATE_WRITE_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(filler >= 0, "filler connect failed");
+
+    // Write request: the client reconnects first, which now takes ~3 s
+    Modbus::Frame writeReq = {
+        .type = Modbus::REQUEST,
+        .fc = Modbus::WRITE_REGISTER,
+        .slaveId = TEST_SLAVE_ID,
+        .regAddress = 0,
+        .regCount = 1,
+        .data = Modbus::packRegisters({0x1234}),
+        .exceptionCode = Modbus::NULL_EXCEPTION
+    };
+    Modbus::Frame writeResp;
+    Modbus::Client::Result tracker = Modbus::Client::NODATA;
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, lateWriteClient.sendRequest(writeReq, writeResp, &tracker));
+    uint32_t t0 = TIME_MS();
+    while (tracker == Modbus::Client::NODATA && TIME_MS() - t0 < LATE_WRITE_CLIENT_TIMEOUT_MS + 200) vTaskDelay(pdMS_TO_TICKS(5));
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, tracker, "write should time out while reconnecting");
+
+    // Free the backlog: the client's SYN retransmission is now accepted
+    int fillerPeer = ::accept(listenSock, nullptr, nullptr);
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(listenSock, &rfds);
+    timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+    TEST_ASSERT_EQUAL_MESSAGE(1, ::select(listenSock + 1, &rfds, nullptr, nullptr, &tv), "client did not reconnect");
+    int peer = ::accept(listenSock, nullptr, nullptr);
+    TEST_ASSERT_TRUE_MESSAGE(peer >= 0, "accept() failed");
+    rawSetupPeer(peer);
+
+    // Nothing must be sent on the new connection: the request was already reported as timed out
+    uint8_t buf[RAW_READ_HR_REQ_SIZE];
+    size_t got = rawRecvExact(peer, buf, sizeof(buf));
+
+    ::close(peer);
+    ::close(fillerPeer);
+    ::close(filler);
+    ::close(listenSock);
+
+    TEST_ASSERT_EQUAL_MESSAGE(0, got, "timed-out write request was sent after reconnection");
+
+    Modbus::Logger::logln("TEST_CLIENT_NO_LATE_WRITE_AFTER_RECONNECT - OK");
+    Modbus::Logger::logln();
+}
+
 // ===================================================================================
 // SERVER: RX STREAM FRAMING
 // A raw client talks to the main EZModbus test server (mbt).
@@ -2739,6 +2811,7 @@ void setup() {
     RUN_TEST(test_server_safety_timeout_clears_idle);
     RUN_TEST(test_late_response_not_matched_to_next_request);
     RUN_TEST(test_client_rx_coalesced_responses);
+    RUN_TEST(test_client_no_late_write_after_reconnect);
     RUN_TEST(test_server_rx_fragmented_request);
     RUN_TEST(test_server_rx_coalesced_requests);
     RUN_TEST(test_server_rx_truncated_request_closes_connection);

@@ -186,6 +186,7 @@ TCP::Result TCP::sendFrame(const Modbus::Frame &frame, TxResultCallback txCallba
                    Modbus::isBroadcastId(frame.slaveId), 
                    txCallback, 
                    ctx);
+        _txCtx.abortCount = _abortCount;
 
         // Signal dans la TX queue (taille 1) pour réveiller rxTxTask
         void* signalPtr = this; // valeur bidon
@@ -219,9 +220,11 @@ bool TCP::isReady() {
 /* @brief Abort current transaction (cleanup hint from client)
  * @note Called when client times out to allow immediate cleanup
  * @note Safe to be called from outside (signals to txnControlQueue, managed by rxTxTask)
+ * @note A request not sent yet (e.g. waiting for a reconnection) will not be sent at all
  */
 void TCP::abortCurrentTransaction() {
     if (!_isInitialized || !_txnControlQueue) return;
+    _abortCount++;
     // Send a dummy signal, rxTxTask will take care of aborting the txn
     void* dummy = this;
     (void)xQueueSend(_txnControlQueue, &dummy, 0);
@@ -481,6 +484,7 @@ TCP::Result TCP::handleTxRequest() {
     uint16_t tid = 0;
     bool isBroadcast = false;
     bool sendMsgRes = false;
+    bool aborted = false;
 
     // Access TX buffer & metadata under critical section (mutex protection)
     { 
@@ -508,9 +512,16 @@ TCP::Result TCP::handleTxRequest() {
             return Error(ERR_SEND_FAILED, "no data to send");
         }
 
+        // Client: (re)connect first, as it may take long. If the request was aborted
+        // meanwhile (e.g. Client timeout), it must not be sent late.
+        bool connected = (_role != Modbus::CLIENT) || _tcpHAL.ensureClientConnected();
+        aborted = (_role == Modbus::CLIENT) && (_abortCount != _txCtx.abortCount);
+
         // Send the payload via HAL
-        sendMsgRes = _tcpHAL.sendMsg(payload, len, destSock,
-                                  (_role == Modbus::CLIENT) ? &actualSock : nullptr);
+        if (connected && !aborted) {
+            sendMsgRes = _tcpHAL.sendMsg(payload, len, destSock,
+                                      (_role == Modbus::CLIENT) ? &actualSock : nullptr);
+        }
 
         // Clear TX buffer and metadata whatever happens
         _txBuffer.clear();
@@ -524,6 +535,7 @@ TCP::Result TCP::handleTxRequest() {
             endTransaction();
         }
         if (txCallback) txCallback(ERR_SEND_FAILED, ctx);
+        if (aborted) return Error(ERR_SEND_FAILED, "request aborted before sending");
         return Error(ERR_SEND_FAILED, "HAL returned failure to send message");
     }
 
