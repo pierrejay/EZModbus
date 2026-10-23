@@ -116,11 +116,11 @@ namespace ModbusCodec {
         // All regular slave IDs are valid
         if (slaveId >= 1 && slaveId <= Modbus::MAX_SLAVE_ID) return true;
 
+        // Extended (TCP Unit IDs): 248-255 are valid too, 0 keeps the broadcast rules below
+        if (extendedSlaveId && slaveId != 0) return true;
+
         // For responses, only regular slaves IDs are valid
         if (type == Modbus::RESPONSE) return false;
-
-        // If extendedSlaveId is true, we won't check further
-        if (extendedSlaveId) return true;
 
         // For requests:
         switch ((Modbus::FunctionCode)fc) {

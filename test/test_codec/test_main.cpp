@@ -907,7 +907,7 @@ void test_codec_tcp() {
         std::cout << "\n=== TEST BROADCAST EXCEPTIONS ===" << std::endl;
         
         // Test qu'une réponse exception en broadcast est bien rejetée
-        for (uint8_t broadcastId : {0, 255}) {
+        for (uint8_t broadcastId : {0}) {
             std::cout << "\nTest avec broadcast ID: " << (int)broadcastId << std::endl;
             
             Frame F = makeFrame(Case{RESPONSE, READ_COILS, broadcastId, 0, 1, true});
@@ -928,6 +928,20 @@ void test_codec_tcp() {
 
             // On ne teste pas le decode() car si l'encode() échoue correctement,
             // il n'y a pas de raison de tester le décodage d'une trame invalide
+        }
+
+        // Unit ID 255 n'est pas un broadcast en TCP : la réponse doit être encodée
+        {
+            std::cout << "\nTest réponse avec Unit ID 255" << std::endl;
+
+            Frame F = makeFrame(Case{RESPONSE, READ_COILS, 255, 0, 1, true});
+            F.exceptionCode = ILLEGAL_DATA_ADDRESS;
+            uint8_t _raw[256];
+            ByteBuffer raw(_raw, sizeof(_raw));
+
+            auto r = ModbusCodec::TCP::encode(F, raw, 0x1234);
+            TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, r, "should encode a response with Unit ID 255");
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(255, raw[6], "Unit ID 255 should be echoed in the MBAP header");
         }
     }
 

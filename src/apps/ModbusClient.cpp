@@ -480,7 +480,7 @@ Client::Result Client::sendRequest(const Modbus::Frame& request,
     if (request.type != Modbus::REQUEST) {
         return Error(ERR_INVALID_FRAME, "non-request frame");
     }
-    auto validResult = ModbusCodec::isValidFrame(request);
+    auto validResult = ModbusCodec::isValidFrame(request, _interface.checkExtendedSlaveIds());
     if (validResult != ModbusCodec::SUCCESS) {
         return Error(ERR_INVALID_FRAME, "invalid fields");
     }
@@ -564,7 +564,7 @@ Client::Result Client::sendRequest(const Modbus::Frame& request,
     if (request.type != Modbus::REQUEST) {
         return Error(ERR_INVALID_FRAME, "non-request frame");
     }
-    auto validResult = ModbusCodec::isValidFrame(request);
+    auto validResult = ModbusCodec::isValidFrame(request, _interface.checkExtendedSlaveIds());
     if (validResult != ModbusCodec::SUCCESS) {
         return Error(ERR_INVALID_FRAME, "invalid fields");
     }

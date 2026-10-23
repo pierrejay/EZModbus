@@ -1406,12 +1406,12 @@ static constexpr size_t RAW_READ_HR_REQ_SIZE  = 12;
 static constexpr size_t RAW_READ_HR_RESP_SIZE = 11;
 
 // FC03 request for 1 holding register
-static void rawBuildReadHrRequest(uint8_t* buf, uint16_t tid, uint16_t addr) {
+static void rawBuildReadHrRequest(uint8_t* buf, uint16_t tid, uint16_t addr, uint8_t unitId = TEST_SLAVE_ID) {
     const uint8_t frame[RAW_READ_HR_REQ_SIZE] = {
         static_cast<uint8_t>(tid >> 8), static_cast<uint8_t>(tid & 0xFF),
         0x00, 0x00,                     // protocol id
         0x00, 0x06,                     // length (unit + PDU = 6)
-        TEST_SLAVE_ID,                  // unit id
+        unitId,                         // unit id
         0x03,                           // FC=0x03
         static_cast<uint8_t>(addr >> 8), static_cast<uint8_t>(addr & 0xFF),
         0x00, 0x01                      // count = 1
@@ -1722,6 +1722,63 @@ void test_server_rx_truncated_request_closes_connection() {
     TEST_ASSERT_EQUAL_HEX16(0x0B02, rawTid(resp));
 
     Modbus::Logger::logln("TEST_SERVER_RX_TRUNCATED_REQUEST_CLOSES_CONNECTION - OK");
+    Modbus::Logger::logln();
+}
+
+// ===================================================================================
+// UNIT ID 255
+// 0xFF is the Unit ID recommended for devices addressed directly over TCP.
+// ===================================================================================
+
+// Regression: the Client validated TCP requests with the RTU address range (1-247)
+void test_client_unit_id_255() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_CLIENT_UNIT_ID_255");
+
+    Modbus::Frame req = {
+        .type = Modbus::REQUEST,
+        .fc = Modbus::READ_HOLDING_REGISTERS,
+        .slaveId = 0xFF,
+        .regAddress = 0,
+        .regCount = 1,
+        .exceptionCode = Modbus::NULL_EXCEPTION
+    };
+    Modbus::Frame resp;
+    auto res = client.sendRequest(req, resp, nullptr); // Sync
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, res, "request to Unit ID 255 failed");
+    TEST_ASSERT_EQUAL(Modbus::NULL_EXCEPTION, resp.exceptionCode);
+    TEST_ASSERT_EQUAL_HEX8(0xFF, resp.slaveId);
+    TEST_ASSERT_EQUAL_HEX16(MBT_INIT_HOLDING_REGISTER_VALUE(0), resp.data[0]);
+
+    Modbus::Logger::logln("TEST_CLIENT_UNIT_ID_255 - OK");
+    Modbus::Logger::logln();
+}
+
+// Regression: the server accepted a TCP request with Unit ID 255, but failed to
+// encode its response (responses were validated with the RTU range)
+void test_server_unit_id_255() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_SERVER_UNIT_ID_255");
+
+    int sock = rawConnect(MODBUS_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sock >= 0, "raw connect to server failed");
+
+    uint8_t req[RAW_READ_HR_REQ_SIZE];
+    rawBuildReadHrRequest(req, 0x0F01, 0, 0xFF);
+    TEST_ASSERT_TRUE(rawSendAll(sock, req, sizeof(req)));
+    uint8_t resp[RAW_READ_HR_RESP_SIZE];
+    size_t got = rawRecvExact(sock, resp, sizeof(resp));
+    ::close(sock);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_RESP_SIZE, got, "no response to a request with Unit ID 255");
+    TEST_ASSERT_EQUAL_HEX16(0x0F01, rawTid(resp));
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0xFF, resp[6], "response should echo Unit ID 255");
+    TEST_ASSERT_EQUAL_HEX16(MBT_INIT_HOLDING_REGISTER_VALUE(0), rawReadHrRespValue(resp));
+
+    Modbus::Logger::logln("TEST_SERVER_UNIT_ID_255 - OK");
     Modbus::Logger::logln();
 }
 
@@ -2815,6 +2872,8 @@ void setup() {
     RUN_TEST(test_server_rx_fragmented_request);
     RUN_TEST(test_server_rx_coalesced_requests);
     RUN_TEST(test_server_rx_truncated_request_closes_connection);
+    RUN_TEST(test_client_unit_id_255);
+    RUN_TEST(test_server_unit_id_255);
     RUN_TEST(test_hal_rx_notifications_never_block_send);
     RUN_TEST(test_hal_stop_joins_task);
     RUN_TEST(test_interface_destroy_joins_task_and_detaches_queue);

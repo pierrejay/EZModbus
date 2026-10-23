@@ -19,6 +19,7 @@ TCP::TCP(ModbusHAL::TCP& hal, Modbus::Role role)
       _rxTxTaskHandle(nullptr)
 {
     _role = role;
+    _extendedSlaveIds = true; // TCP Unit IDs: 1-255
 
     if (role == Modbus::CLIENT) {
         Modbus::Debug::LOG_MSG("ModbusInterface::TCP (Client) created – connect HAL before calling begin()");

@@ -197,6 +197,13 @@ namespace ModbusInterface {
             return _catchAllSlaveIds;
         }
 
+        /* @brief Get the extended slave IDs flag
+         * @return true if slave IDs above the RTU limit (up to 255) are valid on this interface
+         */
+        inline bool checkExtendedSlaveIds() const {
+            return _extendedSlaveIds;
+        }
+
     protected:
 
         // Callback for spontaneous messages & lock to protect against concurrent access
@@ -204,6 +211,7 @@ namespace ModbusInterface {
         Mutex _callbackMutex; 
         Modbus::Role _role;
         bool _catchAllSlaveIds = false; // Can be overridden by the derived class to ignore Slave ID field (especially TCP server)
+        bool _extendedSlaveIds = false; // Can be overridden by the derived class to accept slave IDs up to 255 (TCP Unit IDs)
 
     }; // class IInterface
 
