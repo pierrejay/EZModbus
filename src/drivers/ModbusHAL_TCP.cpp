@@ -705,6 +705,24 @@ size_t TCP::readSocketData(int socketNum, uint8_t* dst, size_t maxLen) {
     return SIZE_MAX;
 }
 
+/* @brief Close a connection on request of the upper layer (e.g. unrecoverable stream error)
+ * @param socketNum The socket to close
+ * @note No-op if the socket is no longer tracked (already closed by the HAL task):
+ *       its descriptor may have been reused by a new connection.
+ */
+void TCP::closeConnection(int socketNum) {
+    Lock guard(_socketsMutex);
+    bool tracked = false;
+    if (_isServer) {
+        for (size_t i = 0; i < _activeSocketCount; ++i) {
+            if (_activeSockets[i] == socketNum) { tracked = true; break; }
+        }
+    } else {
+        tracked = (socketNum != -1 && socketNum == _clientSocket);
+    }
+    if (tracked) closeSocket(socketNum);
+}
+
 void TCP::cleanupDeadSockets() {
     Lock guard(_socketsMutex);
     

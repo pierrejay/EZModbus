@@ -36,7 +36,7 @@ public:
     // CONSTANTS
     // ===================================================================================
 
-    static constexpr uint32_t RX_ASSEMBLY_TIMEOUT_MS = 50;
+    static constexpr uint32_t RX_ASSEMBLY_TIMEOUT_MS = 250; // Covers peers sending header & PDU separately (Nagle + delayed ACK)
     static constexpr uint32_t RXTX_QUEUE_CHECK_TIMEOUT_MS = 100; // Added for task management
     // Safety timeout - much longer than client timeout for emergency cleanup
     static constexpr uint32_t TCP_TRANSACTION_SAFETY_TIMEOUT_MS = (uint32_t)EZMODBUS_TCP_TXN_SAFETY_TIMEOUT;

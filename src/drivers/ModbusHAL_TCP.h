@@ -78,6 +78,7 @@ public:
     // Main API
     bool sendMsg(const uint8_t* payload, const size_t len, const int destSocket = -1, int* actualSocket = nullptr);
     size_t readSocketData(int socketNum, uint8_t* dst, size_t maxLen);
+    void closeConnection(int socketNum);
 
     // Monitoring
     size_t getActiveSocketCount();

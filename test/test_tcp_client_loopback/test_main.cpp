@@ -1340,71 +1340,129 @@ void test_server_safety_timeout_clears_idle() {
     Modbus::Logger::logln();
 }
 
-// Regression: the client TID counter used to live in the current transaction
-// context, which is cleared when a transaction ends. Every request then went
-// out with TID = 1, so a late response to a timed-out request A was accepted
-// as the response to the next request B on the same connection.
-//
-// The server side is a plain POSIX socket so that we fully control when the
-// responses are sent: we hold A's response until B has been sent, then send
-// A's response followed by B's (in two separate segments).
-static constexpr uint16_t LATE_RESPONSE_TEST_PORT = 511;
-static constexpr uint32_t LATE_RESPONSE_CLIENT_TIMEOUT_MS = 300;
+// ===================================================================================
+// RAW TCP PEER HELPERS
+// Plain POSIX sockets give the tests full control over the byte stream seen by
+// EZModbus (timing, fragmentation, several ADUs in one segment).
+// ===================================================================================
 
-void test_late_response_not_matched_to_next_request() {
-    Modbus::Logger::logln();
-    Modbus::Logger::logln("TEST_LATE_RESPONSE_NOT_MATCHED_TO_NEXT_REQUEST");
-
-    // Raw server listening socket
-    int listenSock = ::socket(AF_INET, SOCK_STREAM, 0);
-    TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0, "socket() failed");
+static int rawListen(uint16_t port) {
+    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return -1;
     int opt = 1;
-    setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port   = htons(LATE_RESPONSE_TEST_PORT);
+    addr.sin_port   = htons(port);
     inet_aton(LOOPBACK_IP_STR, &addr.sin_addr);
-    TEST_ASSERT_EQUAL_MESSAGE(0, ::bind(listenSock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), "bind() failed");
-    TEST_ASSERT_EQUAL_MESSAGE(0, ::listen(listenSock, 1), "listen() failed");
+    if (::bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 || ::listen(sock, 1) != 0) {
+        ::close(sock);
+        return -1;
+    }
+    return sock;
+}
 
-    // Dedicated EZModbus client with a short timeout
-    static ModbusHAL::TCP lateHal(LOOPBACK_IP_STR, LATE_RESPONSE_TEST_PORT);
-    static ModbusInterface::TCP lateIfc(lateHal, Modbus::CLIENT);
-    static Modbus::Client lateClient(lateIfc, LATE_RESPONSE_CLIENT_TIMEOUT_MS);
-    lateHal.begin();
-    lateIfc.begin();
-    lateClient.begin();
+// 1 s receive timeout & no Nagle, so that each send() leaves as its own segment
+static void rawSetupPeer(int sock) {
+    timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    int one = 1;
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+}
+
+static int rawConnect(uint16_t port) {
+    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return -1;
+    sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    inet_aton(LOOPBACK_IP_STR, &addr.sin_addr);
+    if (::connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        ::close(sock);
+        return -1;
+    }
+    rawSetupPeer(sock);
+    return sock;
+}
+
+// Returns the number of bytes received: len on success, less if closed by peer / timeout
+static size_t rawRecvExact(int sock, uint8_t* buf, size_t len) {
+    size_t got = 0;
+    while (got < len) {
+        ssize_t n = ::recv(sock, buf + got, len - got, 0);
+        if (n <= 0) break;
+        got += n;
+    }
+    return got;
+}
+
+static bool rawSendAll(int sock, const uint8_t* buf, size_t len) {
+    return ::send(sock, buf, len, 0) == static_cast<ssize_t>(len);
+}
+
+static constexpr size_t RAW_READ_HR_REQ_SIZE  = 12;
+static constexpr size_t RAW_READ_HR_RESP_SIZE = 11;
+
+// FC03 request for 1 holding register
+static void rawBuildReadHrRequest(uint8_t* buf, uint16_t tid, uint16_t addr) {
+    const uint8_t frame[RAW_READ_HR_REQ_SIZE] = {
+        static_cast<uint8_t>(tid >> 8), static_cast<uint8_t>(tid & 0xFF),
+        0x00, 0x00,                     // protocol id
+        0x00, 0x06,                     // length (unit + PDU = 6)
+        TEST_SLAVE_ID,                  // unit id
+        0x03,                           // FC=0x03
+        static_cast<uint8_t>(addr >> 8), static_cast<uint8_t>(addr & 0xFF),
+        0x00, 0x01                      // count = 1
+    };
+    memcpy(buf, frame, sizeof(frame));
+}
+
+// FC03 response carrying 1 register value
+static void rawBuildReadHrResponse(uint8_t* buf, uint16_t tid, uint16_t value) {
+    const uint8_t frame[RAW_READ_HR_RESP_SIZE] = {
+        static_cast<uint8_t>(tid >> 8), static_cast<uint8_t>(tid & 0xFF),
+        0x00, 0x00,                     // protocol id
+        0x00, 0x05,                     // length (unit + PDU = 5)
+        TEST_SLAVE_ID,                  // unit id
+        0x03, 0x02,                     // FC=0x03, byte count = 2
+        static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value & 0xFF)
+    };
+    memcpy(buf, frame, sizeof(frame));
+}
+
+static uint16_t rawTid(const uint8_t* frame) {
+    return (static_cast<uint16_t>(frame[0]) << 8) | frame[1];
+}
+
+static uint16_t rawReadHrRespValue(const uint8_t* frame) {
+    return (static_cast<uint16_t>(frame[9]) << 8) | frame[10];
+}
+
+// ===================================================================================
+// CLIENT: LATE RESPONSE SCENARIO
+// Request A is received by the raw server but left unanswered until the client
+// times out. Request B is then sent on the same connection, and the server
+// answers A (late) then B, either in two segments or coalesced in one.
+// B must complete with its own value.
+// ===================================================================================
+
+static constexpr uint32_t LATE_RESPONSE_CLIENT_TIMEOUT_MS = 300;
+
+static void runLateResponseScenario(uint16_t port, ModbusHAL::TCP& hal, ModbusInterface::TCP& ifc,
+                                    Modbus::Client& cli, bool coalesced) {
+    int listenSock = rawListen(port);
+    TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0, "raw server listen failed");
+
+    hal.begin();
+    ifc.begin();
+    cli.begin();
 
     int peer = ::accept(listenSock, nullptr, nullptr);
     TEST_ASSERT_TRUE_MESSAGE(peer >= 0, "accept() failed");
-    timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-    setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    rawSetupPeer(peer);
 
-    // Read one 12-byte FC03 request and return its TID
-    auto recvRequestTid = [peer](uint16_t& tid) -> bool {
-        uint8_t buf[12];
-        size_t got = 0;
-        while (got < sizeof(buf)) {
-            ssize_t n = ::recv(peer, buf + got, sizeof(buf) - got, 0);
-            if (n <= 0) return false;
-            got += n;
-        }
-        tid = (static_cast<uint16_t>(buf[0]) << 8) | buf[1];
-        return true;
-    };
-    // Send a FC03 response (1 register) with the given TID & value
-    auto sendReadHrResponse = [peer](uint16_t tid, uint16_t value) -> bool {
-        uint8_t buf[11] = {
-            static_cast<uint8_t>(tid >> 8), static_cast<uint8_t>(tid & 0xFF),
-            0x00, 0x00,                     // protocol id
-            0x00, 0x05,                     // length (unit + PDU = 5)
-            TEST_SLAVE_ID,                  // unit id
-            0x03, 0x02,                     // FC=0x03, byte count = 2
-            static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value & 0xFF)
-        };
-        return ::send(peer, buf, sizeof(buf), 0) == static_cast<ssize_t>(sizeof(buf));
-    };
     auto waitTracker = [](volatile Modbus::Client::Result& tracker, uint32_t maxMs) {
         uint32_t t0 = TIME_MS();
         while (tracker == Modbus::Client::NODATA && TIME_MS() - t0 < maxMs) vTaskDelay(pdMS_TO_TICKS(5));
@@ -1412,6 +1470,7 @@ void test_late_response_not_matched_to_next_request() {
 
     constexpr uint16_t VALUE_A = 0xAAAA;
     constexpr uint16_t VALUE_B = 0xBBBB;
+    uint8_t reqBytes[RAW_READ_HR_REQ_SIZE];
     Modbus::Frame req = {
         .type = Modbus::REQUEST,
         .fc = Modbus::READ_HOLDING_REGISTERS,
@@ -1424,30 +1483,37 @@ void test_late_response_not_matched_to_next_request() {
     // 1) Request A: received by the server but left unanswered -> client timeout
     Modbus::Frame respA;
     Modbus::Client::Result trackerA = Modbus::Client::NODATA;
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, lateClient.sendRequest(req, respA, &trackerA));
-    uint16_t tidA = 0;
-    TEST_ASSERT_TRUE_MESSAGE(recvRequestTid(tidA), "request A not received");
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, cli.sendRequest(req, respA, &trackerA));
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_REQ_SIZE, rawRecvExact(peer, reqBytes, sizeof(reqBytes)), "request A not received");
+    uint16_t tidA = rawTid(reqBytes);
     waitTracker(trackerA, LATE_RESPONSE_CLIENT_TIMEOUT_MS + 200);
     TEST_ASSERT_START();
     TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, trackerA, "request A should time out");
 
     // Let the interface process the abort signal before sending B
     uint32_t t0 = TIME_MS();
-    while (!lateIfc.isReady() && TIME_MS() - t0 < 200) vTaskDelay(pdMS_TO_TICKS(1));
+    while (!ifc.isReady() && TIME_MS() - t0 < 200) vTaskDelay(pdMS_TO_TICKS(1));
 
     // 2) Request B on the same connection
     req.regAddress = 1;
     Modbus::Frame respB;
     Modbus::Client::Result trackerB = Modbus::Client::NODATA;
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, lateClient.sendRequest(req, respB, &trackerB));
-    uint16_t tidB = 0;
-    TEST_ASSERT_TRUE_MESSAGE(recvRequestTid(tidB), "request B not received");
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, cli.sendRequest(req, respB, &trackerB));
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_REQ_SIZE, rawRecvExact(peer, reqBytes, sizeof(reqBytes)), "request B not received");
+    uint16_t tidB = rawTid(reqBytes);
     Modbus::Logger::logf("  TID A = %u, TID B = %u\n", (unsigned)tidA, (unsigned)tidB);
 
-    // 3) Late response to A first, then response to B (separate segments)
-    TEST_ASSERT_TRUE_MESSAGE(sendReadHrResponse(tidA, VALUE_A), "send late response A failed");
-    vTaskDelay(pdMS_TO_TICKS(20));
-    TEST_ASSERT_TRUE_MESSAGE(sendReadHrResponse(tidB, VALUE_B), "send response B failed");
+    // 3) Late response to A first, then response to B
+    uint8_t respBytes[2 * RAW_READ_HR_RESP_SIZE];
+    rawBuildReadHrResponse(respBytes, tidA, VALUE_A);
+    rawBuildReadHrResponse(respBytes + RAW_READ_HR_RESP_SIZE, tidB, VALUE_B);
+    if (coalesced) {
+        TEST_ASSERT_TRUE_MESSAGE(rawSendAll(peer, respBytes, sizeof(respBytes)), "send coalesced responses failed");
+    } else {
+        TEST_ASSERT_TRUE_MESSAGE(rawSendAll(peer, respBytes, RAW_READ_HR_RESP_SIZE), "send late response A failed");
+        vTaskDelay(pdMS_TO_TICKS(20));
+        TEST_ASSERT_TRUE_MESSAGE(rawSendAll(peer, respBytes + RAW_READ_HR_RESP_SIZE, RAW_READ_HR_RESP_SIZE), "send response B failed");
+    }
 
     waitTracker(trackerB, LATE_RESPONSE_CLIENT_TIMEOUT_MS + 200);
     ::close(peer);
@@ -1458,8 +1524,132 @@ void test_late_response_not_matched_to_next_request() {
     TEST_ASSERT_EQUAL_HEX16_MESSAGE(VALUE_B, respB.data[0],
         "request B completed with the late response to A");
     TEST_ASSERT_NOT_EQUAL_MESSAGE(tidA, tidB, "consecutive requests must use different TIDs");
+}
 
+// Regression: the client TID counter used to live in the current transaction
+// context, which is cleared when a transaction ends. Every request then went
+// out with TID = 1, so a late response to a timed-out request A was accepted
+// as the response to the next request B on the same connection.
+void test_late_response_not_matched_to_next_request() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_LATE_RESPONSE_NOT_MATCHED_TO_NEXT_REQUEST");
+    static ModbusHAL::TCP lateHal(LOOPBACK_IP_STR, 511);
+    static ModbusInterface::TCP lateIfc(lateHal, Modbus::CLIENT);
+    static Modbus::Client lateClient(lateIfc, LATE_RESPONSE_CLIENT_TIMEOUT_MS);
+    runLateResponseScenario(511, lateHal, lateIfc, lateClient, false);
     Modbus::Logger::logln("TEST_LATE_RESPONSE_NOT_MATCHED_TO_NEXT_REQUEST - OK");
+    Modbus::Logger::logln();
+}
+
+// Regression: when the late response to A and the response to B arrived in the
+// same TCP segment, the client kept the first ADU of the recv() buffer and
+// silently dropped the second one, so B timed out.
+void test_client_rx_coalesced_responses() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_CLIENT_RX_COALESCED_RESPONSES");
+    static ModbusHAL::TCP coalescedHal(LOOPBACK_IP_STR, 512);
+    static ModbusInterface::TCP coalescedIfc(coalescedHal, Modbus::CLIENT);
+    static Modbus::Client coalescedClient(coalescedIfc, LATE_RESPONSE_CLIENT_TIMEOUT_MS);
+    runLateResponseScenario(512, coalescedHal, coalescedIfc, coalescedClient, true);
+    Modbus::Logger::logln("TEST_CLIENT_RX_COALESCED_RESPONSES - OK");
+    Modbus::Logger::logln();
+}
+
+// ===================================================================================
+// SERVER: RX STREAM FRAMING
+// A raw client talks to the main EZModbus test server (mbt).
+// ===================================================================================
+
+// Regression: a request split across two segments (MBAP header, then the rest)
+// was discarded as soon as the header was read.
+void test_server_rx_fragmented_request() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_SERVER_RX_FRAGMENTED_REQUEST");
+
+    int sock = rawConnect(MODBUS_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sock >= 0, "raw connect to server failed");
+
+    uint8_t req[RAW_READ_HR_REQ_SIZE];
+    rawBuildReadHrRequest(req, 0x1234, 0);
+    TEST_ASSERT_TRUE(rawSendAll(sock, req, 7));                 // MBAP header (incl. unit ID)
+    vTaskDelay(pdMS_TO_TICKS(20));
+    TEST_ASSERT_TRUE(rawSendAll(sock, req + 7, sizeof(req) - 7)); // PDU
+
+    uint8_t resp[RAW_READ_HR_RESP_SIZE];
+    size_t got = rawRecvExact(sock, resp, sizeof(resp));
+    ::close(sock);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_RESP_SIZE, got, "no response to a fragmented request");
+    TEST_ASSERT_EQUAL_HEX16(0x1234, rawTid(resp));
+    TEST_ASSERT_EQUAL_HEX16(MBT_INIT_HOLDING_REGISTER_VALUE(0), rawReadHrRespValue(resp));
+
+    Modbus::Logger::logln("TEST_SERVER_RX_FRAGMENTED_REQUEST - OK");
+    Modbus::Logger::logln();
+}
+
+// Regression: two requests received in the same segment: the second one was
+// read from the socket and then silently dropped.
+void test_server_rx_coalesced_requests() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_SERVER_RX_COALESCED_REQUESTS");
+
+    int sock = rawConnect(MODBUS_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sock >= 0, "raw connect to server failed");
+
+    uint8_t reqs[2 * RAW_READ_HR_REQ_SIZE];
+    rawBuildReadHrRequest(reqs, 0x0A01, 0);
+    rawBuildReadHrRequest(reqs + RAW_READ_HR_REQ_SIZE, 0x0A02, 1);
+    TEST_ASSERT_TRUE(rawSendAll(sock, reqs, sizeof(reqs)));
+
+    uint8_t resps[2 * RAW_READ_HR_RESP_SIZE];
+    size_t got = rawRecvExact(sock, resps, sizeof(resps));
+    ::close(sock);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(sizeof(resps), got, "both coalesced requests should get a response");
+    TEST_ASSERT_EQUAL_HEX16(0x0A01, rawTid(resps));
+    TEST_ASSERT_EQUAL_HEX16(MBT_INIT_HOLDING_REGISTER_VALUE(0), rawReadHrRespValue(resps));
+    TEST_ASSERT_EQUAL_HEX16(0x0A02, rawTid(resps + RAW_READ_HR_RESP_SIZE));
+    TEST_ASSERT_EQUAL_HEX16(MBT_INIT_HOLDING_REGISTER_VALUE(1), rawReadHrRespValue(resps + RAW_READ_HR_RESP_SIZE));
+
+    Modbus::Logger::logln("TEST_SERVER_RX_COALESCED_REQUESTS - OK");
+    Modbus::Logger::logln();
+}
+
+// A truncated ADU that never completes leaves the stream misaligned: the server
+// must close the connection instead of reading the next bytes as a new header.
+void test_server_rx_truncated_request_closes_connection() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_SERVER_RX_TRUNCATED_REQUEST_CLOSES_CONNECTION");
+
+    int sock = rawConnect(MODBUS_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sock >= 0, "raw connect to server failed");
+
+    uint8_t req[RAW_READ_HR_REQ_SIZE];
+    rawBuildReadHrRequest(req, 0x0B01, 0);
+    TEST_ASSERT_TRUE(rawSendAll(sock, req, 7)); // MBAP header only, PDU never sent
+
+    // recv() returns 0 once the server has closed the connection (-1 on our 1 s timeout)
+    uint8_t dump[16];
+    ssize_t n = ::recv(sock, dump, sizeof(dump), 0);
+    ::close(sock);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(0, n, "server should close a connection with a truncated ADU");
+
+    // The server must still serve new connections
+    sock = rawConnect(MODBUS_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sock >= 0, "raw reconnect to server failed");
+    rawBuildReadHrRequest(req, 0x0B02, 0);
+    TEST_ASSERT_TRUE(rawSendAll(sock, req, sizeof(req)));
+    uint8_t resp[RAW_READ_HR_RESP_SIZE];
+    size_t got = rawRecvExact(sock, resp, sizeof(resp));
+    ::close(sock);
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_RESP_SIZE, got, "server should answer on a new connection");
+    TEST_ASSERT_EQUAL_HEX16(0x0B02, rawTid(resp));
+
+    Modbus::Logger::logln("TEST_SERVER_RX_TRUNCATED_REQUEST_CLOSES_CONNECTION - OK");
     Modbus::Logger::logln();
 }
 
@@ -2377,6 +2567,10 @@ void setup() {
     RUN_TEST(test_timeout_server);
     RUN_TEST(test_server_safety_timeout_clears_idle);
     RUN_TEST(test_late_response_not_matched_to_next_request);
+    RUN_TEST(test_client_rx_coalesced_responses);
+    RUN_TEST(test_server_rx_fragmented_request);
+    RUN_TEST(test_server_rx_coalesced_requests);
+    RUN_TEST(test_server_rx_truncated_request_closes_connection);
     RUN_TEST(test_modbus_exceptions);
     RUN_TEST(test_invalid_parameters);
     RUN_TEST(test_broadcast_read_rejected);

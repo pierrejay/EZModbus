@@ -371,81 +371,68 @@ TCP::Result TCP::handleDecodedFrame(const Modbus::Frame& frame, int socketNum, u
  * @param rcvTid The transaction ID
  * @return SUCCESS if the data has been fetched, an error otherwise
  * @note This method is called by the rxTxTask exclusively
- * @note It will loop until a "looking-valid" frame is assembled, or a timeout occurs
+ * @note Reads exactly one frame: the MBAP header first, then the length it announces.
+ *       Any following frame stays in the socket and will be signaled again by the HAL.
+ * @note If the frame is not complete within RX_ASSEMBLY_TIMEOUT_MS, or the header is
+ *       invalid, the connection is closed: the stream position would otherwise be lost.
  */
 TCP::Result TCP::fetchSocketData(int socketNum, ByteBuffer& rcvBuf, uint16_t& rcvTid) {
-    if (rcvBuf.capacity() < ModbusCodec::TCP::MAX_FRAME_SIZE) {
+    constexpr size_t MBAP_SIZE = ModbusCodec::TCP::MBAP_SIZE;
+    constexpr size_t MIN_FRAME_SIZE = ModbusCodec::TCP::MIN_FRAME_SIZE;
+    constexpr size_t MAX_FRAME_SIZE = ModbusCodec::TCP::MAX_FRAME_SIZE;
+
+    if (rcvBuf.capacity() < MAX_FRAME_SIZE) {
         return Error(ERR_RX_FAILED, "buffer too small");
     }
 
     rcvBuf.clear();
 
     uint32_t t0 = TIME_MS();
-    bool firstRead = true; // First read of the event
+    size_t frameLen = MBAP_SIZE; // Header first, updated once the header is complete
 
-    while (TIME_MS() - t0 < RX_ASSEMBLY_TIMEOUT_MS) {
-        // Taille libre dans le buffer d'assemblage
-        size_t freeSpace = rcvBuf.free_space();
-        if (freeSpace == 0) {
-            rcvBuf.clear();
-            return Error(ERR_RX_FAILED, "buffer overflow, flushing RX buffer");
-        }
-
-        size_t toRead = freeSpace;
-        uint8_t* writePtr = rcvBuf.end();
+    while (true) {
         size_t currentSize = rcvBuf.size();
-
-        // Pre-reserve the space
-        rcvBuf.resize(currentSize + toRead);
-
-        size_t n = _tcpHAL.readSocketData(socketNum, writePtr, toRead);
+        rcvBuf.resize(frameLen); // Pre-reserve exactly what is missing
+        size_t n = _tcpHAL.readSocketData(socketNum, rcvBuf.begin() + currentSize, frameLen - currentSize);
 
         if (n == SIZE_MAX) {
-            rcvBuf.trim(currentSize); // Revert to previous size
+            rcvBuf.clear();
             return Error(ERR_RX_FAILED, "socket error/closed, aborting read");
         }
 
-        if (n > 0) {
-            rcvBuf.trim(currentSize + n);
-        } else if (n == 0) {
-            // No bytes received, revert to previous size to avoid growing indefinitely
-            rcvBuf.trim(currentSize);
-            
-            // If we get no data on the first read, we have already consumed the data for this event
-            if (firstRead) {
-                return Error(NODATA, "event data already consumed");
-            }
-        }
-        
-        firstRead = false;
-
-        // Try to decode if we have at least the MBAP header (7 bytes)
-        if (rcvBuf.size() >= 7) {
-            uint16_t mbapLen = (rcvBuf[4] << 8) | rcvBuf[5];
-            size_t frameLen = 6 + mbapLen; // Expected total size (MBAP+PDU)
-
-            // If we don't have the whole frame, break the loop to read again
-            if (rcvBuf.size() < frameLen) break;
-
-            // We have the full frame in rcvBuf, resize it exactly to frameLen
-            rcvBuf.trim(frameLen);
-
-            rcvTid = (static_cast<uint16_t>(rcvBuf[0]) << 8) | rcvBuf[1];
-
-            return Success();
-        }
+        rcvBuf.trim(currentSize + n);
 
         if (n == 0) {
-            WAIT_MS(1); // Wait for more data until timeout or failure
+            // No data on the first read: the data for this event has already been consumed
+            if (currentSize == 0) {
+                return Error(NODATA, "event data already consumed");
+            }
+            if (TIME_MS() - t0 >= RX_ASSEMBLY_TIMEOUT_MS) {
+                rcvBuf.clear();
+                _tcpHAL.closeConnection(socketNum);
+                return Error(ERR_RX_FAILED, "incomplete frame, connection closed");
+            }
+            WAIT_MS(1); // Wait for the rest of the frame
+            continue;
         }
-    }
 
-    if (rcvBuf.size() > 0) {
-        rcvBuf.clear();
-        return Error(ERR_RX_FAILED, "assembly timeout, dropping data");
-    }
-    else {
-        return Error(NODATA, "assembly timeout w/o data");
+        if (rcvBuf.size() < frameLen) continue;
+
+        if (frameLen == MBAP_SIZE) {
+            // Header complete: check it and read exactly the announced length
+            uint16_t protocolId = (rcvBuf[2] << 8) | rcvBuf[3];
+            uint16_t mbapLen = (rcvBuf[4] << 8) | rcvBuf[5];
+            frameLen = 6 + mbapLen; // Expected total size (MBAP+PDU)
+            if (protocolId != 0 || frameLen < MIN_FRAME_SIZE || frameLen > MAX_FRAME_SIZE) {
+                rcvBuf.clear();
+                _tcpHAL.closeConnection(socketNum);
+                return Error(ERR_RX_FAILED, "invalid MBAP header, connection closed");
+            }
+            continue;
+        }
+
+        rcvTid = (static_cast<uint16_t>(rcvBuf[0]) << 8) | rcvBuf[1];
+        return Success();
     }
 }
 
