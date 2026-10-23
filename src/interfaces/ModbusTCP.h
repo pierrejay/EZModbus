@@ -112,6 +112,7 @@ private:
 
     // Transaction management
     TransactionCtx _currentTransaction; // IMPORTANT: must ONLY be written from rxTxTask context!
+    uint16_t _lastOutgoingTid = 0; // Client TID counter, independent from _currentTransaction (written under _txMutex)
 
     // Data processing
     // _rxEventQueue: receives RX events from HAL (only the handle, belongs to HAL layer)

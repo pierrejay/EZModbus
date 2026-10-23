@@ -530,12 +530,14 @@ TCP::Result TCP::handleTxRequest() {
 
 /* @brief Get the next outgoing transaction ID
  * @return The next outgoing transaction ID
+ * @note Called under _txMutex. The counter lives outside _currentTransaction so that
+ *       ending a transaction (success, error or abort) never rewinds it: a late
+ *       response to a timed-out request can't match the TID of the next one.
  */
 uint16_t TCP::getNextOutgoingTransactionId() {
-    // For client, increment transaction ID. Wraps around. Starts from tid = 0.
-    if (_currentTransaction.tid == 0xFFFF) _currentTransaction.tid = 0;
-    _currentTransaction.tid++; 
-    return _currentTransaction.tid;
+    // For client, increment transaction ID. Wraps around, skipping 0.
+    if (_lastOutgoingTid == 0xFFFF) _lastOutgoingTid = 0;
+    return ++_lastOutgoingTid;
 }
 
 /* @brief Mark the _currentTransaction.active flag to true at the beginning of a Modbus transaction.

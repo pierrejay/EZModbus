@@ -1340,6 +1340,129 @@ void test_server_safety_timeout_clears_idle() {
     Modbus::Logger::logln();
 }
 
+// Regression: the client TID counter used to live in the current transaction
+// context, which is cleared when a transaction ends. Every request then went
+// out with TID = 1, so a late response to a timed-out request A was accepted
+// as the response to the next request B on the same connection.
+//
+// The server side is a plain POSIX socket so that we fully control when the
+// responses are sent: we hold A's response until B has been sent, then send
+// A's response followed by B's (in two separate segments).
+static constexpr uint16_t LATE_RESPONSE_TEST_PORT = 511;
+static constexpr uint32_t LATE_RESPONSE_CLIENT_TIMEOUT_MS = 300;
+
+void test_late_response_not_matched_to_next_request() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_LATE_RESPONSE_NOT_MATCHED_TO_NEXT_REQUEST");
+
+    // Raw server listening socket
+    int listenSock = ::socket(AF_INET, SOCK_STREAM, 0);
+    TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0, "socket() failed");
+    int opt = 1;
+    setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(LATE_RESPONSE_TEST_PORT);
+    inet_aton(LOOPBACK_IP_STR, &addr.sin_addr);
+    TEST_ASSERT_EQUAL_MESSAGE(0, ::bind(listenSock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), "bind() failed");
+    TEST_ASSERT_EQUAL_MESSAGE(0, ::listen(listenSock, 1), "listen() failed");
+
+    // Dedicated EZModbus client with a short timeout
+    static ModbusHAL::TCP lateHal(LOOPBACK_IP_STR, LATE_RESPONSE_TEST_PORT);
+    static ModbusInterface::TCP lateIfc(lateHal, Modbus::CLIENT);
+    static Modbus::Client lateClient(lateIfc, LATE_RESPONSE_CLIENT_TIMEOUT_MS);
+    lateHal.begin();
+    lateIfc.begin();
+    lateClient.begin();
+
+    int peer = ::accept(listenSock, nullptr, nullptr);
+    TEST_ASSERT_TRUE_MESSAGE(peer >= 0, "accept() failed");
+    timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+    setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    // Read one 12-byte FC03 request and return its TID
+    auto recvRequestTid = [peer](uint16_t& tid) -> bool {
+        uint8_t buf[12];
+        size_t got = 0;
+        while (got < sizeof(buf)) {
+            ssize_t n = ::recv(peer, buf + got, sizeof(buf) - got, 0);
+            if (n <= 0) return false;
+            got += n;
+        }
+        tid = (static_cast<uint16_t>(buf[0]) << 8) | buf[1];
+        return true;
+    };
+    // Send a FC03 response (1 register) with the given TID & value
+    auto sendReadHrResponse = [peer](uint16_t tid, uint16_t value) -> bool {
+        uint8_t buf[11] = {
+            static_cast<uint8_t>(tid >> 8), static_cast<uint8_t>(tid & 0xFF),
+            0x00, 0x00,                     // protocol id
+            0x00, 0x05,                     // length (unit + PDU = 5)
+            TEST_SLAVE_ID,                  // unit id
+            0x03, 0x02,                     // FC=0x03, byte count = 2
+            static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value & 0xFF)
+        };
+        return ::send(peer, buf, sizeof(buf), 0) == static_cast<ssize_t>(sizeof(buf));
+    };
+    auto waitTracker = [](volatile Modbus::Client::Result& tracker, uint32_t maxMs) {
+        uint32_t t0 = TIME_MS();
+        while (tracker == Modbus::Client::NODATA && TIME_MS() - t0 < maxMs) vTaskDelay(pdMS_TO_TICKS(5));
+    };
+
+    constexpr uint16_t VALUE_A = 0xAAAA;
+    constexpr uint16_t VALUE_B = 0xBBBB;
+    Modbus::Frame req = {
+        .type = Modbus::REQUEST,
+        .fc = Modbus::READ_HOLDING_REGISTERS,
+        .slaveId = TEST_SLAVE_ID,
+        .regAddress = 0,
+        .regCount = 1,
+        .exceptionCode = Modbus::NULL_EXCEPTION
+    };
+
+    // 1) Request A: received by the server but left unanswered -> client timeout
+    Modbus::Frame respA;
+    Modbus::Client::Result trackerA = Modbus::Client::NODATA;
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, lateClient.sendRequest(req, respA, &trackerA));
+    uint16_t tidA = 0;
+    TEST_ASSERT_TRUE_MESSAGE(recvRequestTid(tidA), "request A not received");
+    waitTracker(trackerA, LATE_RESPONSE_CLIENT_TIMEOUT_MS + 200);
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, trackerA, "request A should time out");
+
+    // Let the interface process the abort signal before sending B
+    uint32_t t0 = TIME_MS();
+    while (!lateIfc.isReady() && TIME_MS() - t0 < 200) vTaskDelay(pdMS_TO_TICKS(1));
+
+    // 2) Request B on the same connection
+    req.regAddress = 1;
+    Modbus::Frame respB;
+    Modbus::Client::Result trackerB = Modbus::Client::NODATA;
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, lateClient.sendRequest(req, respB, &trackerB));
+    uint16_t tidB = 0;
+    TEST_ASSERT_TRUE_MESSAGE(recvRequestTid(tidB), "request B not received");
+    Modbus::Logger::logf("  TID A = %u, TID B = %u\n", (unsigned)tidA, (unsigned)tidB);
+
+    // 3) Late response to A first, then response to B (separate segments)
+    TEST_ASSERT_TRUE_MESSAGE(sendReadHrResponse(tidA, VALUE_A), "send late response A failed");
+    vTaskDelay(pdMS_TO_TICKS(20));
+    TEST_ASSERT_TRUE_MESSAGE(sendReadHrResponse(tidB, VALUE_B), "send response B failed");
+
+    waitTracker(trackerB, LATE_RESPONSE_CLIENT_TIMEOUT_MS + 200);
+    ::close(peer);
+    ::close(listenSock);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, trackerB, "request B should succeed");
+    TEST_ASSERT_EQUAL_HEX16_MESSAGE(VALUE_B, respB.data[0],
+        "request B completed with the late response to A");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(tidA, tidB, "consecutive requests must use different TIDs");
+
+    Modbus::Logger::logln("TEST_LATE_RESPONSE_NOT_MATCHED_TO_NEXT_REQUEST - OK");
+    Modbus::Logger::logln();
+}
+
 void test_modbus_exceptions() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_MODBUS_EXCEPTIONS - CASE 1: READ EXCEPTION (ILLEGAL DATA ADDRESS)");
@@ -2253,6 +2376,7 @@ void setup() {
     RUN_TEST(test_timeout_client_interface);
     RUN_TEST(test_timeout_server);
     RUN_TEST(test_server_safety_timeout_clears_idle);
+    RUN_TEST(test_late_response_not_matched_to_next_request);
     RUN_TEST(test_modbus_exceptions);
     RUN_TEST(test_invalid_parameters);
     RUN_TEST(test_broadcast_read_rejected);
