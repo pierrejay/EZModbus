@@ -443,6 +443,7 @@ void TCP::runTcpTask() {
         }
 
         // Activity detected, process sockets
+        bool rxQueueFull = false;
         { // Scope for socketsMutex lock
             Lock guard(_socketsMutex);
             if (!_isRunning) break; // Check flag again after acquiring lock
@@ -504,8 +505,11 @@ void TCP::runTcpTask() {
  
                 if (peek > 0) {
                     no_data_read = false;  // We have data!
-                    if (xQueueSend(_rxQueue, &sock, portMAX_DELAY) != pdTRUE) {
-                        Modbus::Debug::LOG_MSGF("RX queue full. Dropping event for socket %d.", sock);
+                    // Never block while holding _socketsMutex (sendMsg() needs it). If the
+                    // queue is full, the event is dropped: the data stays in the socket and
+                    // select() will signal it again.
+                    if (xQueueSend(_rxQueue, &sock, 0) != pdTRUE) {
+                        rxQueueFull = true;
                     }
                 } else if (peek == 0) {
                     no_data_read = false;  // Connection closed = activity
@@ -536,6 +540,9 @@ void TCP::runTcpTask() {
             }
  
         } // Unlock socketsMutex
+
+        // Consumer is behind: let it drain the queue instead of spinning on unread data
+        if (rxQueueFull) vTaskDelay(1);
     } // while (_isRunning)
 }
 

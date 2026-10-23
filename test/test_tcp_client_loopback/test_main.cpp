@@ -1653,6 +1653,78 @@ void test_server_rx_truncated_request_closes_connection() {
     Modbus::Logger::logln();
 }
 
+// Regression: the HAL task posts one RX event per select() round while data is
+// unread on a socket, and used to post it with portMAX_DELAY while holding the
+// socket mutex. Once the RX queue was full (consumer busy), the HAL task blocked
+// holding the mutex, and any sendMsg() - which needs the same mutex - blocked
+// forever: the interface task could no longer send, nor drain the queue.
+// HAL-only fixture: nobody consumes the RX queue, as with a busy interface task.
+static constexpr uint16_t HAL_NOTIFY_TEST_PORT = 513;
+ModbusHAL::TCP halForNotifyServer(HAL_NOTIFY_TEST_PORT);
+
+struct HalSendProbe {
+    int sock;
+    volatile bool done;
+    volatile bool result;
+};
+static StaticTask_t halSendProbeTcb;
+static StackType_t halSendProbeStack[4096];
+
+static void halSendProbeTask(void* arg) {
+    auto* probe = static_cast<HalSendProbe*>(arg);
+    const uint8_t byte = 0x00;
+    probe->result = halForNotifyServer.sendMsg(&byte, 1, probe->sock);
+    probe->done = true;
+    vTaskDelete(nullptr);
+}
+
+void test_hal_rx_notifications_never_block_send() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_HAL_RX_NOTIFICATIONS_NEVER_BLOCK_SEND");
+
+    TEST_ASSERT_TRUE_MESSAGE(halForNotifyServer.begin(), "HAL server begin failed");
+    QueueHandle_t rxQueue = halForNotifyServer.getRxQueueHandle();
+
+    int sock = rawConnect(HAL_NOTIFY_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sock >= 0, "raw connect to HAL server failed");
+
+    // Unread data on the connection: the HAL keeps signaling it until the queue is full
+    uint8_t req[RAW_READ_HR_REQ_SIZE];
+    rawBuildReadHrRequest(req, 0x0D01, 0);
+    TEST_ASSERT_TRUE(rawSendAll(sock, req, sizeof(req)));
+
+    int serverSock = -1;
+    TEST_ASSERT_EQUAL_MESSAGE(pdTRUE, xQueuePeek(rxQueue, &serverSock, pdMS_TO_TICKS(500)), "no RX event from HAL");
+    uint32_t t0 = TIME_MS();
+    while (uxQueueMessagesWaiting(rxQueue) < ModbusHAL::TCP::RX_QUEUE_SIZE && TIME_MS() - t0 < 500) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusHAL::TCP::RX_QUEUE_SIZE, uxQueueMessagesWaiting(rxQueue), "RX queue should be full");
+    vTaskDelay(pdMS_TO_TICKS(20)); // Let the HAL task hit the full queue
+
+    // Send from another task (it would block forever on the socket mutex before the fix)
+    static HalSendProbe probe;
+    probe = { serverSock, false, false };
+    TaskHandle_t probeTask = xTaskCreateStatic(halSendProbeTask, "halSendProbe", sizeof(halSendProbeStack) / sizeof(StackType_t),
+                                               &probe, tskIDLE_PRIORITY + 1, halSendProbeStack, &halSendProbeTcb);
+    TEST_ASSERT_NOT_NULL(probeTask);
+    t0 = TIME_MS();
+    while (!probe.done && TIME_MS() - t0 < 500) vTaskDelay(pdMS_TO_TICKS(5));
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(probe.done, "sendMsg() blocked while the RX queue was full");
+    TEST_ASSERT_TRUE_MESSAGE(probe.result, "sendMsg() failed");
+
+    // Cleanup: close the connection, then drain the events left in the queue
+    ::close(sock);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    int dummy;
+    while (xQueueReceive(rxQueue, &dummy, 0) == pdTRUE) {}
+
+    Modbus::Logger::logln("TEST_HAL_RX_NOTIFICATIONS_NEVER_BLOCK_SEND - OK");
+    Modbus::Logger::logln();
+}
+
 void test_modbus_exceptions() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_MODBUS_EXCEPTIONS - CASE 1: READ EXCEPTION (ILLEGAL DATA ADDRESS)");
@@ -2571,6 +2643,7 @@ void setup() {
     RUN_TEST(test_server_rx_fragmented_request);
     RUN_TEST(test_server_rx_coalesced_requests);
     RUN_TEST(test_server_rx_truncated_request_closes_connection);
+    RUN_TEST(test_hal_rx_notifications_never_block_send);
     RUN_TEST(test_modbus_exceptions);
     RUN_TEST(test_invalid_parameters);
     RUN_TEST(test_broadcast_read_rejected);
