@@ -70,7 +70,15 @@ uint16_t serverDiscreteInputs[MBT_INIT_START_REG + MBT_INIT_REG_COUNT];
 uint16_t serverCoils[MBT_INIT_START_REG + MBT_INIT_REG_COUNT];
 uint16_t serverHoldingRegisters[MBT_INIT_START_REG + MBT_INIT_REG_COUNT];
 uint16_t serverInputRegisters[MBT_INIT_START_REG + MBT_INIT_REG_COUNT];
+// Holding register whose read takes SLOW_READ_DELAY_MS when slowReadEnabled (late response tests)
+#define SLOW_READ_ADDR 6
+static constexpr uint32_t SLOW_READ_DELAY_MS = 1500;
+volatile bool slowReadEnabled = false;
+
 Modbus::ReadWordHandler serverReadHandler = [](const Modbus::Word& word, uint16_t* outVals, void* userCtx) -> Modbus::ExceptionCode {
+    if (slowReadEnabled && word.type == Modbus::HOLDING_REGISTER && word.startAddr == SLOW_READ_ADDR) {
+        vTaskDelay(pdMS_TO_TICKS(SLOW_READ_DELAY_MS));
+    }
     switch (word.type) {
         case Modbus::HOLDING_REGISTER:
             outVals[0] = serverHoldingRegisters[word.startAddr];
@@ -282,6 +290,138 @@ void test_write_holding_register() {
     TEST_ASSERT_EQUAL(Modbus::NULL_EXCEPTION, response.exceptionCode);
 }
 
+// ===================================================================================
+// GATEWAY BEHAVIOUR WHEN THE RTU SIDE CAN'T ANSWER
+// ===================================================================================
+
+static constexpr uint32_t BRIDGE_TIMEOUT_MS = 1000; // Bridge default RTU response timeout
+#define ABSENT_SLAVE_ID 7                           // No RTU server answers this ID
+
+static bool bridgeConnect() {
+    uint32_t t0 = millis();
+    while (!tcpClient.connected()) {
+        if (millis() - t0 > 1000) return false;
+        tcpClient.connect(LOOPBACK_IP, MODBUS_PORT);
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    return true;
+}
+
+// Read one ADU (MBAP length-framed) from the bridge, returns its size (0 if none within timeoutMs)
+static size_t bridgeReceive(uint8_t* buf, size_t cap, uint32_t timeoutMs) {
+    size_t got = 0, expected = 6;
+    uint32_t t0 = millis();
+    while (got < expected) {
+        if (millis() - t0 > timeoutMs) return 0;
+        if (!tcpClient.available()) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
+        buf[got++] = tcpClient.read();
+        if (got == 6) {
+            expected = 6 + ((buf[4] << 8) | buf[5]);
+            if (expected > cap) return 0;
+        }
+    }
+    return got;
+}
+
+static bool bridgeSend(const Modbus::Frame& request, uint16_t tid) {
+    uint8_t raw[ModbusCodec::TCP::MAX_FRAME_SIZE];
+    ByteBuffer bytes(raw, sizeof(raw));
+    if (ModbusCodec::TCP::encode(request, bytes, tid) != ModbusCodec::SUCCESS) return false;
+    if (!bridgeConnect()) return false;
+    while (tcpClient.available()) tcpClient.read(); // Drop leftovers from a previous exchange
+    return tcpClient.write(bytes.data(), bytes.size()) == bytes.size();
+}
+
+// Check a raw TCP ADU is the exception `ec` for (tid, slaveId, fc)
+static void assertGatewayException(const uint8_t* adu, size_t len, uint16_t tid, uint8_t slaveId,
+                                   Modbus::FunctionCode fc, uint8_t ec) {
+    TEST_ASSERT_EQUAL_MESSAGE(9, len, "expected a 9-byte exception response");
+    TEST_ASSERT_EQUAL_HEX16(tid, (adu[0] << 8) | adu[1]);
+    TEST_ASSERT_EQUAL_HEX8(slaveId, adu[6]);
+    TEST_ASSERT_EQUAL_HEX8((uint8_t)fc | 0x80, adu[7]);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(ec, adu[8], "unexpected exception code");
+}
+
+// Regression: when the RS-485 slave doesn't answer, the bridge sent nothing back and the
+// TCP side stayed busy until its 5 s safety timeout. A gateway must answer 0x0B.
+void test_bridge_silent_slave_gateway_exception() {
+    Modbus::Frame request = {
+        .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = ABSENT_SLAVE_ID,
+        .regAddress = READ_HOLDING_ADDR, .regCount = 1, .data = {}
+    };
+    TEST_ASSERT_TRUE_MESSAGE(bridgeSend(request, 0x0B01), "cannot send request to bridge");
+    uint32_t t0 = millis();
+    uint8_t adu[ModbusCodec::TCP::MAX_FRAME_SIZE];
+    size_t len = bridgeReceive(adu, sizeof(adu), BRIDGE_TIMEOUT_MS + 500);
+    uint32_t elapsed = millis() - t0;
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(len > 0, "no answer from the bridge for a silent slave");
+    assertGatewayException(adu, len, 0x0B01, ABSENT_SLAVE_ID, Modbus::READ_HOLDING_REGISTERS, 0x0B);
+    TEST_ASSERT_TRUE_MESSAGE(elapsed >= BRIDGE_TIMEOUT_MS - 50, "0x0B sent before the bridge timeout");
+
+    // The bridge must be ready for the next request right away
+    request.slaveId = TEST_SLAVE_ID;
+    TEST_ASSERT_TRUE(bridgeSend(request, 0x0B02));
+    len = bridgeReceive(adu, sizeof(adu), 1000);
+    TEST_ASSERT_EQUAL_MESSAGE(11, len, "next request not answered");
+    TEST_ASSERT_EQUAL_HEX16(0x0B02, (adu[0] << 8) | adu[1]);
+    TEST_ASSERT_EQUAL(MBT_INIT_HOLDING_REGISTER_VALUE(READ_HOLDING_ADDR), (adu[9] << 8) | adu[10]);
+}
+
+// Regression: when the request can't be forwarded to the RTU side (here Unit ID 255, valid
+// over TCP but not on RTU), the bridge sent nothing back. A gateway must answer 0x0A.
+void test_bridge_forward_failure_gateway_exception() {
+    Modbus::Frame request = {
+        .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = 0xFF,
+        .regAddress = READ_HOLDING_ADDR, .regCount = 1, .data = {}
+    };
+    TEST_ASSERT_TRUE_MESSAGE(bridgeSend(request, 0x0A01), "cannot send request to bridge");
+    uint8_t adu[ModbusCodec::TCP::MAX_FRAME_SIZE];
+    size_t len = bridgeReceive(adu, sizeof(adu), 500);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(len > 0, "no answer from the bridge when forwarding fails");
+    assertGatewayException(adu, len, 0x0A01, 0xFF, Modbus::READ_HOLDING_REGISTERS, 0x0A);
+}
+
+// A response arriving after the bridge timeout must be dropped, not forwarded to the TCP
+// side, and the next request (same slave & function code) must get its own answer.
+// Note: RTU has no transaction ID, so a late response can't be told apart from the answer
+// to a request sent meanwhile to the same slave with the same function code: the bridge
+// timeout must stay above the slowest slave's response time.
+void test_bridge_late_response_not_forwarded() {
+    slowReadEnabled = true;
+    Modbus::Frame request = {
+        .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID,
+        .regAddress = SLOW_READ_ADDR, .regCount = 1, .data = {}
+    };
+    TEST_ASSERT_TRUE_MESSAGE(bridgeSend(request, 0x0C01), "cannot send request to bridge");
+    uint32_t t0 = millis();
+    uint8_t adu[ModbusCodec::TCP::MAX_FRAME_SIZE];
+    size_t len = bridgeReceive(adu, sizeof(adu), BRIDGE_TIMEOUT_MS + 300);
+
+    // Wait for the late response to reach the bridge: nothing must come out on TCP
+    while (millis() - t0 < SLOW_READ_DELAY_MS + 300) vTaskDelay(pdMS_TO_TICKS(5));
+    slowReadEnabled = false;
+    int leftover = tcpClient.available();
+
+    // Next request to the same slave with the same function code
+    request.regAddress = READ_HOLDING_ADDR;
+    bool sent = bridgeSend(request, 0x0C02);
+    uint8_t nextAdu[ModbusCodec::TCP::MAX_FRAME_SIZE];
+    size_t nextLen = sent ? bridgeReceive(nextAdu, sizeof(nextAdu), BRIDGE_TIMEOUT_MS) : 0;
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(len > 0, "no answer from the bridge for a slow slave");
+    assertGatewayException(adu, len, 0x0C01, TEST_SLAVE_ID, Modbus::READ_HOLDING_REGISTERS, 0x0B);
+    TEST_ASSERT_EQUAL_MESSAGE(0, leftover, "late response forwarded to the TCP side");
+    TEST_ASSERT_TRUE_MESSAGE(sent, "cannot send next request to bridge");
+    TEST_ASSERT_EQUAL_MESSAGE(11, nextLen, "next request not answered");
+    TEST_ASSERT_EQUAL_HEX16(0x0C02, (nextAdu[0] << 8) | nextAdu[1]);
+    TEST_ASSERT_EQUAL(MBT_INIT_HOLDING_REGISTER_VALUE(READ_HOLDING_ADDR), (nextAdu[9] << 8) | nextAdu[10]);
+}
+
 void setUp() {
     // Clear both RX buffers before each test
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -354,6 +494,9 @@ void setup() {
     
     RUN_TEST(test_read_holding_register);
     RUN_TEST(test_write_holding_register);
+    RUN_TEST(test_bridge_silent_slave_gateway_exception);
+    RUN_TEST(test_bridge_forward_failure_gateway_exception);
+    RUN_TEST(test_bridge_late_response_not_forwarded);
     UNITY_END();
 }
 

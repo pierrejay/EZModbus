@@ -42,6 +42,8 @@ namespace Modbus {
         SLAVE_DEVICE_BUSY      = 0x06,
         NEGATIVE_ACKNOWLEDGE   = 0x07,
         MEMORY_PARITY_ERROR    = 0x08,
+        GATEWAY_PATH_UNAVAILABLE                = 0x0A,
+        GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND = 0x0B,
         NB_EC
     };
 
@@ -479,7 +481,8 @@ namespace Modbus {
         };
 
         Bridge(ModbusInterface::IInterface& interface1,
-               ModbusInterface::IInterface& interface2);
+               ModbusInterface::IInterface& interface2,
+               uint32_t timeoutMs = DEFAULT_TIMEOUT_MS); // 1000 ms by default
 
         Result begin();
     };
