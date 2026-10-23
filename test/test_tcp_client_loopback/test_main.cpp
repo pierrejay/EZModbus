@@ -1725,6 +1725,105 @@ void test_hal_rx_notifications_never_block_send() {
     Modbus::Logger::logln();
 }
 
+// ===================================================================================
+// LIFECYCLE: STOP / DESTRUCTION MUST JOIN THE TASKS
+// A task still running after stop() / destruction may access a destroyed object,
+// or have its static TCB & stack reused by the next begin(). We check that the
+// number of FreeRTOS tasks is back to its baseline as soon as the call returns.
+// ===================================================================================
+
+static UBaseType_t settledTaskCount() {
+    vTaskDelay(pdMS_TO_TICKS(50)); // Let the idle task clean up tasks deleted by previous tests
+    return uxTaskGetNumberOfTasks();
+}
+
+// Regression: HAL stop() slept 200 ms instead of waiting for its task (which can
+// sit in select() for up to 1 s), and in client mode the task handle was not even
+// stored, so stop() did not wait at all.
+static constexpr uint16_t HAL_STOP_TEST_PORT = 515;
+ModbusHAL::TCP halForStopServer(HAL_STOP_TEST_PORT);
+ModbusHAL::TCP halForStopClient(LOOPBACK_IP_STR, HAL_STOP_TEST_PORT);
+
+void test_hal_stop_joins_task() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_HAL_STOP_JOINS_TASK");
+
+    const UBaseType_t baseline = settledTaskCount();
+
+    for (int round = 0; round < 2; round++) { // Second round: restart after stop()
+        TEST_ASSERT_TRUE_MESSAGE(halForStopServer.begin(), "server HAL begin failed");
+        TEST_ASSERT_TRUE_MESSAGE(halForStopClient.begin(), "client HAL begin failed");
+        vTaskDelay(pdMS_TO_TICKS(50)); // Both tasks now waiting in select()
+        TEST_ASSERT_EQUAL(baseline + 2, uxTaskGetNumberOfTasks());
+
+        halForStopClient.stop();
+        TEST_ASSERT_EQUAL_MESSAGE(baseline + 1, uxTaskGetNumberOfTasks(), "client HAL task still running after stop()");
+        halForStopServer.stop();
+        TEST_ASSERT_EQUAL_MESSAGE(baseline, uxTaskGetNumberOfTasks(), "server HAL task still running after stop()");
+    }
+
+    Modbus::Logger::logln("TEST_HAL_STOP_JOINS_TASK - OK");
+    Modbus::Logger::logln();
+}
+
+// Regression: the interface destructor slept 150 ms instead of waiting for its
+// task (which can be in a 250 ms RX assembly wait), then deleted its queue set
+// while the HAL RX queue was not empty: FreeRTOS refuses to remove a non-empty
+// queue from a set, so the HAL queue kept a reference to the freed set and no
+// other interface could be attached to that HAL.
+// Interfaces live in static storage so that they can be destroyed and recreated.
+static constexpr uint16_t IFC_LIFECYCLE_TEST_PORT = 514;
+ModbusHAL::TCP halForLifecycleServer(IFC_LIFECYCLE_TEST_PORT);
+alignas(ModbusInterface::TCP) static uint8_t lifecycleIfcStorage1[sizeof(ModbusInterface::TCP)];
+alignas(ModbusInterface::TCP) static uint8_t lifecycleIfcStorage2[sizeof(ModbusInterface::TCP)];
+
+void test_interface_destroy_joins_task_and_detaches_queue() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_INTERFACE_DESTROY_JOINS_TASK_AND_DETACHES_QUEUE");
+
+    const UBaseType_t baseline = settledTaskCount();
+    TEST_ASSERT_TRUE_MESSAGE(halForLifecycleServer.begin(), "server HAL begin failed");
+
+    auto* ifc1 = new (lifecycleIfcStorage1) ModbusInterface::TCP(halForLifecycleServer, Modbus::SERVER);
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, ifc1->begin());
+    TEST_ASSERT_EQUAL(baseline + 2, uxTaskGetNumberOfTasks());
+
+    int sock1 = rawConnect(IFC_LIFECYCLE_TEST_PORT);
+    int sock2 = rawConnect(IFC_LIFECYCLE_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sock1 >= 0 && sock2 >= 0, "raw connect to server failed");
+    vTaskDelay(pdMS_TO_TICKS(50)); // Let the HAL accept both connections
+
+    // Connection 1: MBAP header only -> the interface task waits for the rest of the frame
+    uint8_t req[RAW_READ_HR_REQ_SIZE];
+    rawBuildReadHrRequest(req, 0x0E01, 0);
+    TEST_ASSERT_TRUE(rawSendAll(sock1, req, 7));
+    vTaskDelay(pdMS_TO_TICKS(20));
+    // Connection 2: a full frame the interface task can't read meanwhile -> HAL RX queue not empty
+    rawBuildReadHrRequest(req, 0x0E02, 0);
+    TEST_ASSERT_TRUE(rawSendAll(sock2, req, sizeof(req)));
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    ifc1->~TCP();
+    const UBaseType_t afterDestroy = uxTaskGetNumberOfTasks();
+
+    // A new interface must be attachable to the same HAL
+    auto* ifc2 = new (lifecycleIfcStorage2) ModbusInterface::TCP(halForLifecycleServer, Modbus::SERVER);
+    const auto beginRes = ifc2->begin();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(baseline + 1, afterDestroy, "interface task still running after destruction");
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusInterface::IInterface::SUCCESS, beginRes, "cannot attach a new interface to the HAL");
+
+    ifc2->~TCP();
+    ::close(sock1);
+    ::close(sock2);
+    halForLifecycleServer.stop();
+    TEST_ASSERT_EQUAL_MESSAGE(baseline, uxTaskGetNumberOfTasks(), "tasks left after full teardown");
+
+    Modbus::Logger::logln("TEST_INTERFACE_DESTROY_JOINS_TASK_AND_DETACHES_QUEUE - OK");
+    Modbus::Logger::logln();
+}
+
 void test_modbus_exceptions() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_MODBUS_EXCEPTIONS - CASE 1: READ EXCEPTION (ILLEGAL DATA ADDRESS)");
@@ -2644,6 +2743,8 @@ void setup() {
     RUN_TEST(test_server_rx_coalesced_requests);
     RUN_TEST(test_server_rx_truncated_request_closes_connection);
     RUN_TEST(test_hal_rx_notifications_never_block_send);
+    RUN_TEST(test_hal_stop_joins_task);
+    RUN_TEST(test_interface_destroy_joins_task_and_detaches_queue);
     RUN_TEST(test_modbus_exceptions);
     RUN_TEST(test_invalid_parameters);
     RUN_TEST(test_broadcast_read_rejected);

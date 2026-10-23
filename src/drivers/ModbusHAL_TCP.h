@@ -108,6 +108,7 @@ private:
 
     // Internal state
     TaskHandle_t _tcpTaskHandle;
+    std::atomic<uint32_t> _tcpTaskParked{0}; // Set by the task once it no longer uses this object (see stop())
     QueueHandle_t _rxQueue;
     // Fixed-size storage for active sockets (used in server mode)
     int _activeSockets[MAX_ACTIVE_SOCKETS] = {0};

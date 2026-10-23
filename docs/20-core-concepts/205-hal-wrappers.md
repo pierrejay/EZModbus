@@ -220,3 +220,8 @@ ModbusInterface::TCP tcp(tcpServer, Modbus::SERVER);
 // or
 ModbusInterface::TCP tcp(tcpClient, Modbus::CLIENT);
 ```
+
+!!! note
+    * The HAL must outlive the interface using it: destroy the interface first, then stop or destroy the HAL.
+    * `stop()` and the interface destructor wait for their task to finish, which can take up to about 1 second (several seconds if a client reconnection is in progress).
+    * Never call them from a Modbus callback: the callback runs in the task they are waiting for.

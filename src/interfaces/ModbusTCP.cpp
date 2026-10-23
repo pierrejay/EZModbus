@@ -98,18 +98,21 @@ TCP::Result TCP::begin() {
     }
 
     // Add queues to QueueSet
-    if (xQueueAddToSet(_rxEventQueue, _eventQueueSet) != pdPASS) {
+    if (!setQueueMembership(_rxEventQueue, _eventQueueSet, true)) {
         beginCleanup();
         return Error(ERR_INIT_FAILED, "failed to add HAL RX queue to set");
     }
-    if (xQueueAddToSet(_txRequestQueue, _eventQueueSet) != pdPASS) {
+    _rxQueueInSet = true;
+    if (!setQueueMembership(_txRequestQueue, _eventQueueSet, true)) {
         beginCleanup();
         return Error(ERR_INIT_FAILED, "failed to add TX queue to set");
     }
-    if (xQueueAddToSet(_txnControlQueue, _eventQueueSet) != pdPASS) {
+    _txQueueInSet = true;
+    if (!setQueueMembership(_txnControlQueue, _eventQueueSet, true)) {
         beginCleanup();
         return Error(ERR_INIT_FAILED, "failed to add Txn control queue to set");
     }
+    _controlQueueInSet = true;
 
     // Clear buffers
     _rxBuffer.clear();
@@ -118,6 +121,7 @@ TCP::Result TCP::begin() {
     _isInitialized = true; // Needed for the task not to terminate prematurely
 
     // Create the RX/TX task
+    _rxTxTaskParked = 0;
     _rxTxTaskHandle = xTaskCreateStatic(
         /*pxTaskCode*/      rxTxTask,
         /*pcName*/          "ModbusTCP_RxTxTask",
@@ -241,10 +245,15 @@ TaskHandle_t TCP::getRxTxTaskHandle() {
 void TCP::beginCleanup() {
     // Clean up resources in reverse order of creation
     if (_eventQueueSet) {
-        if (_txnControlQueue) xQueueRemoveFromSet(_txnControlQueue, _eventQueueSet);
-        if (_txRequestQueue) xQueueRemoveFromSet(_txRequestQueue, _eventQueueSet);
-        if (_rxEventQueue) xQueueRemoveFromSet(_rxEventQueue, _eventQueueSet);
-        vQueueDelete(_eventQueueSet);
+        if (_controlQueueInSet) _controlQueueInSet = !setQueueMembership(_txnControlQueue, _eventQueueSet, false);
+        if (_txQueueInSet) _txQueueInSet = !setQueueMembership(_txRequestQueue, _eventQueueSet, false);
+        if (_rxQueueInSet) _rxQueueInSet = !setQueueMembership(_rxEventQueue, _eventQueueSet, false);
+        if (!_controlQueueInSet && !_txQueueInSet && !_rxQueueInSet) {
+            vQueueDelete(_eventQueueSet);
+        } else {
+            // Never delete a set still referenced by a queue: leak it instead
+            Modbus::Debug::LOG_MSG("Failed to detach queues from QueueSet, leaking it");
+        }
         _eventQueueSet = nullptr;
     }
     
@@ -261,16 +270,40 @@ void TCP::beginCleanup() {
     // Do not delete HAL RX queue as it belongs to _tcpHAL
 }
 
+/* @brief Add a queue to / remove a queue from a QueueSet
+ * @return True on success
+ * @note FreeRTOS only allows it while the queue is empty, so the queue is drained first.
+ *       The HAL may keep posting RX events meanwhile, hence the retries. Dropping RX
+ *       events is harmless: unread data stays in the socket and is signaled again.
+ */
+bool TCP::setQueueMembership(QueueHandle_t queue, QueueSetHandle_t set, bool add) {
+    for (int attempt = 0; attempt < 10; attempt++) {
+        xQueueReset(queue);
+        BaseType_t res = add ? xQueueAddToSet(queue, set) : xQueueRemoveFromSet(queue, set);
+        if (res == pdPASS) return true;
+        vTaskDelay(1);
+    }
+    return false;
+}
+
 /* @brief Kill the RX/TX task
  * @note Called when the interface is destroyed
+ * @note Waits for the task to finish its current work (e.g. an RX assembly or a send),
+ *       then deletes it. A static task must not self-delete: its TCB & stack (members
+ *       of this object) stay referenced until the idle task cleans it up.
  */
 void TCP::killRxTxTask() {
-    if (_rxTxTaskHandle && _txRequestQueue) {
+    if (!_rxTxTaskHandle) return;
+    if (_txRequestQueue) {
         // Send a dummy signal to wake up the task so it can check _isInitialized
         void* dummy_ptr = this;
         xQueueSend(_txRequestQueue, &dummy_ptr, 0);
-        vTaskDelay(pdMS_TO_TICKS(RXTX_QUEUE_CHECK_TIMEOUT_MS + 50)); // Wait a bit more than task queue check timeout
     }
+    while (!_rxTxTaskParked || eTaskGetState(_rxTxTaskHandle) != eSuspended) {
+        vTaskDelay(1);
+    }
+    vTaskDelete(_rxTxTaskHandle);
+    _rxTxTaskHandle = nullptr;
 }
 
 /* @brief Process a raw frame received from the HAL
@@ -622,8 +655,8 @@ void TCP::rxTxTask(void* tcp) {
     }
 
     Modbus::Debug::LOG_MSGF("ModbusTCP RxTx Task stopping for %s", (self->_role == Modbus::CLIENT ? "CLIENT" : "SERVER"));
-    self->_rxTxTaskHandle = nullptr;
-    vTaskDelete(nullptr);
+    self->_rxTxTaskParked = 1; // Last access to the object
+    vTaskSuspend(nullptr);     // Deleted by killRxTxTask()
 }
 
 } // namespace ModbusInterface 

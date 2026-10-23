@@ -74,7 +74,13 @@ void TCP::stop() {
 
     if (_tcpTaskHandle) {
         Modbus::Debug::LOG_MSG("Waiting for TCP task to terminate...");
-        vTaskDelay(pdMS_TO_TICKS(200)); // Wait a bit for the task to self-terminate
+        // The task parks itself once it no longer uses this object, then we delete it.
+        // A static task must not self-delete: its TCB & stack (members of this object)
+        // stay referenced until the idle task cleans it up.
+        while (!_tcpTaskParked || eTaskGetState(_tcpTaskHandle) != eSuspended) {
+            vTaskDelay(1);
+        }
+        vTaskDelete(_tcpTaskHandle);
         _tcpTaskHandle = nullptr;
     }
 
@@ -288,6 +294,7 @@ bool TCP::beginServer(uint16_t port, uint32_t ip) {
     Modbus::Debug::LOG_MSG("RX queue created.");
 
     _isRunning = true;
+    _tcpTaskParked = 0;
     _tcpTaskHandle = xTaskCreateStatic(
         tcpTask,
         "ModbusHALtcpSrv",
@@ -329,7 +336,8 @@ bool TCP::beginClient(const char* serverIP, uint16_t port) {
     Modbus::Debug::LOG_MSG("RX queue created for client.");
     
     _isRunning = true;
-    TaskHandle_t taskCreated = xTaskCreateStatic(
+    _tcpTaskParked = 0;
+    _tcpTaskHandle = xTaskCreateStatic(
         tcpTask,
         "ModbusHALtcpCli",
         TCP_TASK_STACK_SIZE, // Stack size
@@ -339,9 +347,8 @@ bool TCP::beginClient(const char* serverIP, uint16_t port) {
         &_tcpTaskBuf
     );
 
-    if (taskCreated == nullptr) {
+    if (_tcpTaskHandle == nullptr) {
         Modbus::Debug::LOG_MSG("Failed to create client TCP task.");
-        _tcpTaskHandle = nullptr; // Ensure it's null
         stop(); // Cleanup queue and socket
         return false;
     }
@@ -356,7 +363,8 @@ void TCP::tcpTask(void* param) {
         self->runTcpTask();
     }
     Modbus::Debug::LOG_MSGF("tcpTask exiting for %s.", self->_isServer ? "server" : "client");
-    vTaskDelete(nullptr);
+    self->_tcpTaskParked = 1; // Last access to the object
+    vTaskSuspend(nullptr);    // Deleted by stop()
 }
 
 void TCP::runTcpTask() {
