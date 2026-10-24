@@ -101,7 +101,7 @@ public:
 
     /* @brief Destructor
      * @note Waits until the timeout timer is deleted and its callback can't run anymore
-     * @note The interfaces call the bridge from their tasks: destroy them first
+     * @note Detaches from the interfaces, which must outlive the bridge
      */
     ~Bridge() {
         // The interfaces must not call this object anymore: a request still held by the master

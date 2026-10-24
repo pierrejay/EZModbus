@@ -85,3 +85,11 @@ namespace ModbusTypeDef {
     WAIT_MS(), WAIT_US();           // Delays
 }
 ```
+
+## Creating & destroying objects at runtime
+
+Usually, the HAL, interface & application objects live for the whole program and there is nothing to care about. If you create & destroy them at runtime, follow these rules:
+
+* Each layer must outlive the ones using it: destroy the applications (Client, Server, Bridge) first, then the interface, then the HAL. Objects declared in this order in the same scope are destroyed in the reverse order automatically.
+* A destructor waits until no background task uses the object anymore (callback running, frame being sent): up to several seconds during a TCP reconnection. A request still pending is aborted (best effort).
+* Never destroy an object from one of its own callbacks.
