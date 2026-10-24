@@ -412,15 +412,6 @@ esp_err_t UART::disablePatternDetection() {
     return uart_disable_pattern_det_intr(_uart_num);
 }
 
-/* @brief Flush the TX FIFO of the UART driver
- * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is not installed
- */
-esp_err_t UART::flushTxFifo() {
-    Lock guard(_driver_mutex);
-    if (!_is_driver_installed) return ESP_ERR_INVALID_STATE;
-    return uart_flush(_uart_num);
-}
-
 /* @brief Enable RS485 mode on UART driver
  * @return ESP_OK on success, ESP_ERR_INVALID_ARG on parameter error
  * @note _driver_mutex must be held to call this function!

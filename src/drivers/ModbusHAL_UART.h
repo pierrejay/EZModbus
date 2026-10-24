@@ -193,7 +193,6 @@ public:
     uint64_t getRxFrameGapTimeoutUs() const;
     esp_err_t enablePatternDetection(char pattern_char, uint8_t pattern_length);
     esp_err_t disablePatternDetection();
-    esp_err_t flushTxFifo();
 
 private:
 
