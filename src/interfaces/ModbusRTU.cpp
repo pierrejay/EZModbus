@@ -333,7 +333,14 @@ RTU::Result RTU::processReceivedFrame(const ByteBuffer& frameBytes) {
 
     auto decodeResult = ModbusCodec::RTU::decode(frameBytes, receivedFrame, msgType);
     if (decodeResult != ModbusCodec::SUCCESS) {
-        return Error(ERR_INVALID_FRAME, "cannot decode received frame");
+        // Slave: a request we can't decode (valid CRC) may still call for an exception (e.g.
+        // unsupported function code): hand it to the application, which checks the slave ID
+        // & answers it. Smallest frame with a CRC: slave ID + FC + CRC (4 bytes)
+        if (_role != Modbus::SLAVE || frameBytes.size() < 4 ||
+            !ModbusCodec::makeRejectedRequest(decodeResult, frameBytes[0], frameBytes[1], receivedFrame)) {
+            return Error(ERR_INVALID_FRAME, "cannot decode received frame");
+        }
+        Modbus::Debug::LOG_MSG("Malformed request, handing it to the application to answer an exception");
     }
 
     Modbus::Debug::LOG_FRAME(receivedFrame, "Received frame successfully decoded");

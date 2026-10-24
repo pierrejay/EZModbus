@@ -326,7 +326,14 @@ TCP::Result TCP::processReceivedFrame(const ByteBuffer& frameBytes, int socketNu
 
     auto decRes = ModbusCodec::TCP::decode(frameBytes, decodedFrame, msgType);
     if (decRes != ModbusCodec::SUCCESS) {
-        return Error(ERR_INVALID_FRAME, ModbusCodec::toString(decRes));
+        // Server: a request we can't decode may still call for an exception (e.g. unsupported
+        // function code): hand it to the application, which answers it
+        // (MBAP validity & minimum size are guaranteed by fetchSocketData())
+        if (_role != Modbus::SERVER ||
+            !ModbusCodec::makeRejectedRequest(decRes, frameBytes[6], frameBytes[7], decodedFrame)) {
+            return Error(ERR_INVALID_FRAME, ModbusCodec::toString(decRes));
+        }
+        Modbus::Debug::LOG_MSGF("Malformed request (%s), answering exception", ModbusCodec::toString(decRes));
     }
 
     // Transaction ID = first 2 bytes of MBAP

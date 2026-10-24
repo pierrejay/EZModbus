@@ -422,6 +422,24 @@ void test_bridge_late_response_not_forwarded() {
     TEST_ASSERT_EQUAL(MBT_INIT_HOLDING_REGISTER_VALUE(READ_HOLDING_ADDR), (nextAdu[9] << 8) | nextAdu[10]);
 }
 
+// A request the bridge can't decode (here an unsupported function code) is answered with
+// the exception required by the Modbus spec, instead of being dropped silently.
+void test_bridge_malformed_request_exception() {
+    if (!bridgeConnect()) { TEST_FAIL_MESSAGE("cannot connect to bridge"); return; }
+    while (tcpClient.available()) tcpClient.read();
+    const uint8_t adu[] = { 0x0D, 0x01, 0x00, 0x00, 0x00, 0x05, TEST_SLAVE_ID, 0x2B, 0x0E, 0x01, 0x00 };
+    tcpClient.write(adu, sizeof(adu));
+    uint8_t resp[ModbusCodec::TCP::MAX_FRAME_SIZE];
+    size_t len = bridgeReceive(resp, sizeof(resp), 500);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(len > 0, "no answer from the bridge for an unsupported function code");
+    TEST_ASSERT_EQUAL_MESSAGE(9, len, "expected a 9-byte exception response");
+    TEST_ASSERT_EQUAL_HEX16(0x0D01, (resp[0] << 8) | resp[1]);
+    TEST_ASSERT_EQUAL_HEX8(0xAB, resp[7]);
+    TEST_ASSERT_EQUAL_HEX8(Modbus::ILLEGAL_FUNCTION, resp[8]);
+}
+
 void setUp() {
     // Clear both RX buffers before each test
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -497,6 +515,7 @@ void setup() {
     RUN_TEST(test_bridge_silent_slave_gateway_exception);
     RUN_TEST(test_bridge_forward_failure_gateway_exception);
     RUN_TEST(test_bridge_late_response_not_forwarded);
+    RUN_TEST(test_bridge_malformed_request_exception);
     UNITY_END();
 }
 

@@ -229,6 +229,18 @@ Server::Result Server::handleRequest(const Modbus::Frame& request,
                 break;
             }
 
+            // Send the exception set by the interface for a request it couldn't decode
+            if (request.exceptionCode != Modbus::NULL_EXCEPTION) {
+                finalRes = Error(request.exceptionCode == Modbus::ILLEGAL_FUNCTION
+                                 ? Server::ERR_RCV_ILLEGAL_FUNCTION : Server::ERR_RCV_ILLEGAL_DATA_VALUE,
+                                 "malformed request");
+                if (!isBroadcast) {
+                    Modbus::makeException(request, response, request.exceptionCode);
+                    shouldReply = true;
+                }
+                break;
+            }
+
             // If we reach here, the request is valid and ready to be processed
             response.clear();
             response.type           = Modbus::RESPONSE;

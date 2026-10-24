@@ -1782,6 +1782,76 @@ void test_server_unit_id_255() {
     Modbus::Logger::logln();
 }
 
+// ===================================================================================
+// MALFORMED REQUESTS
+// A request received without communication error but that can't be handled must be
+// answered with an exception (Modbus spec): ILLEGAL_FUNCTION for an unsupported function
+// code, ILLEGAL_DATA_VALUE for an inconsistent structure. They used to be dropped silently.
+// ===================================================================================
+
+struct MalformedCase {
+    const char* name;
+    uint8_t unitId;
+    uint8_t pdu[12];
+    uint8_t pduLen;
+    uint8_t expectedFc;  // 0 = no response expected
+    uint8_t expectedEc;
+};
+
+static const MalformedCase MALFORMED_CASES[] = {
+    { "unsupported FC 0x2B",        TEST_SLAVE_ID, {0x2B, 0x0E, 0x01, 0x00}, 4,                          0xAB, 0x01 },
+    { "request FC with bit 7 set",  TEST_SLAVE_ID, {0x83, 0x00, 0x00, 0x00, 0x01}, 5,                    0x83, 0x01 },
+    { "FC03 quantity 126",          TEST_SLAVE_ID, {0x03, 0x00, 0x00, 0x00, 0x7E}, 5,                    0x83, 0x03 },
+    { "FC03 truncated PDU",         TEST_SLAVE_ID, {0x03, 0x00, 0x00, 0x00}, 4,                          0x83, 0x03 },
+    { "FC05 value not 0/FF00",      TEST_SLAVE_ID, {0x05, 0x00, 0x00, 0x12, 0x34}, 5,                    0x85, 0x03 },
+    { "FC16 byte count mismatch",   TEST_SLAVE_ID, {0x10, 0x00, 0x00, 0x00, 0x02, 0x03, 0x00, 0x01, 0x00}, 9, 0x90, 0x03 },
+    { "broadcast, unsupported FC",  0x00,          {0x2B, 0x0E, 0x01, 0x00}, 4,                          0, 0 },
+    { "broadcast, FC16 malformed",  0x00,          {0x10, 0x00, 0x00, 0x00, 0x02, 0x03, 0x00, 0x01, 0x00}, 9, 0, 0 },
+};
+
+void test_server_malformed_requests_exceptions() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_SERVER_MALFORMED_REQUESTS_EXCEPTIONS");
+
+    int sock = rawConnect(MODBUS_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sock >= 0, "raw connect to server failed");
+
+    uint16_t tid = 0x1001;
+    for (const auto& c : MALFORMED_CASES) {
+        uint8_t adu[7 + sizeof(c.pdu)] = {
+            (uint8_t)(tid >> 8), (uint8_t)(tid & 0xFF), 0x00, 0x00,
+            0x00, (uint8_t)(c.pduLen + 1), c.unitId
+        };
+        memcpy(adu + 7, c.pdu, c.pduLen);
+        TEST_ASSERT_TRUE(rawSendAll(sock, adu, 7 + c.pduLen));
+
+        uint8_t resp[9];
+        size_t got = (c.expectedFc != 0) ? rawRecvExact(sock, resp, sizeof(resp)) : 0;
+        if (c.expectedFc == 0) {
+            // No response expected: make sure nothing comes within a short delay
+            vTaskDelay(pdMS_TO_TICKS(200));
+            got = ::recv(sock, resp, sizeof(resp), MSG_DONTWAIT) > 0 ? 1 : 0;
+        }
+        Modbus::Logger::logf("  %s: %u byte(s)\n", c.name, (unsigned)got);
+
+        TEST_ASSERT_START();
+        if (c.expectedFc == 0) {
+            TEST_ASSERT_EQUAL_MESSAGE(0, got, c.name);
+        } else {
+            TEST_ASSERT_EQUAL_MESSAGE(sizeof(resp), got, c.name);
+            TEST_ASSERT_EQUAL_HEX16_MESSAGE(tid, rawTid(resp), c.name);
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(c.unitId, resp[6], c.name);
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(c.expectedFc, resp[7], c.name);
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(c.expectedEc, resp[8], c.name);
+        }
+        tid++;
+    }
+    ::close(sock);
+
+    Modbus::Logger::logln("TEST_SERVER_MALFORMED_REQUESTS_EXCEPTIONS - OK");
+    Modbus::Logger::logln();
+}
+
 // Regression: the HAL task posts one RX event per select() round while data is
 // unread on a socket, and used to post it with portMAX_DELAY while holding the
 // socket mutex. Once the RX queue was full (consumer busy), the HAL task blocked
@@ -2941,6 +3011,7 @@ void setup() {
     RUN_TEST(test_server_rx_truncated_request_closes_connection);
     RUN_TEST(test_client_unit_id_255);
     RUN_TEST(test_server_unit_id_255);
+    RUN_TEST(test_server_malformed_requests_exceptions);
     RUN_TEST(test_hal_rx_notifications_never_block_send);
     RUN_TEST(test_hal_tcp_keepalive);
     RUN_TEST(test_hal_stop_joins_task);

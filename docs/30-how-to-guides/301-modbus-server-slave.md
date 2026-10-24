@@ -514,6 +514,15 @@ The way for the Server to handle Modbus exceptions for read/write handlers depen
     * For multiple read requests, any failing read handler execution (returning a non-null `Modbus::ExceptionCode`) will trigger the exception being returned to the client
     * For multiple write requests, the Modbus specification requires **atomic operations**. In this case, **all handlers will be called one after the other**, and if any (or several) of those handlers fail with a non-null `Modbus::ExceptionCode`, the client/master will get no value but the first triggered exception. It is the responsability of the client/master to read back registers, if required, to check which of the writes were successful or not.
 
+#### Malformed requests
+
+As per the Modbus specification, a request received without communication error but that can't be decoded is answered with an exception (unless it's a broadcast, or not addressed to the server):
+
+* `ILLEGAL_FUNCTION` for an unsupported function code
+* `ILLEGAL_DATA_VALUE` for an inconsistent request (length, byte count, quantity out of range, invalid coil value...)
+
+Frames with a communication error (bad CRC, invalid MBAP header) are silently dropped.
+
 ## Unit ID for Modbus TCP
 
 Modbus TCP devices are normally not addressed using the traditional `slaveId` field, but by their port and IP address.\

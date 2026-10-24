@@ -190,6 +190,16 @@ private:
      * @note Replies GATEWAY_PATH_UNAVAILABLE if the request can't be forwarded
      */
     void forwardRequest(const Modbus::Frame& request) {
+        // The slave interface couldn't decode the request: answer its exception directly
+        if (request.exceptionCode != Modbus::NULL_EXCEPTION) {
+            if (!Modbus::isBroadcastId(request.slaveId)) {
+                Modbus::Frame exception;
+                Modbus::makeException(request, exception, request.exceptionCode);
+                slaveInterface->sendFrame(exception, nullptr, nullptr);
+            }
+            return;
+        }
+
         // No response expected for broadcasts: nothing to track
         if (Modbus::isBroadcastId(request.slaveId)) {
             masterInterface->sendFrame(request, nullptr, nullptr);
