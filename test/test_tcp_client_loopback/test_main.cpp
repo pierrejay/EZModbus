@@ -1651,6 +1651,67 @@ void test_client_no_late_write_after_reconnect() {
     Modbus::Logger::logln();
 }
 
+// Regression: the interface released its TX slot before calling the TX result callback: in
+// between, another task could submit request B, and the result of A (e.g. A dropped after its
+// timeout, or a broadcast sent) was applied by the Client to B. The interface must stay busy
+// until the callback returned: checked from inside the callback, for a failed send (no server)
+// and for a broadcast (transaction ended right after sending).
+struct TxCallbackProbe {
+    volatile bool called;
+    volatile bool readyInside;
+};
+
+static void txCallbackProbeFn(ModbusInterface::IInterface::Result, void* ctx) {
+    auto* probe = static_cast<TxCallbackProbe*>(ctx);
+    probe->readyInside = rawServerClientIfc.isReady();
+    probe->called = true;
+}
+
+static TxCallbackProbe runTxCallbackProbe(const Modbus::Frame& frame) {
+    TxCallbackProbe probe = { false, false };
+    if (rawServerClientIfc.sendFrame(frame, txCallbackProbeFn, &probe) == ModbusInterface::IInterface::SUCCESS) {
+        uint32_t t0 = Modbus::TIME_MS();
+        while (!probe.called && Modbus::TIME_MS() - t0 < 2000) vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    return probe;
+}
+
+void test_interface_busy_until_tx_callback_returned() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_INTERFACE_BUSY_UNTIL_TX_CALLBACK_RETURNED");
+
+    beginRawServerClient();
+    Modbus::Frame frame = {
+        .type = Modbus::REQUEST,
+        .fc = Modbus::WRITE_REGISTER,
+        .slaveId = TEST_SLAVE_ID,
+        .regAddress = 0,
+        .regCount = 1,
+        .exceptionCode = Modbus::NULL_EXCEPTION
+    };
+    frame.data[0] = 0x1234;
+
+    // 1) Failed send: nobody listens, the connection is refused
+    TxCallbackProbe failed = runTxCallbackProbe(frame);
+
+    // 2) Broadcast sent to a raw server
+    int listenSock = rawListen(RAW_SERVER_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0, "raw server listen failed");
+    frame.slaveId = 0;
+    TxCallbackProbe broadcast = runTxCallbackProbe(frame);
+    int peer = ::accept(listenSock, nullptr, nullptr);
+    closeRawServer(peer, listenSock);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(failed.called, "no TX callback for the failed send");
+    TEST_ASSERT_FALSE_MESSAGE(failed.readyInside, "interface ready during the TX callback (failed send)");
+    TEST_ASSERT_TRUE_MESSAGE(broadcast.called, "no TX callback for the broadcast");
+    TEST_ASSERT_FALSE_MESSAGE(broadcast.readyInside, "interface ready during the TX callback (broadcast)");
+
+    Modbus::Logger::logln("TEST_INTERFACE_BUSY_UNTIL_TX_CALLBACK_RETURNED - OK");
+    Modbus::Logger::logln();
+}
+
 // Regression: a response PDU with the exception bit set but exception code 0 (e.g. 86 00)
 // was decoded as a normal response without error: a write got a SUCCESS without any
 // valid acknowledgement. The raw server answers a FC06 write with 86 00.
@@ -3387,6 +3448,7 @@ void setup() {
     RUN_TEST(test_client_rx_coalesced_responses);
     RUN_TEST(test_client_no_late_write_after_reconnect);
     RUN_TEST(test_client_null_exception_response_rejected);
+    RUN_TEST(test_interface_busy_until_tx_callback_returned);
     RUN_TEST(test_server_rx_fragmented_request);
     RUN_TEST(test_server_rx_coalesced_requests);
     RUN_TEST(test_server_rx_truncated_request_closes_connection);

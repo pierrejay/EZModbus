@@ -523,6 +523,13 @@ TCP::Result TCP::handleTxRequest() {
     bool sendMsgRes = false;
     bool aborted = false;
 
+    // The TX slot stays busy until the TX callback returned (called outside the mutex): otherwise
+    // another request could be queued meanwhile, and this result be applied to it
+    struct TxSlotRelease {
+        TCP* tcp;
+        ~TxSlotRelease() { Lock guard(tcp->_txMutex); tcp->_txBuffer.clear(); tcp->_txCtx.clear(); }
+    } txSlotRelease{this};
+
     // Access TX buffer & metadata under critical section (mutex protection)
     { 
         Lock guard(_txMutex);
@@ -562,10 +569,6 @@ TCP::Result TCP::handleTxRequest() {
                                       (_role == Modbus::CLIENT) ? &actualSock : nullptr,
                                       connId, &actualConnId);
         }
-
-        // Clear TX buffer and metadata whatever happens
-        _txBuffer.clear();
-        _txCtx.clear();
     } // Mutex released here (end of RAII scope)
 
     if (!sendMsgRes) {
