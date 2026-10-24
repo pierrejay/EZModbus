@@ -74,8 +74,22 @@ namespace ModbusHAL {
     class TCP;                      // TCP socket driver
 }
 
-// FreeRTOS utilities & types
-class Mutex;                    // RAII mutex wrapper
-class Lock;                     // RAII lock guard
-class ByteBuffer;               // Vector-like binary data handler
+// Internal FreeRTOS utilities & types (kept out of the global namespace,
+// aliased in the namespaces above, e.g. Modbus::TIME_MS() or Modbus::ByteBuffer)
+namespace ModbusTypeDef {
+    class Mutex;                    // RAII mutex wrapper
+    class Lock;                     // RAII lock guard
+    class BinarySemaphore;          // Binary semaphore wrapper
+    class ByteBuffer;               // Vector-like binary data handler
+    TIME_MS(), TIME_US();           // Time since boot
+    WAIT_MS(), WAIT_US();           // Delays
+}
 ```
+
+## Creating & destroying objects at runtime
+
+Usually, the HAL, interface & application objects live for the whole program and there is nothing to care about. If you create & destroy them at runtime, follow these rules:
+
+* Each layer must outlive the ones using it: destroy the applications (Client, Server, Bridge) first, then the interface, then the HAL. Objects declared in this order in the same scope are destroyed in the reverse order automatically.
+* A destructor waits until no background task uses the object anymore (callback running, frame being sent): up to several seconds during a TCP reconnection. A request still pending is aborted (best effort).
+* Never destroy an object from one of its own callbacks, nor while another task may still use it (e.g. sending requests).

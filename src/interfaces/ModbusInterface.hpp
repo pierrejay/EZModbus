@@ -116,7 +116,8 @@ namespace ModbusInterface {
         /* @brief TX result callback type
          * @param result The result of the TX operation
          * @param ctx Internal context pointer
-         * @note Called from rxTxTask context when TX operation completes
+         * @note Called from rxTxTask context when TX operation completes, or from the caller of
+         *       sendFrame() when it fails at once
          */
         using TxResultCallback = void (*)(Result result, void* ctx);
 
@@ -132,6 +133,8 @@ namespace ModbusInterface {
          * @param txCallback Callback to call when TX completes (optional)
          * @param ctx Internal context pointer passed to callback (optional)
          * @return The result of the operation
+         * @note Contract: each call invokes txCallback exactly once, whatever the result (before
+         *       returning when it fails at once, from the interface task otherwise)
          */
         virtual Result sendFrame(const Modbus::Frame& frame, 
                                  TxResultCallback txCallback = nullptr, void* ctx = nullptr) = 0;
@@ -144,8 +147,16 @@ namespace ModbusInterface {
         /* @brief Abort current transaction (cleanup hint from client)
          * @note Called when client times out to allow transport cleanup
          * @note Default implementation is no-op for stateless transports
+         * @note Contract: short & non-blocking, never calls the application back nor takes its
+         *       locks (the Client calls it under its own mutex)
          */
         virtual void abortCurrentTransaction() {};
+
+        /* @brief Wait until no TX result callback registered with a context is pending or running
+         * @param ctx The context passed to sendFrame() (application destruction)
+         * @note Default implementation for interfaces calling TX callbacks from sendFrame() only
+         */
+        virtual void waitTxCallbackDone(void* ctx) {};
 
         /* @brief Get the role of the interface
          * @return The role of the interface
@@ -173,6 +184,17 @@ namespace ModbusInterface {
             return Error(ERR_TOO_MANY_CALLBACKS);
         }
 
+        /* @brief Remove the callbacks registered with a context (application destruction)
+         * @param ctx The context the callbacks were registered with
+         * @note Waits for a callback being called to return: must not be called from a callback
+         */
+        void removeRcvCallbacks(void* ctx) {
+            Lock guard(_callbackMutex);
+            for (auto& cb : _rcvCallbacks) {
+                if (cb.fn && cb.ctx == ctx) cb = RcvCallback{};
+            }
+        }
+
         /* @brief Notify all callbacks for a spontaneous message
          * @param frame The frame to notify
          * @return The result of the operation
@@ -197,13 +219,22 @@ namespace ModbusInterface {
             return _catchAllSlaveIds;
         }
 
+        /* @brief Get the extended slave IDs flag
+         * @return true if slave IDs above the RTU limit (up to 255) are valid on this interface
+         */
+        inline bool checkExtendedSlaveIds() const {
+            return _extendedSlaveIds;
+        }
+
     protected:
 
         // Callback for spontaneous messages & lock to protect against concurrent access
+        // (derived interfaces only call them through notifyCallbacks(): removeRcvCallbacks() relies on it)
         std::array<RcvCallback, MAX_RCV_CALLBACKS> _rcvCallbacks;
         Mutex _callbackMutex; 
         Modbus::Role _role;
         bool _catchAllSlaveIds = false; // Can be overridden by the derived class to ignore Slave ID field (especially TCP server)
+        bool _extendedSlaveIds = false; // Can be overridden by the derived class to accept slave IDs up to 255 (TCP Unit IDs)
 
     }; // class IInterface
 

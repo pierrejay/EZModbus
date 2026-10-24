@@ -133,6 +133,11 @@ The HAL RTU object is then passed to the Modbus interface:
 ModbusInterface::RTU rtu(uart, Modbus::CLIENT);
 ```
 
+!!! note
+    * The HAL must outlive the interface using it: destroy the interface first, then the HAL.
+    * The interface destructor waits for its task to finish, e.g. a frame being transmitted (up to ~300 ms at 9600 baud).
+    * Never destroy the interface from a Modbus callback: the callback runs in the task it is waiting for.
+
 #### Runtime reconfiguration
 
 The UART driver supports live reconfiguration of serial parameters (baud rate, data bits, parity, stop bits) at any time - both before and after `begin()`. Start with a sensible default (e.g. `9600 8N1`) and call the setters when you need to change:
@@ -220,3 +225,8 @@ ModbusInterface::TCP tcp(tcpServer, Modbus::SERVER);
 // or
 ModbusInterface::TCP tcp(tcpClient, Modbus::CLIENT);
 ```
+
+!!! note
+    * The HAL must outlive the interface using it: destroy the interface first, then stop or destroy the HAL.
+    * `stop()` and the interface destructor wait for their task to finish, which can take up to about 1 second (several seconds if a client reconnection is in progress).
+    * Never call them from a Modbus callback: the callback runs in the task they are waiting for.

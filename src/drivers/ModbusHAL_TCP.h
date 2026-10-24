@@ -25,6 +25,15 @@
 #ifndef EZMODBUS_HAL_TCP_TASK_STACK_SIZE // TCP RX/TX task stack size (bytes)
     #define EZMODBUS_HAL_TCP_TASK_STACK_SIZE 4096
 #endif
+#ifndef EZMODBUS_HAL_TCP_KEEPALIVE_IDLE_S // TCP keepalive: idle time before the first probe (s), 0 disables keepalive
+    #define EZMODBUS_HAL_TCP_KEEPALIVE_IDLE_S 10
+#endif
+#ifndef EZMODBUS_HAL_TCP_KEEPALIVE_INTVL_S // TCP keepalive: interval between probes (s)
+    #define EZMODBUS_HAL_TCP_KEEPALIVE_INTVL_S 5
+#endif
+#ifndef EZMODBUS_HAL_TCP_KEEPALIVE_CNT // TCP keepalive: unanswered probes before the connection is closed (#)
+    #define EZMODBUS_HAL_TCP_KEEPALIVE_CNT 3
+#endif
 
 
 namespace ModbusHAL {
@@ -40,6 +49,10 @@ public:
     static constexpr uint32_t SELECT_TIMEOUT_MS = 1000; // select() timeout in milliseconds (1s = low CPU usage)
     static constexpr uint32_t CONNECT_TIMEOUT_SEC = 5;  // Connect timeout in seconds (5s)
     static constexpr uint32_t SEND_BUDGET_MS = 50;      // Bounded retry budget to flush a short write (TX buffer full)
+    // Keepalive: a dead peer is detected after IDLE + INTVL * CNT seconds without traffic (25 s by default)
+    static constexpr int KEEPALIVE_IDLE_S = EZMODBUS_HAL_TCP_KEEPALIVE_IDLE_S;
+    static constexpr int KEEPALIVE_INTVL_S = EZMODBUS_HAL_TCP_KEEPALIVE_INTVL_S;
+    static constexpr int KEEPALIVE_CNT = EZMODBUS_HAL_TCP_KEEPALIVE_CNT;
 
     // Recovery configuration constants
     static constexpr int MAX_SELECT_ERRORS = 5;               // Max select() errors before long sleep
@@ -76,8 +89,14 @@ public:
     void stop();
 
     // Main API
-    bool sendMsg(const uint8_t* payload, const size_t len, const int destSocket = -1, int* actualSocket = nullptr);
-    size_t readSocketData(int socketNum, uint8_t* dst, size_t maxLen);
+    // Connection IDs (non-zero) tell apart two successive connections reusing the same socket number:
+    // pass the ID of the connection an operation is meant for, 0 to skip the check
+    // (client mode: a send bound to a connection fails instead of reconnecting)
+    bool sendMsg(const uint8_t* payload, const size_t len, const int destSocket = -1, int* actualSocket = nullptr,
+                 uint32_t connId = 0, uint32_t* actualConnId = nullptr);
+    size_t readSocketData(int socketNum, uint8_t* dst, size_t maxLen, uint32_t connId = 0, uint32_t* actualConnId = nullptr);
+    void closeConnection(int socketNum, uint32_t connId);
+    bool ensureClientConnected(uint32_t* connId = nullptr);
 
     // Monitoring
     size_t getActiveSocketCount();
@@ -90,6 +109,9 @@ public:
 
     // Give access to RX queue for QueueSet integration (read only)
     QueueHandle_t getRxQueueHandle() const { return _rxQueue; }
+    // Add / remove the RX queue to / from the consumer's QueueSet (see attachRxQueue())
+    bool attachRxQueue(QueueSetHandle_t set);
+    bool detachRxQueue(QueueSetHandle_t set);
 
 private:
     // Task for handling socket events and data
@@ -107,9 +129,15 @@ private:
 
     // Internal state
     TaskHandle_t _tcpTaskHandle;
+    std::atomic<uint32_t> _tcpTaskParked{0}; // Set by the task once it no longer uses this object (see stop())
     QueueHandle_t _rxQueue;
     // Fixed-size storage for active sockets (used in server mode)
     int _activeSockets[MAX_ACTIVE_SOCKETS] = {0};
+    uint32_t _activeConnIds[MAX_ACTIVE_SOCKETS] = {0}; // Connection ID of each active socket
+    uint32_t _clientConnId = 0;                         // Connection ID of the client socket
+    uint32_t _lastConnId = 0;
+    uint32_t newConnectionIdLocked();                   // Caller holds _socketsMutex
+    uint32_t connectionIdLocked(int sock) const;        // Caller holds _socketsMutex, 0 if not tracked
     size_t _activeSocketCount = 0; // Current number of active sockets
     int _listenSocket;              // Server listen socket
     int _clientSocket;              // Client mode connected socket

@@ -907,7 +907,7 @@ void test_codec_tcp() {
         std::cout << "\n=== TEST BROADCAST EXCEPTIONS ===" << std::endl;
         
         // Test qu'une réponse exception en broadcast est bien rejetée
-        for (uint8_t broadcastId : {0, 255}) {
+        for (uint8_t broadcastId : {0}) {
             std::cout << "\nTest avec broadcast ID: " << (int)broadcastId << std::endl;
             
             Frame F = makeFrame(Case{RESPONSE, READ_COILS, broadcastId, 0, 1, true});
@@ -928,6 +928,20 @@ void test_codec_tcp() {
 
             // On ne teste pas le decode() car si l'encode() échoue correctement,
             // il n'y a pas de raison de tester le décodage d'une trame invalide
+        }
+
+        // Unit ID 255 n'est pas un broadcast en TCP : la réponse doit être encodée
+        {
+            std::cout << "\nTest réponse avec Unit ID 255" << std::endl;
+
+            Frame F = makeFrame(Case{RESPONSE, READ_COILS, 255, 0, 1, true});
+            F.exceptionCode = ILLEGAL_DATA_ADDRESS;
+            uint8_t _raw[256];
+            ByteBuffer raw(_raw, sizeof(_raw));
+
+            auto r = ModbusCodec::TCP::encode(F, raw, 0x1234);
+            TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, r, "should encode a response with Unit ID 255");
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(255, raw[6], "Unit ID 255 should be echoed in the MBAP header");
         }
     }
 
@@ -1756,6 +1770,102 @@ void test_codec_write_multiple_regcount_validation() {
 }
 
 // ===================================================================================
+// EXCEPTION PDU EDGE CASES
+// ===================================================================================
+
+/* @brief Bit 7 of the function code only exists in exception responses: a request PDU
+ * `83 00` must be rejected as an invalid function code (it was decoded as an FC03 request).
+ * An exception response may answer a function code we don't support (ILLEGAL_FUNCTION):
+ * the decoder must accept what the encoder produces.
+ */
+void test_codec_exception_edge_cases() {
+    using namespace Modbus;
+    using namespace ModbusCodec;
+
+    // ---- Request with FC bit 7 set & a 2-byte PDU ----
+    {
+        uint8_t _raw[16];
+        ByteBuffer raw(_raw, sizeof(_raw));
+        raw.push_back(0x01);                        // slaveId
+        raw.push_back(0x83); raw.push_back(0x00);   // FC03 | 0x80, "exception code" 0
+        ModbusCodec::RTU::appendCRC(raw);
+        Frame D;
+        TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_FC, ModbusCodec::RTU::decode(raw, D, REQUEST),
+            "RTU: request 83 00 must be rejected");
+
+        raw.clear();
+        const uint8_t adu[] = {0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x00};
+        for (uint8_t b : adu) raw.push_back(b);
+        Frame T;
+        TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_FC, ModbusCodec::TCP::decode(raw, T, REQUEST),
+            "TCP: request 83 00 must be rejected");
+    }
+
+    // ---- Exception response for an unsupported function code round-trips ----
+    {
+        Frame F;
+        F.clear();
+        F.type = RESPONSE;
+        F.slaveId = 1;
+        F.fc = (FunctionCode)0x2B;
+        F.exceptionCode = ILLEGAL_FUNCTION;
+
+        uint8_t _raw[16];
+        ByteBuffer raw(_raw, sizeof(_raw));
+        TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::RTU::encode(F, raw),
+            "RTU: encode exception for FC 0x2B");
+        Frame D;
+        TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::RTU::decode(raw, D, RESPONSE),
+            "RTU: decode exception for FC 0x2B");
+        TEST_ASSERT_EQUAL_HEX8(0x2B, (uint8_t)D.fc);
+        TEST_ASSERT_EQUAL_HEX8(ILLEGAL_FUNCTION, (uint8_t)D.exceptionCode);
+
+        raw.clear();
+        TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::TCP::encode(F, raw, 0x0001),
+            "TCP: encode exception for FC 0x2B");
+        Frame T;
+        TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::TCP::decode(raw, T, RESPONSE),
+            "TCP: decode exception for FC 0x2B");
+        TEST_ASSERT_EQUAL_HEX8(0x2B, (uint8_t)T.fc);
+        TEST_ASSERT_EQUAL_HEX8(ILLEGAL_FUNCTION, (uint8_t)T.exceptionCode);
+    }
+
+    // ---- Exception response with exception code 0 is not a valid response ----
+    {
+        const uint8_t fcs[] = {0x83, 0x86, 0xAB};
+        for (uint8_t fc : fcs) {
+            uint8_t _raw[16];
+            ByteBuffer raw(_raw, sizeof(_raw));
+            raw.push_back(0x01);
+            raw.push_back(fc); raw.push_back(0x00);
+            ModbusCodec::RTU::appendCRC(raw);
+            Frame D;
+            TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_EXCEPTION, ModbusCodec::RTU::decode(raw, D, RESPONSE),
+                "RTU: exception response with code 0 must be rejected");
+
+            raw.clear();
+            const uint8_t adu[] = {0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x01, fc, 0x00};
+            for (uint8_t b : adu) raw.push_back(b);
+            Frame T;
+            TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_EXCEPTION, ModbusCodec::TCP::decode(raw, T, RESPONSE),
+                "TCP: exception response with code 0 must be rejected");
+        }
+    }
+
+    // ---- Exception response for function code 0 stays invalid ----
+    {
+        uint8_t _raw[16];
+        ByteBuffer raw(_raw, sizeof(_raw));
+        raw.push_back(0x01);
+        raw.push_back(0x80); raw.push_back(0x01);
+        ModbusCodec::RTU::appendCRC(raw);
+        Frame D;
+        TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_FC, ModbusCodec::RTU::decode(raw, D, RESPONSE),
+            "RTU: exception response 80 01 must be rejected");
+    }
+}
+
+// ===================================================================================
 // FRAME GETTER DESTINATION-LENGTH HANDLING TESTS
 // ===================================================================================
 
@@ -1803,6 +1913,7 @@ int main(void) {
     RUN_TEST(test_codec_tcp);
     RUN_TEST(test_codec_read_coils_bytecount_overflow);
     RUN_TEST(test_codec_write_multiple_regcount_validation);
+    RUN_TEST(test_codec_exception_edge_cases);
     RUN_TEST(test_frame_getters_large_dstlen);
     RUN_TEST(test_conversion_float_operations);
     RUN_TEST(test_conversion_uint32_operations);

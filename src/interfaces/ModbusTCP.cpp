@@ -19,6 +19,7 @@ TCP::TCP(ModbusHAL::TCP& hal, Modbus::Role role)
       _rxTxTaskHandle(nullptr)
 {
     _role = role;
+    _extendedSlaveIds = true; // TCP Unit IDs: 1-255
 
     if (role == Modbus::CLIENT) {
         Modbus::Debug::LOG_MSG("ModbusInterface::TCP (Client) created – connect HAL before calling begin()");
@@ -33,6 +34,11 @@ TCP::~TCP() {
         _isInitialized = false;
         killRxTxTask();
     }
+
+    // Wait for in-flight API calls posting into our queues: the next ones see !_isInitialized.
+    // Nothing can post into them anymore, so that they can be detached from the set in one go.
+    { Lock guard(_txMutex); }      // sendFrame()
+    { Lock guard(_controlMutex); } // abortCurrentTransaction()
 
     // Delete the FreeRTOS objects created in begin()
     beginCleanup();
@@ -97,19 +103,22 @@ TCP::Result TCP::begin() {
         return Error(ERR_INIT_FAILED, "failed to create QueueSet");
     }
 
-    // Add queues to QueueSet
-    if (xQueueAddToSet(_rxEventQueue, _eventQueueSet) != pdPASS) {
+    // Add queues to QueueSet (the HAL adds its RX queue itself, as it owns its producer)
+    if (!_tcpHAL.attachRxQueue(_eventQueueSet)) {
         beginCleanup();
         return Error(ERR_INIT_FAILED, "failed to add HAL RX queue to set");
     }
+    _rxQueueInSet = true;
     if (xQueueAddToSet(_txRequestQueue, _eventQueueSet) != pdPASS) {
         beginCleanup();
         return Error(ERR_INIT_FAILED, "failed to add TX queue to set");
     }
+    _txQueueInSet = true;
     if (xQueueAddToSet(_txnControlQueue, _eventQueueSet) != pdPASS) {
         beginCleanup();
         return Error(ERR_INIT_FAILED, "failed to add Txn control queue to set");
     }
+    _controlQueueInSet = true;
 
     // Clear buffers
     _rxBuffer.clear();
@@ -118,6 +127,7 @@ TCP::Result TCP::begin() {
     _isInitialized = true; // Needed for the task not to terminate prematurely
 
     // Create the RX/TX task
+    _rxTxTaskParked = 0;
     _rxTxTaskHandle = xTaskCreateStatic(
         /*pxTaskCode*/      rxTxTask,
         /*pcName*/          "ModbusTCP_RxTxTask",
@@ -155,12 +165,20 @@ TCP::Result TCP::sendFrame(const Modbus::Frame &frame, TxResultCallback txCallba
         return Error(ERR_NOT_INITIALIZED, "TCP interface not initialized");
     }
 
+    bool replacedByException = false;
+
     // Update TX buffer under critical section (mutex protection)
     {
         Lock guard(_txMutex, 0); // try-lock no wait
         if (!guard.isLocked() || _txBuffer.size() != 0) {
             if (txCallback) txCallback(ERR_BUSY, ctx);
             return Error(ERR_BUSY, "TX already in progress");
+        }
+
+        // Checked again under the mutex: fenced by the destructor
+        if (!_isInitialized) {
+            if (txCallback) txCallback(ERR_NOT_INITIALIZED, ctx);
+            return Error(ERR_NOT_INITIALIZED, "TCP interface not initialized");
         }
 
         if (_role == Modbus::SERVER && (!_currentTransaction.active || _currentTransaction.socketNum == -1)) {
@@ -171,17 +189,28 @@ TCP::Result TCP::sendFrame(const Modbus::Frame &frame, TxResultCallback txCallba
         uint16_t mbapTid = (_role == Modbus::CLIENT) ? getNextOutgoingTransactionId() : _currentTransaction.tid;
 
         if (ModbusCodec::TCP::encode(frame, _txBuffer, mbapTid) != ModbusCodec::SUCCESS) {
-            if (txCallback) txCallback(ERR_INVALID_FRAME, ctx);
             _txBuffer.clear();
-            return Error(ERR_INVALID_FRAME, "encoding failed");
+            // Server: a response that can't be encoded is replaced by SLAVE_DEVICE_FAILURE, so the
+            // transaction is still answered (it would otherwise stay open until the safety timeout)
+            if (_role != Modbus::SERVER || frame.type != Modbus::RESPONSE ||
+                !ModbusCodec::TCP::buildException(mbapTid, frame.slaveId, frame.fc, Modbus::SLAVE_DEVICE_FAILURE, _txBuffer)) {
+                _txBuffer.clear();
+                if (txCallback) txCallback(ERR_INVALID_FRAME, ctx);
+                return Error(ERR_INVALID_FRAME, "encoding failed");
+            }
+            replacedByException = true;
         }
 
-        // Fill TX metadata
+        // Fill TX metadata (the caller is notified of the encoding failure below, not of the exception TX)
         _txCtx.set(mbapTid, 
                    (_role == Modbus::SERVER) ? _currentTransaction.socketNum : -1, 
                    Modbus::isBroadcastId(frame.slaveId), 
-                   txCallback, 
+                   replacedByException ? nullptr : txCallback,
                    ctx);
+        // Aborts from now on cancel this frame if not sent yet (best effort: an earlier abort,
+        // e.g. a timeout firing before this call, isn't seen)
+        _txCtx.abortCount = _abortCount;
+        _txCtx.connId = (_role == Modbus::SERVER) ? _currentTransaction.connId : 0;
 
         // Signal dans la TX queue (taille 1) pour réveiller rxTxTask
         void* signalPtr = this; // valeur bidon
@@ -193,6 +222,10 @@ TCP::Result TCP::sendFrame(const Modbus::Frame &frame, TxResultCallback txCallba
         }
     } // Mutex released here (end of RAII scope)
 
+    if (replacedByException) {
+        if (txCallback) txCallback(ERR_INVALID_FRAME, ctx);
+        return Error(ERR_INVALID_FRAME, "encoding failed, replying SLAVE_DEVICE_FAILURE");
+    }
     return Success();
 }
 
@@ -215,12 +248,32 @@ bool TCP::isReady() {
 /* @brief Abort current transaction (cleanup hint from client)
  * @note Called when client times out to allow immediate cleanup
  * @note Safe to be called from outside (signals to txnControlQueue, managed by rxTxTask)
+ * @note A request not sent yet (e.g. waiting for a reconnection) is dropped if the interface
+ *       hasn't started sending it (best effort)
  */
 void TCP::abortCurrentTransaction() {
+    Lock guard(_controlMutex); // Fenced by the destructor
     if (!_isInitialized || !_txnControlQueue) return;
+    _abortCount++;
     // Send a dummy signal, rxTxTask will take care of aborting the txn
     void* dummy = this;
     (void)xQueueSend(_txnControlQueue, &dummy, 0);
+}
+
+/* @brief Wait until no TX result callback registered with a context is pending or running
+ * @param ctx The context passed to sendFrame()
+ * @note The TX slot holds the callback until it returned (see handleTxRequest())
+ * @note No wait from the rxTxTask itself (called from a callback)
+ */
+void TCP::waitTxCallbackDone(void* ctx) {
+    if (xTaskGetCurrentTaskHandle() == _rxTxTaskHandle) return;
+    while (true) {
+        {
+            Lock guard(_txMutex);
+            if (_txBuffer.size() == 0 || _txCtx.ctx != ctx) return;
+        }
+        vTaskDelay(1);
+    }
 }
 
 /* @brief Get the handle of the poll task.
@@ -241,10 +294,24 @@ TaskHandle_t TCP::getRxTxTaskHandle() {
 void TCP::beginCleanup() {
     // Clean up resources in reverse order of creation
     if (_eventQueueSet) {
-        if (_txnControlQueue) xQueueRemoveFromSet(_txnControlQueue, _eventQueueSet);
-        if (_txRequestQueue) xQueueRemoveFromSet(_txRequestQueue, _eventQueueSet);
-        if (_rxEventQueue) xQueueRemoveFromSet(_rxEventQueue, _eventQueueSet);
-        vQueueDelete(_eventQueueSet);
+        // Queues can only be removed from a set while empty. Nothing posts into ours anymore
+        // (task joined, API calls fenced) and the HAL detaches its RX queue under its own mutex:
+        // each queue is emptied & removed in one go.
+        if (_controlQueueInSet) {
+            xQueueReset(_txnControlQueue);
+            _controlQueueInSet = (xQueueRemoveFromSet(_txnControlQueue, _eventQueueSet) != pdPASS);
+        }
+        if (_txQueueInSet) {
+            xQueueReset(_txRequestQueue);
+            _txQueueInSet = (xQueueRemoveFromSet(_txRequestQueue, _eventQueueSet) != pdPASS);
+        }
+        if (_rxQueueInSet) _rxQueueInSet = !_tcpHAL.detachRxQueue(_eventQueueSet);
+        if (!_controlQueueInSet && !_txQueueInSet && !_rxQueueInSet) {
+            vQueueDelete(_eventQueueSet);
+        } else {
+            // Not expected (a producer bypassed the fences): never delete a set still referenced
+            Modbus::Debug::LOG_MSG("Failed to detach queues from QueueSet, leaking it");
+        }
         _eventQueueSet = nullptr;
     }
     
@@ -263,14 +330,22 @@ void TCP::beginCleanup() {
 
 /* @brief Kill the RX/TX task
  * @note Called when the interface is destroyed
+ * @note Waits for the task to finish its current work (e.g. an RX assembly or a send),
+ *       then deletes it. A static task must not self-delete: its TCB & stack (members
+ *       of this object) stay referenced until the idle task cleans it up.
  */
 void TCP::killRxTxTask() {
-    if (_rxTxTaskHandle && _txRequestQueue) {
+    if (!_rxTxTaskHandle) return;
+    if (_txRequestQueue) {
         // Send a dummy signal to wake up the task so it can check _isInitialized
         void* dummy_ptr = this;
         xQueueSend(_txRequestQueue, &dummy_ptr, 0);
-        vTaskDelay(pdMS_TO_TICKS(RXTX_QUEUE_CHECK_TIMEOUT_MS + 50)); // Wait a bit more than task queue check timeout
     }
+    while (!_rxTxTaskParked || eTaskGetState(_rxTxTaskHandle) != eSuspended) {
+        vTaskDelay(1);
+    }
+    vTaskDelete(_rxTxTaskHandle);
+    _rxTxTaskHandle = nullptr;
 }
 
 /* @brief Process a raw frame received from the HAL
@@ -279,7 +354,7 @@ void TCP::killRxTxTask() {
  * @return SUCCESS if the frame has been decoded & handled, an error otherwise
  * @note This method is called by the rxTxTask exclusively
  */
-TCP::Result TCP::processReceivedFrame(const ByteBuffer& frameBytes, int socketNum) {
+TCP::Result TCP::processReceivedFrame(const ByteBuffer& frameBytes, int socketNum, uint32_t connId) {
     if (frameBytes.empty()) {
         return Error(ERR_INVALID_FRAME, "empty frame");
     }
@@ -289,13 +364,20 @@ TCP::Result TCP::processReceivedFrame(const ByteBuffer& frameBytes, int socketNu
 
     auto decRes = ModbusCodec::TCP::decode(frameBytes, decodedFrame, msgType);
     if (decRes != ModbusCodec::SUCCESS) {
-        return Error(ERR_INVALID_FRAME, ModbusCodec::toString(decRes));
+        // Server: a request we can't decode may still call for an exception (e.g. unsupported
+        // function code): hand it to the application, which answers it
+        // (MBAP validity & minimum size are guaranteed by fetchSocketData())
+        if (_role != Modbus::SERVER ||
+            !ModbusCodec::makeRejectedRequest(decRes, frameBytes[6], frameBytes[7], decodedFrame)) {
+            return Error(ERR_INVALID_FRAME, ModbusCodec::toString(decRes));
+        }
+        Modbus::Debug::LOG_MSGF("Malformed request (%s), answering exception", ModbusCodec::toString(decRes));
     }
 
     // Transaction ID = first 2 bytes of MBAP
     uint16_t tid = (static_cast<uint16_t>(frameBytes[0]) << 8) | frameBytes[1];
 
-    return handleDecodedFrame(decodedFrame, socketNum, tid);
+    return handleDecodedFrame(decodedFrame, socketNum, connId, tid);
 }
 
 /* @brief Handle a decoded frame received from the HAL
@@ -305,12 +387,13 @@ TCP::Result TCP::processReceivedFrame(const ByteBuffer& frameBytes, int socketNu
  * @return SUCCESS if the frame has been handled, an error otherwise
  * @note This method is called by processReceivedFrame() exclusively
  */
-TCP::Result TCP::handleDecodedFrame(const Modbus::Frame& frame, int socketNum, uint16_t transactionId) {
+TCP::Result TCP::handleDecodedFrame(const Modbus::Frame& frame, int socketNum, uint32_t connId, uint16_t transactionId) {
 
     if (_role == Modbus::CLIENT) {
         // For a client, we expect an active transaction and we end it if everything matches
         if (_currentTransaction.active &&
             _currentTransaction.socketNum == socketNum &&
+            _currentTransaction.connId == connId &&
             _currentTransaction.tid == transactionId) {
 
             notifyCallbacks(frame);
@@ -325,7 +408,7 @@ TCP::Result TCP::handleDecodedFrame(const Modbus::Frame& frame, int socketNum, u
     
     if (_role == Modbus::SERVER) {
         // Start a new transaction
-        if (!beginTransaction(socketNum, transactionId)) {
+        if (!beginTransaction(socketNum, connId, transactionId)) {
             // A transaction is already in progress : the server is busy.
             // If the request is not a broadcast, we reply with a "Slave Device Busy" exception.
 
@@ -340,7 +423,7 @@ TCP::Result TCP::handleDecodedFrame(const Modbus::Frame& frame, int socketNum, u
                                                       frame.fc,
                                                       Modbus::SLAVE_DEVICE_BUSY,
                                                       respBuf)) {
-                    _tcpHAL.sendMsg(respBuf.data(), respBuf.size(), socketNum);
+                    _tcpHAL.sendMsg(respBuf.data(), respBuf.size(), socketNum, nullptr, connId);
                 }
                 Modbus::Debug::LOG_MSG("Server busy – replied with Slave Device Busy exception");
             }
@@ -371,81 +454,73 @@ TCP::Result TCP::handleDecodedFrame(const Modbus::Frame& frame, int socketNum, u
  * @param rcvTid The transaction ID
  * @return SUCCESS if the data has been fetched, an error otherwise
  * @note This method is called by the rxTxTask exclusively
- * @note It will loop until a "looking-valid" frame is assembled, or a timeout occurs
+ * @note Reads exactly one frame: the MBAP header first, then the length it announces.
+ *       Any following frame stays in the socket and will be signaled again by the HAL.
+ * @note If the frame is not complete within RX_ASSEMBLY_TIMEOUT_MS, or the header is
+ *       invalid, the connection is closed: the stream position would otherwise be lost.
  */
-TCP::Result TCP::fetchSocketData(int socketNum, ByteBuffer& rcvBuf, uint16_t& rcvTid) {
-    if (rcvBuf.capacity() < ModbusCodec::TCP::MAX_FRAME_SIZE) {
+TCP::Result TCP::fetchSocketData(int socketNum, ByteBuffer& rcvBuf, uint16_t& rcvTid, uint32_t& connId) {
+    constexpr size_t MBAP_SIZE = ModbusCodec::TCP::MBAP_SIZE;
+    constexpr size_t MIN_FRAME_SIZE = ModbusCodec::TCP::MIN_FRAME_SIZE;
+    constexpr size_t MAX_FRAME_SIZE = ModbusCodec::TCP::MAX_FRAME_SIZE;
+
+    if (rcvBuf.capacity() < MAX_FRAME_SIZE) {
         return Error(ERR_RX_FAILED, "buffer too small");
     }
 
     rcvBuf.clear();
 
     uint32_t t0 = TIME_MS();
-    bool firstRead = true; // First read of the event
+    size_t frameLen = MBAP_SIZE; // Header first, updated once the header is complete
+    connId = 0;
 
-    while (TIME_MS() - t0 < RX_ASSEMBLY_TIMEOUT_MS) {
-        // Taille libre dans le buffer d'assemblage
-        size_t freeSpace = rcvBuf.free_space();
-        if (freeSpace == 0) {
-            rcvBuf.clear();
-            return Error(ERR_RX_FAILED, "buffer overflow, flushing RX buffer");
-        }
-
-        size_t toRead = freeSpace;
-        uint8_t* writePtr = rcvBuf.end();
+    while (true) {
         size_t currentSize = rcvBuf.size();
-
-        // Pre-reserve the space
-        rcvBuf.resize(currentSize + toRead);
-
-        size_t n = _tcpHAL.readSocketData(socketNum, writePtr, toRead);
+        rcvBuf.resize(frameLen); // Pre-reserve exactly what is missing
+        // The whole frame must come from the same connection (the socket number may be reused)
+        uint32_t readConnId = 0;
+        size_t n = _tcpHAL.readSocketData(socketNum, rcvBuf.begin() + currentSize, frameLen - currentSize,
+                                          connId, &readConnId);
+        if (n != SIZE_MAX) connId = readConnId;
 
         if (n == SIZE_MAX) {
-            rcvBuf.trim(currentSize); // Revert to previous size
+            rcvBuf.clear();
             return Error(ERR_RX_FAILED, "socket error/closed, aborting read");
         }
 
-        if (n > 0) {
-            rcvBuf.trim(currentSize + n);
-        } else if (n == 0) {
-            // No bytes received, revert to previous size to avoid growing indefinitely
-            rcvBuf.trim(currentSize);
-            
-            // If we get no data on the first read, we have already consumed the data for this event
-            if (firstRead) {
-                return Error(NODATA, "event data already consumed");
-            }
-        }
-        
-        firstRead = false;
-
-        // Try to decode if we have at least the MBAP header (7 bytes)
-        if (rcvBuf.size() >= 7) {
-            uint16_t mbapLen = (rcvBuf[4] << 8) | rcvBuf[5];
-            size_t frameLen = 6 + mbapLen; // Expected total size (MBAP+PDU)
-
-            // If we don't have the whole frame, break the loop to read again
-            if (rcvBuf.size() < frameLen) break;
-
-            // We have the full frame in rcvBuf, resize it exactly to frameLen
-            rcvBuf.trim(frameLen);
-
-            rcvTid = (static_cast<uint16_t>(rcvBuf[0]) << 8) | rcvBuf[1];
-
-            return Success();
-        }
+        rcvBuf.trim(currentSize + n);
 
         if (n == 0) {
-            WAIT_MS(1); // Wait for more data until timeout or failure
+            // No data on the first read: the data for this event has already been consumed
+            if (currentSize == 0) {
+                return Error(NODATA, "event data already consumed");
+            }
+            if (TIME_MS() - t0 >= RX_ASSEMBLY_TIMEOUT_MS) {
+                rcvBuf.clear();
+                _tcpHAL.closeConnection(socketNum, connId);
+                return Error(ERR_RX_FAILED, "incomplete frame, connection closed");
+            }
+            WAIT_MS(1); // Wait for the rest of the frame
+            continue;
         }
-    }
 
-    if (rcvBuf.size() > 0) {
-        rcvBuf.clear();
-        return Error(ERR_RX_FAILED, "assembly timeout, dropping data");
-    }
-    else {
-        return Error(NODATA, "assembly timeout w/o data");
+        if (rcvBuf.size() < frameLen) continue;
+
+        if (frameLen == MBAP_SIZE) {
+            // Header complete: check it and read exactly the announced length
+            uint16_t protocolId = (rcvBuf[2] << 8) | rcvBuf[3];
+            uint16_t mbapLen = (rcvBuf[4] << 8) | rcvBuf[5];
+            frameLen = 6 + mbapLen; // Expected total size (MBAP+PDU)
+            if (protocolId != 0 || frameLen < MIN_FRAME_SIZE || frameLen > MAX_FRAME_SIZE) {
+                rcvBuf.clear();
+                _tcpHAL.closeConnection(socketNum, connId);
+                return Error(ERR_RX_FAILED, "invalid MBAP header, connection closed");
+            }
+            continue;
+        }
+
+        rcvTid = (static_cast<uint16_t>(rcvBuf[0]) << 8) | rcvBuf[1];
+        return Success();
     }
 }
 
@@ -458,9 +533,18 @@ TCP::Result TCP::handleTxRequest() {
     void* ctx = nullptr;
 
     int actualSock = -1;
+    uint32_t actualConnId = 0;
     uint16_t tid = 0;
     bool isBroadcast = false;
     bool sendMsgRes = false;
+    bool aborted = false;
+
+    // The TX slot stays busy until the TX callback returned (called outside the mutex): otherwise
+    // another request could be queued meanwhile, and this result be applied to it
+    struct TxSlotRelease {
+        TCP* tcp;
+        ~TxSlotRelease() { Lock guard(tcp->_txMutex); tcp->_txBuffer.clear(); tcp->_txCtx.clear(); }
+    } txSlotRelease{this};
 
     // Access TX buffer & metadata under critical section (mutex protection)
     { 
@@ -488,13 +572,19 @@ TCP::Result TCP::handleTxRequest() {
             return Error(ERR_SEND_FAILED, "no data to send");
         }
 
-        // Send the payload via HAL
-        sendMsgRes = _tcpHAL.sendMsg(payload, len, destSock,
-                                  (_role == Modbus::CLIENT) ? &actualSock : nullptr);
+        // Client: (re)connect first, as it may take long. If the request was aborted
+        // meanwhile (e.g. Client timeout), it must not be sent late: the send is bound to
+        // that connection, so that it can't reconnect again after this check.
+        uint32_t connId = _txCtx.connId;
+        bool connected = (_role != Modbus::CLIENT) || _tcpHAL.ensureClientConnected(&connId);
+        aborted = (_role == Modbus::CLIENT) && (_abortCount != _txCtx.abortCount);
 
-        // Clear TX buffer and metadata whatever happens
-        _txBuffer.clear();
-        _txCtx.clear();
+        // Send the payload via HAL
+        if (connected && !aborted) {
+            sendMsgRes = _tcpHAL.sendMsg(payload, len, destSock,
+                                      (_role == Modbus::CLIENT) ? &actualSock : nullptr,
+                                      connId, &actualConnId);
+        }
     } // Mutex released here (end of RAII scope)
 
     if (!sendMsgRes) {
@@ -504,6 +594,7 @@ TCP::Result TCP::handleTxRequest() {
             endTransaction();
         }
         if (txCallback) txCallback(ERR_SEND_FAILED, ctx);
+        if (aborted) return Error(ERR_SEND_FAILED, "request aborted before sending");
         return Error(ERR_SEND_FAILED, "HAL returned failure to send message");
     }
 
@@ -514,7 +605,7 @@ TCP::Result TCP::handleTxRequest() {
             return Error(ERR_SEND_FAILED, "invalid current socket returned by HAL");
         }
         // Start the transaction
-        if (!beginTransaction(actualSock, tid)) {
+        if (!beginTransaction(actualSock, actualConnId, tid)) {
             if (txCallback) txCallback(ERR_BUSY, ctx);
             return Error(ERR_BUSY, "cannot start transaction");
         }
@@ -530,26 +621,29 @@ TCP::Result TCP::handleTxRequest() {
 
 /* @brief Get the next outgoing transaction ID
  * @return The next outgoing transaction ID
+ * @note Called under _txMutex. The counter lives outside _currentTransaction so that
+ *       ending a transaction (success, error or abort) never rewinds it: a late
+ *       response to a timed-out request can't match the TID of the next one.
  */
 uint16_t TCP::getNextOutgoingTransactionId() {
-    // For client, increment transaction ID. Wraps around. Starts from tid = 0.
-    if (_currentTransaction.tid == 0xFFFF) _currentTransaction.tid = 0;
-    _currentTransaction.tid++; 
-    return _currentTransaction.tid;
+    // For client, increment transaction ID. Wraps around, skipping 0.
+    if (_lastOutgoingTid == 0xFFFF) _lastOutgoingTid = 0;
+    return ++_lastOutgoingTid;
 }
 
 /* @brief Mark the _currentTransaction.active flag to true at the beginning of a Modbus transaction.
  * @param socketNum The socket number associated with this transaction.
+ * @param connId The HAL connection ID associated with this transaction.
  * @param transactionId The transaction ID for this transaction.
  * @return True if the transaction was started, false otherwise (e.g., mutex lock failed, already in transaction for a client).
  * @note IMPORTANT: must ONLY be called from rxTxTask context!
  */
-bool TCP::beginTransaction(int socketNum, uint16_t transactionId) {
+bool TCP::beginTransaction(int socketNum, uint32_t connId, uint16_t transactionId) {
     if (_currentTransaction.active) {
         Modbus::Debug::LOG_MSG("Transaction already in progress");
         return false;
     }
-    _currentTransaction.set(socketNum, transactionId);
+    _currentTransaction.set(socketNum, connId, transactionId);
     Modbus::Debug::LOG_MSGF("Transaction started on socket: %d with TID: %d", socketNum, transactionId);
     return true;
 }
@@ -599,10 +693,11 @@ void TCP::rxTxTask(void* tcp) {
                 int sock;
                 if (xQueueReceive(self->_rxEventQueue, &sock, 0) == pdTRUE) {
                     uint16_t rcvTid;
-                    Result fetchRes = self->fetchSocketData(sock, self->_rxBuffer, rcvTid);
+                    uint32_t connId;
+                    Result fetchRes = self->fetchSocketData(sock, self->_rxBuffer, rcvTid, connId);
                     if (fetchRes == SUCCESS) {
                         ByteBuffer frameView(self->_rxBuffer.data(), self->_rxBuffer.size());
-                        self->processReceivedFrame(frameView, sock);
+                        self->processReceivedFrame(frameView, sock, connId);
                         self->_rxBuffer.clear(); // reset for next iteration
                     }
                 }
@@ -633,8 +728,8 @@ void TCP::rxTxTask(void* tcp) {
     }
 
     Modbus::Debug::LOG_MSGF("ModbusTCP RxTx Task stopping for %s", (self->_role == Modbus::CLIENT ? "CLIENT" : "SERVER"));
-    self->_rxTxTaskHandle = nullptr;
-    vTaskDelete(nullptr);
+    self->_rxTxTaskParked = 1; // Last access to the object
+    vTaskSuspend(nullptr);     // Deleted by killRxTxTask()
 }
 
 } // namespace ModbusInterface 

@@ -207,6 +207,7 @@ private:
     bool wordExists(const Word& word);
     bool wordOverlaps(const Word& word);
     bool validateNoOverlapsInStore(Modbus::RegisterType type);
+    void detachInterfaces();
     Result addWordInternal(const Word& word);
     Result isValidWordEntry(const Word& word);
     

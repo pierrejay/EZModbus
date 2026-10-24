@@ -1057,10 +1057,10 @@ void test_request_timeout() {
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result); // The send itself should succeed (request queued)
 
     // Wait a bit more than the default timeout
-    uint32_t startTime = TIME_MS();
+    uint32_t startTime = Modbus::TIME_MS();
     // client.getRequestTimeoutMs() would be better if available, using Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS as fallback
     uint32_t timeoutDuration = Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS;
-    while (TIME_MS() - startTime < timeoutDuration + 100) {
+    while (Modbus::TIME_MS() - startTime < timeoutDuration + 100) {
         vTaskDelay(pdMS_TO_TICKS(1));
         if (tracker == Modbus::Client::ERR_TIMEOUT) break;
         // client.poll(); // Client poll is now internal via its own task. User doesn't call it.
@@ -1119,8 +1119,8 @@ void test_request_timeout() {
     TEST_ASSERT_START();
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result); // Send initiated
 
-    startTime = TIME_MS();
-    while (TIME_MS() - startTime < timeoutDuration + 100) {
+    startTime = Modbus::TIME_MS();
+    while (Modbus::TIME_MS() - startTime < timeoutDuration + 100) {
         vTaskDelay(pdMS_TO_TICKS(1));
         if (tracker == Modbus::Client::ERR_TIMEOUT) break;
     }
@@ -1749,6 +1749,139 @@ void test_runtime_uart_reconfig() {
     }
 }
 
+// Regression: the interface destructor slept 150 ms instead of waiting for its task,
+// which can be busy for much longer (here transmitting a ~255-byte frame, ~270 ms at
+// 9600 baud), then deleted its queue set while the UART event queue was not empty (the
+// wake-up event it had just posted was never consumed): FreeRTOS refuses to remove a
+// non-empty queue from a set, so the UART queue kept a reference to the freed set and
+// no interface could be attached to that UART anymore.
+// The request targets an absent slave, so that no RX traffic follows.
+// Destroys & recreates the shared `ezm` interface (end of the suite).
+void test_destroy_while_transmitting() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_DESTROY_WHILE_TRANSMITTING");
+
+    // Slow line so that the transmission lasts ~270 ms (the suite runs at a high baud rate)
+    const uint32_t origBaud = ezm_uart.getBaudrate();
+    TEST_ASSERT_EQUAL(ESP_OK, ezm_uart.setBaudrate(9600));
+
+    vTaskDelay(pdMS_TO_TICKS(50)); // Let the idle task clean up tasks deleted by previous tests
+    const UBaseType_t baseline = uxTaskGetNumberOfTasks();
+    client.~Client(); // The application goes first (rebuilt at the end)
+
+    Modbus::Frame req = {
+        .type = Modbus::REQUEST,
+        .fc = Modbus::WRITE_MULTIPLE_REGISTERS,
+        .slaveId = 99, // No server answers this ID
+        .regAddress = 0,
+        .regCount = Modbus::MAX_REGISTERS_WRITE,
+        .data = {},
+        .exceptionCode = Modbus::NULL_EXCEPTION
+    };
+    const auto sendRes = ezm.sendFrame(req, nullptr, nullptr);
+    vTaskDelay(pdMS_TO_TICKS(20)); // The interface task is now transmitting
+
+    ezm.~RTU();
+    const UBaseType_t afterDestroy = uxTaskGetNumberOfTasks();
+    vTaskDelay(pdMS_TO_TICKS(500)); // Before the fix, let the still-running task end before reusing the object
+
+    ezm_uart.setBaudrate(origBaud);
+    new (&ezm) ModbusInterface::RTU(ezm_uart, Modbus::MASTER);
+    const auto beginRes = ezm.begin();
+    new (&client) Modbus::Client(ezm);
+    client.begin();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusInterface::IInterface::SUCCESS, sendRes, "cannot start the transmission");
+    TEST_ASSERT_EQUAL_MESSAGE(baseline - 1, afterDestroy, "interface task still running after destruction");
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusInterface::IInterface::SUCCESS, beginRes, "cannot attach a new interface to the UART");
+    TEST_ASSERT_EQUAL_MESSAGE(baseline, uxTaskGetNumberOfTasks(), "unexpected task count after re-init");
+
+    Modbus::Logger::logln("TEST_DESTROY_WHILE_TRANSMITTING - OK");
+    Modbus::Logger::logln();
+}
+
+// Interface destruction/re-creation while the UART keeps receiving: the UART driver posts
+// events continuously. The interface waits on the UART event queue alone (no QueueSet), so
+// there is nothing to detach: every re-creation must succeed.
+static constexpr int RECREATE_STRESS_CYCLES = 20;
+static volatile bool rxStressRunning = false;
+static StaticTask_t rxStressTaskTcb;
+static StackType_t rxStressTaskStack[2048];
+
+// Sends garbage bytes to the EZModbus master's RX every 2 ms (from the server side UART)
+static void rxStressSenderTask(void*) {
+    const uint8_t garbage[8] = { 0x55, 0xAA, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06 };
+    while (rxStressRunning) {
+        mbt_uart.write(garbage, sizeof(garbage));
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    rxStressRunning = true; // Ack: the task no longer uses the UART
+    vTaskSuspend(nullptr);
+}
+
+// Last test of the suite: it destroys & recreates the shared `ezm` interface.
+void test_recreate_under_rx_traffic() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_RECREATE_UNDER_RX_TRAFFIC");
+
+    vTaskDelay(pdMS_TO_TICKS(50)); // Let the idle task clean up tasks deleted by previous tests
+    const UBaseType_t baseline = uxTaskGetNumberOfTasks();
+
+    rxStressRunning = true;
+    TaskHandle_t sender = xTaskCreateStatic(rxStressSenderTask, "rxStress", sizeof(rxStressTaskStack) / sizeof(StackType_t),
+                                            nullptr, tskIDLE_PRIORITY + 1, rxStressTaskStack, &rxStressTaskTcb);
+    TEST_ASSERT_NOT_NULL(sender);
+    client.~Client(); // The application goes first (rebuilt at the end)
+
+    int failedCycle = -1;
+    for (int i = 0; i < RECREATE_STRESS_CYCLES && failedCycle < 0; i++) {
+        ezm.~RTU();
+        vTaskDelay(pdMS_TO_TICKS(5)); // UART events keep coming meanwhile
+        new (&ezm) ModbusInterface::RTU(ezm_uart, Modbus::MASTER);
+        if (ezm.begin() != ModbusInterface::IInterface::SUCCESS) failedCycle = i;
+        vTaskDelay(pdMS_TO_TICKS(10 + (i % 7) * 3));
+    }
+
+    // Stop the sender (it acks by setting the flag back)
+    rxStressRunning = false;
+    uint32_t t0 = millis();
+    while (!rxStressRunning && millis() - t0 < 500) vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelete(sender);
+    new (&client) Modbus::Client(ezm);
+    client.begin();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(-1, failedCycle, "interface begin() failed after a re-creation under RX traffic");
+    TEST_ASSERT_EQUAL_MESSAGE(baseline, uxTaskGetNumberOfTasks(), "unexpected task count after the stress test");
+
+    Modbus::Logger::logln("TEST_RECREATE_UNDER_RX_TRAFFIC - OK");
+    Modbus::Logger::logln();
+}
+
+// User code may define its own global names matching EZModbus internal helpers (here a
+// mutex, a buffer, a time function...): EZModbus keeps them out of the global namespace, so
+// that including it never collides with user code (this test fails to compile otherwise).
+class Mutex { public: int id = 1; };
+struct Lock { int id = 2; };
+struct ByteBuffer { int id = 3; };
+class BinarySemaphore { public: int id = 4; };
+inline uint32_t TIME_MS() { return 42; }
+inline uint64_t TIME_US() { return 43; }
+inline void WAIT_MS(uint32_t) {}
+inline void WAIT_US(uint32_t) {}
+
+void test_user_names_dont_collide() {
+    Mutex mutex; Lock lock; ByteBuffer buffer; BinarySemaphore semaphore;
+    WAIT_MS(0); WAIT_US(0);
+    TEST_ASSERT_EQUAL(1, mutex.id);
+    TEST_ASSERT_EQUAL(2, lock.id);
+    TEST_ASSERT_EQUAL(3, buffer.id);
+    TEST_ASSERT_EQUAL(4, semaphore.id);
+    TEST_ASSERT_EQUAL(42, TIME_MS());
+    TEST_ASSERT_EQUAL(43, (uint32_t)TIME_US());
+}
+
 void setup() {
     // Debug port
     Serial.setTxBufferSize(2048);
@@ -1796,6 +1929,7 @@ void setup() {
 
     // Run tests
     UNITY_BEGIN();
+    RUN_TEST(test_user_names_dont_collide);
 
     // Register all generated tests
     #define X(Name, ReadSingle, ReadMulti, Addr, Expect, FC) \
@@ -1850,6 +1984,10 @@ void setup() {
 
     // Runtime reconfiguration tests
     RUN_TEST(test_runtime_uart_reconfig);
+
+    // Lifecycle (last: destroys & recreates the shared interface)
+    RUN_TEST(test_destroy_while_transmitting);
+    RUN_TEST(test_recreate_under_rx_traffic);
 
     UNITY_END();
 }

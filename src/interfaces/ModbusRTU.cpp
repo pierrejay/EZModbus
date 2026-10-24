@@ -18,8 +18,6 @@ RTU::RTU(ModbusHAL::UART& uart, Modbus::Role role)
       _txResultCallback(nullptr),
       _txCallbackCtx(nullptr),
       _rxEventQueue(nullptr),
-      _txRequestQueue(nullptr),
-      _eventQueueSet(nullptr),
       _rxTxTaskHandle(nullptr)
 {
     this->_role = role; 
@@ -30,6 +28,9 @@ RTU::~RTU() {
         _isInitialized = false; 
         killRxTxTask();
     }
+
+    // Wait for an in-flight sendFrame() (the next ones see !_isInitialized)
+    { Lock guard(_txMutex); }
 
     // Delete the FreeRTOS objects created in begin()
     beginCleanup();
@@ -48,34 +49,9 @@ RTU::Result RTU::begin() {
         return Error(ERR_INIT_FAILED, "UART HAL not ready or void UART event queue");
     }
 
-    // Create TX request queue
-    _txRequestQueue = xQueueCreateStatic(1, sizeof(void*), _txRequestQueueStorage, &_txRequestQueueBuffer);
-    if (!_txRequestQueue) {
-        _rxEventQueue = nullptr;
-        return Error(ERR_INIT_FAILED, "failed to create TX request queue");
-    }
-
-    // Create event queue set (combines rxEventQueue + uartEventQueue)
-    _eventQueueSet = xQueueCreateSet(_uartHAL.DRIVER_EVENT_QUEUE_SIZE + 1); // +1 for txRequestQueue (flag)
-    if (!_eventQueueSet) {
-        beginCleanup();
-        return Error(ERR_INIT_FAILED, "failed to create event queue set");
-    }
-
-    // Flush rxEventQueue prior to adding it to the set
-    // This is necessary so parasitic events that occur before RTU initialization do not prevent the QueueSet from being created
+    // Flush parasitic UART events that occurred before RTU initialization
     uart_event_t dump;
     while (xQueueReceive(_rxEventQueue, &dump, 0) == pdTRUE) { }
-
-    // Add queues to QueueSet
-    if (xQueueAddToSet(_rxEventQueue, _eventQueueSet) != pdPASS) {
-        beginCleanup();
-        return Error(ERR_INIT_FAILED, "failed to add RX event queue to set");
-    }
-    if (xQueueAddToSet(_txRequestQueue, _eventQueueSet) != pdPASS) {
-        beginCleanup();
-        return Error(ERR_INIT_FAILED, "failed to add TX request queue to set");
-    }
 
     // Flush the buffers prior to starting the task
     _rxBuffer.clear();
@@ -84,6 +60,7 @@ RTU::Result RTU::begin() {
     _isInitialized = true; // Needed for the task not to terminate prematurely
 
     // Create the RX/TX task
+    _rxTxTaskParked = 0;
     _rxTxTaskHandle = xTaskCreateStatic(
         /*pxTaskCode*/      rxTxTask,
         /*pcName*/          "ModbusRTU_RxTxTask", 
@@ -205,12 +182,20 @@ RTU::Result RTU::sendFrame(const Modbus::Frame& frame, TxResultCallback txCallba
         return Error(ERR_NOT_INITIALIZED, "RTU interface not initialized");
     }
 
+    bool replacedByException = false;
+
     // Update TX buffer under critical section (mutex protection)
     {
         Lock guard(_txMutex, 0); // try-lock no wait
         if (!guard.isLocked() || _txBuffer.size() != 0) {
             if (txCallback) txCallback(ERR_BUSY, ctx);
             return Error(ERR_BUSY, "TX already in progress");
+        }
+        
+        // Checked again under the mutex: fenced by the destructor
+        if (!_isInitialized) {
+            if (txCallback) txCallback(ERR_NOT_INITIALIZED, ctx);
+            return Error(ERR_NOT_INITIALIZED, "RTU interface not initialized");
         }
         
         _txResultCallback = txCallback; // Store the callback for rxTxTask
@@ -220,28 +205,43 @@ RTU::Result RTU::sendFrame(const Modbus::Frame& frame, TxResultCallback txCallba
         // _txBuffer is considered free. Encode the frame.
         auto encodeResult = ModbusCodec::RTU::encode(frame, _txBuffer);
         if (encodeResult != ModbusCodec::SUCCESS) {
-            if (txCallback) txCallback(ERR_INVALID_FRAME, ctx);
             _txBuffer.clear(); // Don't leave the buffer in an invalid state
-            return Error(ERR_INVALID_FRAME, "encoding failed");
+            // Slave: a response that can't be encoded is replaced by SLAVE_DEVICE_FAILURE,
+            // so that the request is still answered
+            if (_role != Modbus::SLAVE || frame.type != Modbus::RESPONSE || Modbus::isBroadcastId(frame.slaveId) ||
+                !ModbusCodec::RTU::buildException(frame.slaveId, frame.fc, Modbus::SLAVE_DEVICE_FAILURE, _txBuffer)) {
+                _txBuffer.clear();
+                _txResultCallback = nullptr;
+                _txCallbackCtx = nullptr;
+                if (txCallback) txCallback(ERR_INVALID_FRAME, ctx);
+                return Error(ERR_INVALID_FRAME, "encoding failed");
+            }
+            replacedByException = true;
+            _txResultCallback = nullptr; // The caller is notified of the encoding failure below, not of the exception TX
+            _txCallbackCtx = nullptr;
+        }
+
+        Modbus::Debug::LOG_MSGF("Encoded TX frame (%u bytes) for port %d", (uint32_t)_txBuffer.size(), (int)_uartHAL.getPort());
+        Modbus::Debug::LOG_HEXDUMP(_txBuffer);
+
+        if (_role == Modbus::MASTER && frame.type == Modbus::REQUEST) {
+            _rtt.start(&_rtt.storeUs); // Start RTT for master request (using stored start time)
+        }
+
+        // Signal to rxTxTask that a frame is ready in _txBuffer
+        if (!postTaskEvent(TASK_TX_REQUEST)) {
+            _txBuffer.clear();
+            _txResultCallback = nullptr;
+            _txCallbackCtx = nullptr;
+            if (txCallback) txCallback(ERR_BUSY, ctx);
+            return Error(ERR_BUSY, "UART event queue full, cannot signal the TX request");
         }
     } // Mutex released here (end of RAII scope)
-
-    Modbus::Debug::LOG_MSGF("Encoded TX frame (%u bytes) for port %d", (uint32_t)_txBuffer.size(), (int)_uartHAL.getPort());
-    Modbus::Debug::LOG_HEXDUMP(_txBuffer);
-
-    if (_role == Modbus::MASTER && frame.type == Modbus::REQUEST) {
-        _rtt.start(&_rtt.storeUs); // Start RTT for master request (using stored start time)
-    } 
-
-    // Signal to rxTxTask that a frame is ready in _tx_buffer_internal
-    void* signal_ptr = this; // Dummy value to signal the presence of a frame
-    if (xQueueSend(_txRequestQueue, &signal_ptr, 0) != pdTRUE) {
-        _txResultCallback = nullptr;
-        _txCallbackCtx = nullptr;
-        if (txCallback) txCallback(ERR_SEND_FAILED, ctx);
-        return Error(ERR_SEND_FAILED, "failed to put encoded frame into TX queue");
-    }
     
+    if (replacedByException) {
+        if (txCallback) txCallback(ERR_INVALID_FRAME, ctx);
+        return Error(ERR_INVALID_FRAME, "encoding failed, replying SLAVE_DEVICE_FAILURE");
+    }
     return Success(); 
 }
 
@@ -253,6 +253,22 @@ bool RTU::isReady() {
     Lock guard(_txMutex, 0); // try-lock no wait
     if (!guard.isLocked() || _txBuffer.size() > 0) return false;
     return true;
+}
+
+/* @brief Wait until no TX result callback registered with a context is pending or running
+ * @param ctx The context passed to sendFrame()
+ * @note The TX slot holds the callback until it returned (see handleTxRequest())
+ * @note No wait from the rxTxTask itself (called from a callback)
+ */
+void RTU::waitTxCallbackDone(void* ctx) {
+    if (xTaskGetCurrentTaskHandle() == _rxTxTaskHandle) return;
+    while (true) {
+        {
+            Lock guard(_txMutex);
+            if (_txBuffer.size() == 0 || _txCallbackCtx != ctx) return;
+        }
+        vTaskDelay(1);
+    }
 }
 
 /* @brief Get the handle of the RX/TX task
@@ -270,36 +286,42 @@ TaskHandle_t RTU::getRxTxTaskHandle() {
  * @note Called when the interface is destroyed
  */
 void RTU::beginCleanup() {
-    // Clean up resources in reverse order of creation
-    if (_eventQueueSet) {
-        if (_rxEventQueue) xQueueRemoveFromSet(_rxEventQueue, _eventQueueSet);
-        if (_txRequestQueue) xQueueRemoveFromSet(_txRequestQueue, _eventQueueSet);
-        vQueueDelete(_eventQueueSet);
-        _eventQueueSet = nullptr;
-    }
-    
-    if (_txRequestQueue) {
-        vQueueDelete(_txRequestQueue);
-        _txRequestQueue = nullptr;
-    }
-    
-    // Do not delete _rxEventQueue as it belongs to _uartHAL
+    // Nothing to delete: _rxEventQueue belongs to _uartHAL
     _rxEventQueue = nullptr;
 }
 
 /* @brief Kill the RX/TX task
  * @note Called when the interface is destroyed
+ * @note Waits for the task to finish its current work (e.g. a transmission), then deletes
+ *       it. A static task must not self-delete: its TCB & stack (members of this object)
+ *       stay referenced until the idle task cleans it up.
  */
 void RTU::killRxTxTask() {
-    if (_rxTxTaskHandle && _rxEventQueue) {
-        // Send a dummy event to wake up the rxTxTask
-        uart_event_t dummy_evt = {
-            .type = UART_EVENT_MAX,
-            .size = 0,
-            .timeout_flag = false }; 
-        xQueueSend(_rxEventQueue, &dummy_evt, 0); 
-        vTaskDelay(pdMS_TO_TICKS(RXTX_QUEUE_CHECK_TIMEOUT_MS + 50)); // Wait a bit more than RxTxTask queue check timeout
+    if (!_rxTxTaskHandle) return;
+    if (_rxEventQueue) postTaskEvent(TASK_WAKE_UP);
+    while (!_rxTxTaskParked || eTaskGetState(_rxTxTaskHandle) != eSuspended) {
+        vTaskDelay(1);
     }
+    vTaskDelete(_rxTxTaskHandle);
+    _rxTxTaskHandle = nullptr;
+}
+
+/* @brief Post one of the rxTxTask's own events into the UART event queue
+ * @return True if the event was queued (false if the queue is full)
+ * @note Posted behind the pending UART events, which keeps their processing order
+ */
+bool RTU::postTaskEvent(TaskEvent taskEvent) {
+    // Our events start at UART_EVENT_MAX (the driver's last enumerator): they can't collide with
+    // the driver's types. They must also fit in the value range of uart_event_type_t (an enum
+    // without fixed underlying type: the smallest bit-field holding its enumerators), as casting
+    // an out-of-range value to it is undefined. Fails to compile if an SDK update breaks this.
+    constexpr auto enumValueRangeMax = [](unsigned v) { unsigned m = 1; while (m <= v) m <<= 1; return m - 1; };
+    static_assert(static_cast<unsigned>(TASK_TX_REQUEST) <= enumValueRangeMax(UART_EVENT_MAX),
+                  "RTU task events don't fit in uart_event_type_t");
+
+    uart_event_t event = {};
+    event.type = static_cast<uart_event_type_t>(taskEvent);
+    return xQueueSend(_rxEventQueue, &event, 0) == pdTRUE;
 }
 
 /* @brief Process a received Modbus frame
@@ -333,7 +355,14 @@ RTU::Result RTU::processReceivedFrame(const ByteBuffer& frameBytes) {
 
     auto decodeResult = ModbusCodec::RTU::decode(frameBytes, receivedFrame, msgType);
     if (decodeResult != ModbusCodec::SUCCESS) {
-        return Error(ERR_INVALID_FRAME, "cannot decode received frame");
+        // Slave: a request we can't decode (valid CRC) may still call for an exception (e.g.
+        // unsupported function code): hand it to the application, which checks the slave ID
+        // & answers it. Smallest frame with a CRC: slave ID + FC + CRC (4 bytes)
+        if (_role != Modbus::SLAVE || frameBytes.size() < 4 ||
+            !ModbusCodec::makeRejectedRequest(decodeResult, frameBytes[0], frameBytes[1], receivedFrame)) {
+            return Error(ERR_INVALID_FRAME, "cannot decode received frame");
+        }
+        Modbus::Debug::LOG_MSG("Malformed request, handing it to the application to answer an exception");
     }
 
     Modbus::Debug::LOG_FRAME(receivedFrame, "Received frame successfully decoded");
@@ -445,12 +474,6 @@ RTU::Result RTU::handleUartEvent(const uart_event_t& event) {
         case UART_PARITY_ERR:
             // HW error, we skip the event
             return Error(ERR_RX_FAILED, "UART frame or parity error");
-        case UART_EVENT_MAX: 
-            // This case should never happen, we just print a log and skip the event
-            // We use UART_EVENT_MAX to send a dummy event when we want to wake up the
-            // loop to kill the rxTxTask.
-            Modbus::Debug::LOG_MSG("UART_EVENT_MAX received, task will check _isInitialized to stop");
-            break;
         default:
             // This case should never happen, we just print a log and skip the event
             Modbus::Debug::LOG_MSGF("Unhandled UART event detected (type %d, size %d)", event.type, event.size);
@@ -515,9 +538,12 @@ RTU::Result RTU::handleTxRequest() {
     }
 
     notifyTxResult(send_res);
-    _txResultCallback = nullptr; 
-    _txCallbackCtx = nullptr;
-    _txBuffer.clear(); // Safe because it's locked from sendFrame() call until we clear it here
+    {
+        Lock guard(_txMutex); // Read by waitTxCallbackDone()
+        _txResultCallback = nullptr;
+        _txCallbackCtx = nullptr;
+        _txBuffer.clear(); // Safe because it's locked from sendFrame() call until we clear it here
+    }
     return send_res;
 }
 
@@ -532,17 +558,18 @@ void RTU::rxTxTask(void* rtu) {
     RTU* self = static_cast<RTU*>(rtu);
 
     while (self->_isInitialized) {
-        // Block on the event queue set (no busy-wait: the task sleeps until an event or timeout).
+        // Block on the UART event queue (no busy-wait: the task sleeps until an event or timeout).
         // While a frame is being assembled, poll fast (1 tick) so the software silence fallback stays
         // responsive; when idle, sleep on the long interval to yield CPU.
         TickType_t waitTicks = (self->_rxBuffer.size() > 0)
             ? pdMS_TO_TICKS(1)
             : pdMS_TO_TICKS(RXTX_QUEUE_CHECK_TIMEOUT_MS);
         if (waitTicks == 0) waitTicks = 1; // pdMS_TO_TICKS(1) rounds to 0 below a 1 kHz tick: keep it blocking
-        QueueSetMemberHandle_t active_member = xQueueSelectFromSet(self->_eventQueueSet, waitTicks);
+        uart_event_t event;
+        bool gotEvent = (xQueueReceive(self->_rxEventQueue, &event, waitTicks) == pdTRUE);
 
         // Get out of the loop if the task is not initialized, otherwise wait for the next event
-        if (active_member == nullptr) {
+        if (!gotEvent) {
             if (!self->_isInitialized) { break; }
             // Frame-gap backstop: delimit the buffered frame when no HW idle-timeout event arrives -
             // Kept as a safety net, but the primary delimiter is uart_set_always_rx_timeout() (enabled in begin())
@@ -555,27 +582,23 @@ void RTU::rxTxTask(void* rtu) {
             continue;
         }
 
-        // If we received data from UART, push it to the rxBuffer
-        if (active_member == self->_rxEventQueue) {
-            uart_event_t event;
-            if (xQueueReceive(self->_rxEventQueue, &event, 0) == pdTRUE) {
+        switch (static_cast<int>(event.type)) {
+            case TASK_TX_REQUEST:   // A frame is ready in the TX buffer: send it
+                self->handleTxRequest();
+                break;
+            case TASK_WAKE_UP:      // Nothing to do: the loop checks _isInitialized
+                break;
+            default:                // UART driver event (data received...)
                 self->handleUartEvent(event); 
-            }
-        } 
-        // If we have a pending frame in the TX buffer, send it
-        else if (active_member == self->_txRequestQueue) {
-            void* signal_data; 
-            if (xQueueReceive(self->_txRequestQueue, &signal_data, 0) == pdTRUE) {
-                self->handleTxRequest(); 
-            }
+                break;
         } 
 
         if (!self->_isInitialized) { break; }
     } 
 
     Modbus::Debug::LOG_MSGF("Modbus RxTx Task stopping for UART port %d", self->_uartHAL.getPort());
-    self->_rxTxTaskHandle = nullptr; 
-    vTaskDelete(NULL); 
+    self->_rxTxTaskParked = 1; // Last access to the object
+    vTaskSuspend(nullptr);     // Deleted by killRxTxTask()
 }
 
 } // namespace ModbusInterface

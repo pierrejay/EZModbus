@@ -74,7 +74,13 @@ void TCP::stop() {
 
     if (_tcpTaskHandle) {
         Modbus::Debug::LOG_MSG("Waiting for TCP task to terminate...");
-        vTaskDelay(pdMS_TO_TICKS(200)); // Wait a bit for the task to self-terminate
+        // The task parks itself once it no longer uses this object, then we delete it.
+        // A static task must not self-delete: its TCB & stack (members of this object)
+        // stay referenced until the idle task cleans it up.
+        while (!_tcpTaskParked || eTaskGetState(_tcpTaskHandle) != eSuspended) {
+            vTaskDelay(1);
+        }
+        vTaskDelete(_tcpTaskHandle);
         _tcpTaskHandle = nullptr;
     }
 
@@ -89,6 +95,7 @@ void TCP::stop() {
             Modbus::Debug::LOG_MSGF("Closing client socket %d", _clientSocket);
             ::close(_clientSocket);
             _clientSocket = -1;
+            _clientConnId = 0;
         }
         for (size_t i = 0; i < _activeSocketCount; ++i) {
             int sock = _activeSockets[i];
@@ -159,6 +166,24 @@ bool TCP::setupServerSocket(uint16_t port, uint32_t ip) {
     }
     Modbus::Debug::LOG_MSGF("Server listening on port %u, socket %d", port, _listenSocket);
     return true;
+}
+
+/* @brief Enable TCP keepalive on a connected socket
+ * @note Detects half-open connections (peer powered off, cable cut): the stack then
+ *       resets the socket, which the TCP task sees & closes like any other error
+ */
+static void enableKeepAlive(int sock) {
+    if (TCP::KEEPALIVE_IDLE_S <= 0) return;
+    int on = 1;
+    int idle = TCP::KEEPALIVE_IDLE_S;
+    int intvl = TCP::KEEPALIVE_INTVL_S;
+    int cnt = TCP::KEEPALIVE_CNT;
+    if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on)) < 0
+        || setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle)) < 0
+        || setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl)) < 0
+        || setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt)) < 0) {
+        Modbus::Debug::LOG_MSGF("Failed to enable keepalive on socket %d, errno: %d", sock, errno);
+    }
 }
 
 static uint32_t stringToIP(const char* ip_str) {
@@ -254,6 +279,8 @@ bool TCP::setupClientSocket(const char* serverIP, uint16_t port) {
         Modbus::Debug::LOG_MSGF("Connected to %s:%u immediately!", serverIP, port);
     }
     
+    enableKeepAlive(newSocket);
+
     // Atomic assignment at the end (under Mutex)
     {
         Lock guard(_socketsMutex);
@@ -262,6 +289,7 @@ bool TCP::setupClientSocket(const char* serverIP, uint16_t port) {
             ::close(_clientSocket);
         }
         _clientSocket = newSocket;
+        _clientConnId = newConnectionIdLocked();
     }
     
     return true;
@@ -288,6 +316,7 @@ bool TCP::beginServer(uint16_t port, uint32_t ip) {
     Modbus::Debug::LOG_MSG("RX queue created.");
 
     _isRunning = true;
+    _tcpTaskParked = 0;
     _tcpTaskHandle = xTaskCreateStatic(
         tcpTask,
         "ModbusHALtcpSrv",
@@ -329,7 +358,8 @@ bool TCP::beginClient(const char* serverIP, uint16_t port) {
     Modbus::Debug::LOG_MSG("RX queue created for client.");
     
     _isRunning = true;
-    TaskHandle_t taskCreated = xTaskCreateStatic(
+    _tcpTaskParked = 0;
+    _tcpTaskHandle = xTaskCreateStatic(
         tcpTask,
         "ModbusHALtcpCli",
         TCP_TASK_STACK_SIZE, // Stack size
@@ -339,9 +369,8 @@ bool TCP::beginClient(const char* serverIP, uint16_t port) {
         &_tcpTaskBuf
     );
 
-    if (taskCreated == nullptr) {
+    if (_tcpTaskHandle == nullptr) {
         Modbus::Debug::LOG_MSG("Failed to create client TCP task.");
-        _tcpTaskHandle = nullptr; // Ensure it's null
         stop(); // Cleanup queue and socket
         return false;
     }
@@ -356,7 +385,8 @@ void TCP::tcpTask(void* param) {
         self->runTcpTask();
     }
     Modbus::Debug::LOG_MSGF("tcpTask exiting for %s.", self->_isServer ? "server" : "client");
-    vTaskDelete(nullptr);
+    self->_tcpTaskParked = 1; // Last access to the object
+    vTaskSuspend(nullptr);    // Deleted by stop()
 }
 
 void TCP::runTcpTask() {
@@ -443,6 +473,7 @@ void TCP::runTcpTask() {
         }
 
         // Activity detected, process sockets
+        bool rxQueueFull = false;
         { // Scope for socketsMutex lock
             Lock guard(_socketsMutex);
             if (!_isRunning) break; // Check flag again after acquiring lock
@@ -459,6 +490,8 @@ void TCP::runTcpTask() {
                         // Set new socket to non-blocking
                         int flags = fcntl(new_socket, F_GETFL, 0);
                         if (flags != -1 && fcntl(new_socket, F_SETFL, flags | O_NONBLOCK) != -1) {
+                            enableKeepAlive(new_socket);
+                            _activeConnIds[_activeSocketCount] = newConnectionIdLocked();
                             _activeSockets[_activeSocketCount++] = new_socket;
                             char client_ip[INET_ADDRSTRLEN];
                             inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
@@ -504,8 +537,11 @@ void TCP::runTcpTask() {
  
                 if (peek > 0) {
                     no_data_read = false;  // We have data!
-                    if (xQueueSend(_rxQueue, &sock, portMAX_DELAY) != pdTRUE) {
-                        Modbus::Debug::LOG_MSGF("RX queue full. Dropping event for socket %d.", sock);
+                    // Never block while holding _socketsMutex (sendMsg() needs it). If the
+                    // queue is full, the event is dropped: the data stays in the socket and
+                    // select() will signal it again.
+                    if (xQueueSend(_rxQueue, &sock, 0) != pdTRUE) {
+                        rxQueueFull = true;
                     }
                 } else if (peek == 0) {
                     no_data_read = false;  // Connection closed = activity
@@ -536,6 +572,9 @@ void TCP::runTcpTask() {
             }
  
         } // Unlock socketsMutex
+
+        // Consumer is behind: let it drain the queue instead of spinning on unread data
+        if (rxQueueFull) vTaskDelay(1);
     } // while (_isRunning)
 }
 
@@ -550,6 +589,7 @@ void TCP::closeSocket(int sock) {
                 // Shift remaining sockets left
                 for (size_t j = i; j + 1 < _activeSocketCount; ++j) {
                     _activeSockets[j] = _activeSockets[j + 1];
+                    _activeConnIds[j] = _activeConnIds[j + 1];
                 }
                 --_activeSocketCount;
                 Modbus::Debug::LOG_MSGF("Removed socket %d from active server clients. Count: %d", sock, static_cast<int>(_activeSocketCount));
@@ -559,32 +599,47 @@ void TCP::closeSocket(int sock) {
     } else { // Client mode
         if (sock == _clientSocket) {
             _clientSocket = -1;
+            _clientConnId = 0;
             // Optionally, attempt reconnect or notify higher layer
             Modbus::Debug::LOG_MSGF("Client socket %d disconnected.", sock);
         }
     }
 }
 
-bool TCP::sendMsg(const uint8_t* payload, const size_t len, const int destSocket, int* actualSocket) {
-    if (!_isRunning) return false;
-
-    /* 1. Check reconnection needed */
-    bool needReconnect = false;
+/* @brief (Client mode) Make sure the client socket is connected, reconnecting if needed
+ * @param connId If not null, set to the ID of the connection (to bind a later sendMsg() to it)
+ * @return True if connected
+ * @note May block up to CONNECT_TIMEOUT_SEC while reconnecting (outside the socket mutex)
+ */
+bool TCP::ensureClientConnected(uint32_t* connId) {
+    if (!_isRunning || _isServer) return false;
     {
         Lock guard(_socketsMutex);
-        needReconnect = (!_isServer && destSocket == -1 && _clientSocket == -1);
+        if (_clientSocket != -1) {
+            if (connId) *connId = _clientConnId;
+            return true;
+        }
     }
 
-    /* 2. Reconnect OUTSIDE mutex if needed */
-    if (needReconnect) {
-        Modbus::Debug::LOG_MSGF("Client disconnected, attempting reconnect to %s:%u", _cfgIP, _cfgPort);
-        if (!setupClientSocket(_cfgIP, _cfgPort)) {
-            Modbus::Debug::LOG_MSGF("Auto-reconnection failed");
-            return false;
-        }
-        Modbus::Debug::LOG_MSGF("Auto-reconnection successful");
-        
-        if (!_isRunning) return false;
+    Modbus::Debug::LOG_MSGF("Client disconnected, attempting reconnect to %s:%u", _cfgIP, _cfgPort);
+    if (!setupClientSocket(_cfgIP, _cfgPort)) {
+        Modbus::Debug::LOG_MSGF("Auto-reconnection failed");
+        return false;
+    }
+    Modbus::Debug::LOG_MSGF("Auto-reconnection successful");
+    Lock guard(_socketsMutex);
+    if (_clientSocket == -1) return false; // Dropped right away
+    if (connId) *connId = _clientConnId;
+    return _isRunning;
+}
+
+bool TCP::sendMsg(const uint8_t* payload, const size_t len, const int destSocket, int* actualSocket,
+                  uint32_t connId, uint32_t* actualConnId) {
+    if (!_isRunning) return false;
+
+    /* 1-2. Reconnect if needed (client mode), unless bound to a given connection */
+    if (!_isServer && destSocket == -1 && connId == 0 && !ensureClientConnected()) {
+        return false;
     }
 
     /* 3. Send phase - re-lock and re-read socket */
@@ -608,6 +663,14 @@ bool TCP::sendMsg(const uint8_t* payload, const size_t len, const int destSocket
         Modbus::Debug::LOG_MSGF("sendMsg: No valid target socket");
         return false;
     }
+
+    // The socket must still hold the expected connection: its number may have been reused
+    const uint32_t targetConnId = connectionIdLocked(targetSocket);
+    if (targetConnId == 0 || (connId != 0 && connId != targetConnId)) {
+        Modbus::Debug::LOG_MSGF("sendMsg: connection on socket %d closed or replaced", targetSocket);
+        return false;
+    }
+    if (actualConnId) *actualConnId = targetConnId;
 
     if (len == 0 || len > MAX_MODBUS_FRAME_SIZE) {
         Modbus::Debug::LOG_MSGF("sendMsg: Invalid message length %d.", len);
@@ -683,8 +746,16 @@ bool TCP::isReady() {
     }
 }
 
-size_t TCP::readSocketData(int socketNum, uint8_t* dst, size_t maxLen) {
+size_t TCP::readSocketData(int socketNum, uint8_t* dst, size_t maxLen, uint32_t connId, uint32_t* actualConnId) {
     if (!dst || maxLen == 0) return SIZE_MAX;
+
+    // Check the connection under the mutex before reading: the data of another connection
+    // reusing the socket number must stay in its socket
+    Lock guard(_socketsMutex);
+    const uint32_t id = connectionIdLocked(socketNum);
+    if (id == 0) return SIZE_MAX; // Socket no longer tracked (closed)
+    if (connId != 0 && id != connId) return SIZE_MAX; // Not the expected connection anymore
+    if (actualConnId) *actualConnId = id;
 
     ssize_t r = ::recv(socketNum, dst, maxLen, 0); // Non-bloquant (socket configuré O_NONBLOCK)
 
@@ -703,6 +774,57 @@ size_t TCP::readSocketData(int socketNum, uint8_t* dst, size_t maxLen) {
 
     Modbus::Debug::LOG_MSGF("readSocketData: recv error on socket %d, errno %d", socketNum, errno);
     return SIZE_MAX;
+}
+
+/* @brief Close a connection on request of the upper layer (e.g. unrecoverable stream error)
+ * @param socketNum The socket to close
+ * @param connId The connection to close
+ * @note No-op if the socket no longer holds that connection (already closed by the HAL
+ *       task, its number possibly reused by a new connection)
+ */
+void TCP::closeConnection(int socketNum, uint32_t connId) {
+    Lock guard(_socketsMutex);
+    if (connId != 0 && connectionIdLocked(socketNum) == connId) closeSocket(socketNum);
+}
+
+/* @brief Add the RX queue to the consumer's QueueSet
+ * @return True on success
+ * @note FreeRTOS only allows it while the queue is empty. The TCP task (the only producer)
+ *       posts while holding _socketsMutex: under that mutex, the queue can be emptied & added
+ *       in one go. Dropping pending notifications is harmless: unread data is signaled again.
+ */
+bool TCP::attachRxQueue(QueueSetHandle_t set) {
+    Lock guard(_socketsMutex);
+    if (!_rxQueue || !set) return false;
+    xQueueReset(_rxQueue);
+    return xQueueAddToSet(_rxQueue, set) == pdPASS;
+}
+
+/* @brief Remove the RX queue from the consumer's QueueSet
+ * @return True on success
+ * @note Same as attachRxQueue(): under _socketsMutex the queue can be emptied & removed in one go
+ */
+bool TCP::detachRxQueue(QueueSetHandle_t set) {
+    Lock guard(_socketsMutex);
+    if (!_rxQueue || !set) return false;
+    xQueueReset(_rxQueue);
+    return xQueueRemoveFromSet(_rxQueue, set) == pdPASS;
+}
+
+/* @brief Get a new connection ID (never 0) */
+uint32_t TCP::newConnectionIdLocked() {
+    if (++_lastConnId == 0) ++_lastConnId;
+    return _lastConnId;
+}
+
+/* @brief Get the connection ID of a tracked socket, 0 if the socket isn't tracked */
+uint32_t TCP::connectionIdLocked(int sock) const {
+    if (sock < 0) return 0;
+    if (!_isServer) return (sock == _clientSocket) ? _clientConnId : 0;
+    for (size_t i = 0; i < _activeSocketCount; ++i) {
+        if (_activeSockets[i] == sock) return _activeConnIds[i];
+    }
+    return 0;
 }
 
 void TCP::cleanupDeadSockets() {
@@ -727,6 +849,7 @@ void TCP::cleanupDeadSockets() {
             Modbus::Debug::LOG_MSGF("Client socket %d is dead, closing", _clientSocket);
             ::close(_clientSocket);
             _clientSocket = -1;
+            _clientConnId = 0;
         }
     }
     

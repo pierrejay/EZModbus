@@ -57,8 +57,9 @@ namespace Modbus {
 
     /* @brief The type of a function code.
      * @note Representation of the function codes used in the Modbus protocol.
+     * @note Fixed underlying type: any byte received can be stored (e.g. an unsupported function code)
      */
-    enum FunctionCode {
+    enum FunctionCode : int {
         NULL_FC = 0x00,
         READ_COILS = 0x01,
         READ_DISCRETE_INPUTS = 0x02,
@@ -117,8 +118,9 @@ namespace Modbus {
 
     /* @brief The type of an exception code.
      * @note This is a representation of the exception codes used in the Modbus protocol.
+     * @note Fixed underlying type: any byte received can be stored before being validated
      */
-    enum ExceptionCode {
+    enum ExceptionCode : int {
         NULL_EXCEPTION = 0x00,
         ILLEGAL_FUNCTION = 0x01,
         ILLEGAL_DATA_ADDRESS = 0x02,
@@ -128,6 +130,8 @@ namespace Modbus {
         SLAVE_DEVICE_BUSY = 0x06,
         NEGATIVE_ACKNOWLEDGE = 0x07,
         MEMORY_PARITY_ERROR = 0x08,
+        GATEWAY_PATH_UNAVAILABLE = 0x0A,
+        GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND = 0x0B,
         NB_EC
     };
     static constexpr const char* toString(ExceptionCode ec) {
@@ -141,11 +145,15 @@ namespace Modbus {
             case SLAVE_DEVICE_BUSY: return "slave device busy";
             case NEGATIVE_ACKNOWLEDGE: return "negative acknowledge";
             case MEMORY_PARITY_ERROR: return "memory parity error";
+            case GATEWAY_PATH_UNAVAILABLE: return "gateway path unavailable";
+            case GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND: return "gateway target device failed to respond";
             default: return "invalid exception code";
         }
     }
     static constexpr bool isValid(const ExceptionCode ec) {
-        return ec >= NULL_EXCEPTION && ec < NB_EC;
+        // 0x09 is not defined by the Modbus specification
+        return (ec >= NULL_EXCEPTION && ec <= MEMORY_PARITY_ERROR)
+            || ec == GATEWAY_PATH_UNAVAILABLE || ec == GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND;
     }
 
 // ===================================================================================

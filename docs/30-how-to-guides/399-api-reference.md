@@ -18,7 +18,7 @@ namespace Modbus {
     };
 
     // Function codes
-    enum FunctionCode {
+    enum FunctionCode : int {
         NULL_FC = 0x00,
         READ_COILS                 = 0x01,
         READ_DISCRETE_INPUTS       = 0x02,
@@ -32,7 +32,7 @@ namespace Modbus {
     };
 
     // Exception codes
-    enum ExceptionCode {
+    enum ExceptionCode : int {
         NULL_EXCEPTION         = 0x00,
         ILLEGAL_FUNCTION       = 0x01,
         ILLEGAL_DATA_ADDRESS   = 0x02,
@@ -42,6 +42,8 @@ namespace Modbus {
         SLAVE_DEVICE_BUSY      = 0x06,
         NEGATIVE_ACKNOWLEDGE   = 0x07,
         MEMORY_PARITY_ERROR    = 0x08,
+        GATEWAY_PATH_UNAVAILABLE                = 0x0A,
+        GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND = 0x0B,
         NB_EC
     };
 
@@ -234,12 +236,18 @@ namespace ModbusInterface {
         virtual ~IInterface() = default;
 
         virtual Result begin() = 0;
+        // Calls txCallback exactly once per call, whatever the result
         virtual Result sendFrame(const Modbus::Frame& frame,
                                  TxResultCallback txCallback = nullptr,
                                  void* ctx = nullptr) = 0;
         virtual bool isReady() = 0;
+        // Short & non-blocking, never calls the application back
+        virtual void abortCurrentTransaction();
+        // Waits until no TX callback with this context is pending or running
+        virtual void waitTxCallbackDone(void* ctx);
         Modbus::Role getRole() const;
         Result setRcvCallback(RcvCallbackFn fn, void* ctx = nullptr);
+        void removeRcvCallbacks(void* ctx);    // Waits for a callback being called
     };
 }
 ```
@@ -479,7 +487,8 @@ namespace Modbus {
         };
 
         Bridge(ModbusInterface::IInterface& interface1,
-               ModbusInterface::IInterface& interface2);
+               ModbusInterface::IInterface& interface2,
+               uint32_t timeoutMs = DEFAULT_TIMEOUT_MS); // 1000 ms by default
 
         Result begin();
     };

@@ -71,4 +71,19 @@ ModbusInterface::TCP tcpIface(tcpServer, Modbus::SERVER);
 
 ## Timeout management
 
-The Bridge acts as a transparent proxy. The primary timeout management must be handled by the external Modbus client (PLC, SCADA, etc.) that connects to the bridge. However, for TCP interfaces, there is a safety timeout of 5 seconds (`TCP_TRANSACTION_SAFETY_TIMEOUT_MS`) that will abort stuck transactions to prevent resource exhaustion. For RTU interfaces, there are no transaction timeouts - only the inter-frame silence detection (3.5 character times) is enforced between messages.
+The Bridge answers on behalf of the device behind it when that device can't, as a Modbus gateway should:
+
+* `GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND` (0x0B) if the device doesn't answer within the bridge timeout (1 second by default)
+* `GATEWAY_PATH_UNAVAILABLE` (0x0A) if the request can't be forwarded at all (e.g. Unit ID above 247 towards RTU)
+
+The timeout can be set when creating the bridge (or globally with `EZMODBUS_BRIDGE_TIMEOUT_MS`):
+
+```cpp
+Modbus::Bridge bridge(rtuIface, tcpIface, 500); // 500 ms timeout
+```
+
+!!! note
+    Keep the bridge timeout above the response time of the slowest device, and below the timeout of the clients connecting to the bridge. Over RTU, the protocol has no transaction ID: a response is matched to the pending request by slave ID & function code only. A response arriving after its timeout is dropped if no request is pending, but taken as the answer to a pending request to the same device & function code.
+
+!!! note
+    Like any application, destroy the bridge before its interfaces (see [Creating & destroying objects at runtime](../20-core-concepts/200-library-overview.md#creating-destroying-objects-at-runtime)).

@@ -55,7 +55,18 @@ Server::Server(std::initializer_list<ModbusInterface::IInterface*> interfaces, I
 }
 
 Server::~Server() {
+    detachInterfaces(); // The interfaces must not call this object anymore
     _isInitialized = false;
+}
+
+/* @brief Remove the server's receive callbacks from its interfaces
+ * @note Also called when begin() fails: no interface calls a server that isn't initialized,
+ *       and a retry registers each callback once
+ */
+void Server::detachInterfaces() {
+    for (size_t i = 0; i < _interfaceCount; i++) {
+        if (_interfaces[i]) _interfaces[i]->removeRcvCallbacks(&_rcvCbContexts[i]);
+    }
 }
 
 /* @brief Initialize the server
@@ -74,12 +85,13 @@ Server::Result Server::begin() {
     // Initialize all interfaces with proper context routing
     for (size_t i = 0; i < _interfaceCount; i++) {
         if (_interfaces[i]->getRole() != Modbus::SERVER) {
+            detachInterfaces();
             return Error(Server::ERR_INIT_FAILED, "interface must be SERVER");
         }
 
         if (_interfaces[i]->begin() != ModbusInterface::IInterface::SUCCESS) {
-            // No cleanup needed - user can initialize interfaces manually
-            // and retry server.begin() if desired
+            // The user can initialize interfaces manually and retry server.begin() if desired
+            detachInterfaces();
             return Error(Server::ERR_INIT_FAILED, "interface init failed");
         }
 
@@ -106,6 +118,7 @@ Server::Result Server::begin() {
 
         auto setRcvCbRes = _interfaces[i]->setRcvCallback(rcvCb, &_rcvCbContexts[i]);
         if (setRcvCbRes != ModbusInterface::IInterface::SUCCESS) {
+            detachInterfaces();
             return Error(Server::ERR_INIT_FAILED, "cannot set receive callback on interface");
         }
     }
@@ -117,6 +130,7 @@ Server::Result Server::begin() {
     for (auto type : {Modbus::COIL, Modbus::DISCRETE_INPUT, 
                      Modbus::INPUT_REGISTER, Modbus::HOLDING_REGISTER}) {
         if (!validateNoOverlapsInStore(type)) {
+            detachInterfaces();
             return Error(Server::ERR_WORD_OVERLAP, "overlapping words detected after sorting");
         }
     }
@@ -224,6 +238,18 @@ Server::Result Server::handleRequest(const Modbus::Frame& request,
                 finalRes = Error(Server::ERR_RCV_ILLEGAL_FUNCTION, "invalid function code");
                 if (!isBroadcast) {
                     Modbus::makeException(request, response, Modbus::ILLEGAL_FUNCTION);
+                    shouldReply = true;
+                }
+                break;
+            }
+
+            // Send the exception set by the interface for a request it couldn't decode
+            if (request.exceptionCode != Modbus::NULL_EXCEPTION) {
+                finalRes = Error(request.exceptionCode == Modbus::ILLEGAL_FUNCTION
+                                 ? Server::ERR_RCV_ILLEGAL_FUNCTION : Server::ERR_RCV_ILLEGAL_DATA_VALUE,
+                                 "malformed request");
+                if (!isBroadcast) {
+                    Modbus::makeException(request, response, request.exceptionCode);
                     shouldReply = true;
                 }
                 break;
@@ -798,11 +824,15 @@ bool Server::validateNoOverlapsInStore(Modbus::RegisterType type) {
     size_t count = _wordStore.size(type);
     if (count <= 1) return true;  // No overlaps possible with 0 or 1 words
     
-    // Get first word to start iteration
+    // Sorted words: an overlap always shows between consecutive words. findNext() skips the other
+    // words with the same start address, which overlap by definition: they're found by counting.
+    size_t visited = 0;
     Word* prevWord = nullptr;
-    Word* currentWord = _wordStore.findNext(type, 0);  // Find first word
-    
+    Word* currentWord = _wordStore.findExact(type, 0);  // findNext() searches strictly after
+    if (currentWord == nullptr) currentWord = _wordStore.findNext(type, 0);
+
     while (currentWord != nullptr) {
+        visited++;
         if (prevWord != nullptr) {
             // Check if previous word overlaps with current word
             uint32_t prevEnd = prevWord->startAddr + prevWord->nbRegs;
@@ -816,6 +846,10 @@ bool Server::validateNoOverlapsInStore(Modbus::RegisterType type) {
         
         prevWord = currentWord;
         currentWord = _wordStore.findNext(type, currentWord->startAddr);
+    }
+    if (visited != count) {
+        Modbus::Debug::LOG_MSG("Overlap detected: words with the same start address");
+        return false;
     }
     return true;
 }

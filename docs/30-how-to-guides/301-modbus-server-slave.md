@@ -514,6 +514,17 @@ The way for the Server to handle Modbus exceptions for read/write handlers depen
     * For multiple read requests, any failing read handler execution (returning a non-null `Modbus::ExceptionCode`) will trigger the exception being returned to the client
     * For multiple write requests, the Modbus specification requires **atomic operations**. In this case, **all handlers will be called one after the other**, and if any (or several) of those handlers fail with a non-null `Modbus::ExceptionCode`, the client/master will get no value but the first triggered exception. It is the responsability of the client/master to read back registers, if required, to check which of the writes were successful or not.
 
+#### Malformed requests
+
+As per the Modbus specification, a request received without communication error but that can't be decoded is answered with an exception (unless it's a broadcast, or not addressed to the server):
+
+* `ILLEGAL_FUNCTION` for an unsupported function code
+* `ILLEGAL_DATA_VALUE` for an inconsistent request (length, byte count, quantity out of range, invalid coil value...)
+
+Frames with a communication error (bad CRC, invalid MBAP header) are silently dropped.
+
+If a response can't be encoded (e.g. inconsistent data returned by the application), `SLAVE_DEVICE_FAILURE` is answered instead, so that the request never stays unanswered.
+
 ## Unit ID for Modbus TCP
 
 Modbus TCP devices are normally not addressed using the traditional `slaveId` field, but by their port and IP address.\
@@ -521,7 +532,7 @@ A `Unit ID` field exists in the Modbus TCP protocol, and is used to relay Modbus
 
 To make it work correctly, TCP manages the `slaveId` field as follows:
 
-* The TCP codec does not check the `slaveId` field in either direction, so it can be set to any value (even up to 255 i.e. above the Modbus RTU limit of 247)
+* The TCP codec accepts any Unit ID from 1 to 255 in either direction (i.e. above the Modbus RTU limit of 247), 0 being a broadcast
 * When used with a TCP interface, the server will accept any Unit ID value (with RTU, it will discard requests that do not match its own `slaveId` except for broadcast requests)
 * Broadcast requests (`slaveId` 0) are still handled correctly (response is dropped, request is completed right after handling the frame to the application layer)
 

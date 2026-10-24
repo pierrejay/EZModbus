@@ -36,7 +36,7 @@ public:
     // CONSTANTS
     // ===================================================================================
 
-    static constexpr uint32_t RX_ASSEMBLY_TIMEOUT_MS = 50;
+    static constexpr uint32_t RX_ASSEMBLY_TIMEOUT_MS = 250; // Covers peers sending header & PDU separately (Nagle + delayed ACK)
     static constexpr uint32_t RXTX_QUEUE_CHECK_TIMEOUT_MS = 100; // Added for task management
     // Safety timeout - much longer than client timeout for emergency cleanup
     static constexpr uint32_t TCP_TRANSACTION_SAFETY_TIMEOUT_MS = (uint32_t)EZMODBUS_TCP_TXN_SAFETY_TIMEOUT;
@@ -53,10 +53,11 @@ public:
         volatile bool active = false;
         uint32_t startMs = 0;
         int socketNum = -1;
+        uint32_t connId = 0; // HAL connection ID: the socket number alone may be reused by a new connection
         uint16_t tid = 0;
 
-        void set(int socketNum, uint16_t tid) { active=true; startMs=TIME_MS(); this->socketNum=socketNum; this->tid=tid; }
-        void clear() { socketNum=-1; startMs=0; tid=0; active=false; }
+        void set(int socketNum, uint32_t connId, uint16_t tid) { active=true; startMs=TIME_MS(); this->socketNum=socketNum; this->connId=connId; this->tid=tid; }
+        void clear() { socketNum=-1; connId=0; startMs=0; tid=0; active=false; }
     };
 
     /* @brief Stores the current transmission data context
@@ -69,6 +70,8 @@ public:
         bool isBroadcast = false;
         TxResultCallback txCallback = nullptr;
         void* ctx = nullptr;
+        uint32_t abortCount = 0; // Value of _abortCount when the frame was queued
+        uint32_t connId = 0;     // Server: connection of the transaction being answered
 
         void set(uint16_t tid, int socketNum, bool isBroadcast = false, TxResultCallback txCallback = nullptr, void* ctx = nullptr) { 
             this->tid = tid; 
@@ -77,7 +80,15 @@ public:
             this->txCallback = txCallback;
             this->ctx = ctx;
         }
-        void clear() { tid=0; destSock=-1; isBroadcast=false; txCallback=nullptr; ctx=nullptr; }
+        void clear() { 
+            tid=0;
+            destSock=-1;
+            isBroadcast=false;
+            txCallback=nullptr;
+            ctx=nullptr;
+            abortCount=0; 
+            connId=0;
+        }
     };
 
     // ===================================================================================
@@ -91,6 +102,7 @@ public:
     Result sendFrame(const Modbus::Frame &frame, TxResultCallback txCallback, void* ctx) override;
     bool isReady() override;
     void abortCurrentTransaction() override;
+    void waitTxCallbackDone(void* ctx) override;
     TaskHandle_t getRxTxTaskHandle();
 
 private:
@@ -109,9 +121,12 @@ private:
     ByteBuffer _txBuffer; // Linked to _txBuf
     TxCtx _txCtx; // Stores the current TX data context
     Mutex _txMutex; // Protects access to _txBuffer & _txCtx
+    Mutex _controlMutex; // Fences abortCurrentTransaction() against destruction (held for a few us only)
 
     // Transaction management
     TransactionCtx _currentTransaction; // IMPORTANT: must ONLY be written from rxTxTask context!
+    uint16_t _lastOutgoingTid = 0; // Client TID counter, independent from _currentTransaction (written under _txMutex)
+    std::atomic<uint32_t> _abortCount{0}; // Incremented by abortCurrentTransaction(), checked before sending
 
     // Data processing
     // _rxEventQueue: receives RX events from HAL (only the handle, belongs to HAL layer)
@@ -127,6 +142,9 @@ private:
     QueueHandle_t _txnControlQueue = nullptr;
     // _eventQueueSet: Combines TX event queue + HAL event queue + Txn control queue
     QueueSetHandle_t _eventQueueSet = nullptr;
+    bool _rxQueueInSet = false;      // Set membership, for cleanup
+    bool _txQueueInSet = false;
+    bool _controlQueueInSet = false;
 
     // ===================================================================================
     // PRIVATE METHODS
@@ -137,16 +155,16 @@ private:
     void killRxTxTask();
     
     // RX frame processing
-    Result processReceivedFrame(const ByteBuffer& frameBytes, int socketNum);
-    Result handleDecodedFrame(const Modbus::Frame& frame, int socketNum, uint16_t transactionId);
-    Result fetchSocketData(int socketNum, ByteBuffer& rcvBuf, uint16_t& rcvTid);
+    Result processReceivedFrame(const ByteBuffer& frameBytes, int socketNum, uint32_t connId);
+    Result handleDecodedFrame(const Modbus::Frame& frame, int socketNum, uint32_t connId, uint16_t transactionId);
+    Result fetchSocketData(int socketNum, ByteBuffer& rcvBuf, uint16_t& rcvTid, uint32_t& connId);
 
     // TX frame processing
     Result handleTxRequest();
 
     // Transaction management
     uint16_t getNextOutgoingTransactionId();
-    bool beginTransaction(int socketNum, uint16_t transactionId);
+    bool beginTransaction(int socketNum, uint32_t connId, uint16_t transactionId);
     void endTransaction();
 
     // ===================================================================================
@@ -157,6 +175,7 @@ private:
     StaticTask_t _rxTxTaskBuffer;
     StackType_t _rxTxTaskStack[RXTX_TASK_STACK_SIZE];
     TaskHandle_t _rxTxTaskHandle;
+    std::atomic<uint32_t> _rxTxTaskParked{0}; // Set by the task once it no longer uses this object (see killRxTxTask())
 
 };
 

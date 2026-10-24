@@ -1914,6 +1914,126 @@ void test_runtime_set_slave_id() {
     TEST_ASSERT_EQUAL(1, server.getSlaveId());
 }
 
+// ===================================================================================
+// MALFORMED REQUESTS
+// A request received without communication error (valid CRC) but that can't be handled
+// must be answered with an exception (Modbus spec), only if addressed to us and not a
+// broadcast. They used to be dropped silently.
+// ===================================================================================
+
+static uint16_t rtuCrc(const uint8_t* data, size_t len) {
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int b = 0; b < 8; b++) crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : (crc >> 1);
+    }
+    return crc;
+}
+
+struct MalformedRtuCase {
+    const char* name;
+    uint8_t slaveId;
+    uint8_t pdu[12];
+    uint8_t pduLen;
+    uint8_t expectedFc;  // 0 = no response expected
+    uint8_t expectedEc;
+};
+
+static const MalformedRtuCase MALFORMED_RTU_CASES[] = {
+    { "unsupported FC 0x2B",        1, {0x2B, 0x0E, 0x01, 0x00}, 4,                          0xAB, 0x01 },
+    { "request FC with bit 7 set",  1, {0x83, 0x00, 0x00, 0x00, 0x01}, 5,                    0x83, 0x01 },
+    { "request FC 0x83, 2-byte PDU", 1, {0x83, 0x00}, 2,                                   0x83, 0x01 },
+    { "FC03 quantity 126",          1, {0x03, 0x00, 0x00, 0x00, 0x7E}, 5,                    0x83, 0x03 },
+    { "FC05 value not 0/FF00",      1, {0x05, 0x00, 0x00, 0x12, 0x34}, 5,                    0x85, 0x03 },
+    { "FC16 byte count mismatch",   1, {0x10, 0x00, 0x00, 0x00, 0x02, 0x03, 0x00, 0x01, 0x00}, 9, 0x90, 0x03 },
+    { "other slave, unsupported FC", 7, {0x2B, 0x0E, 0x01, 0x00}, 4,                         0, 0 }, // No server with ID 7 (gap test server uses ID 2)
+    { "broadcast, FC16 malformed",  0, {0x10, 0x00, 0x00, 0x00, 0x02, 0x03, 0x00, 0x01, 0x00}, 9, 0, 0 },
+};
+
+void test_malformed_requests_exceptions() {
+    Modbus::Logger::logln("\nTEST_MALFORMED_REQUESTS_EXCEPTIONS");
+
+    for (const auto& c : MALFORMED_RTU_CASES) {
+        uint8_t raw[1 + sizeof(c.pdu) + 2];
+        raw[0] = c.slaveId;
+        memcpy(raw + 1, c.pdu, c.pduLen);
+        uint16_t crc = rtuCrc(raw, 1 + c.pduLen);
+        raw[1 + c.pduLen] = crc & 0xFF;
+        raw[2 + c.pduLen] = crc >> 8;
+        agent.clear();
+        Modbus::ByteBuffer frame(static_cast<const uint8_t*>(raw), 3 + c.pduLen);
+        agent.send(frame);
+
+        Bytes resp;
+        uint32_t t0 = millis();
+        while (millis() - t0 < (c.expectedFc ? 1000u : 300u)) {
+            agent.poll();
+            if (agent.hasData()) { resp = agent.fetch(); break; }
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+        Modbus::Logger::logf("  %s: %u byte(s)\n", c.name, (unsigned)resp.size());
+
+        TEST_ASSERT_START();
+        if (c.expectedFc == 0) {
+            if (!resp.empty()) {
+                char msg[96];
+                int n = snprintf(msg, sizeof(msg), "%s: unexpected response", c.name);
+                for (size_t i = 0; i < resp.size() && n < (int)sizeof(msg) - 4; i++) n += snprintf(msg + n, sizeof(msg) - n, " %02X", resp[i]);
+                TEST_FAIL_MESSAGE(msg);
+            }
+        } else {
+            TEST_ASSERT_EQUAL_MESSAGE(5, resp.size(), c.name);
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(c.slaveId, resp[0], c.name);
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(c.expectedFc, resp[1], c.name);
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(c.expectedEc, resp[2], c.name);
+        }
+    }
+}
+
+// When the application's response can't be encoded, the slave must answer
+// SLAVE_DEVICE_FAILURE instead of staying silent. An extra callback on the interface
+// answers requests to slave ID 9 (no Server uses it) with an unencodable response.
+void test_unencodable_response_exception() {
+    Modbus::Logger::logln("\nTEST_UNENCODABLE_RESPONSE_EXCEPTION");
+
+    static bool callbackSet = false;
+    if (!callbackSet) {
+        rtu.setRcvCallback([](const Modbus::Frame& request, void* /*ctx*/) {
+            if (request.slaveId != 9) return;
+            Modbus::Frame response;
+            response.clear();
+            response.type = Modbus::RESPONSE;
+            response.fc = request.fc;
+            response.slaveId = request.slaveId;
+            response.regAddress = request.regAddress;
+            response.regCount = 0; // Invalid: can't be encoded
+            rtu.sendFrame(response, nullptr, nullptr);
+        }, nullptr);
+        callbackSet = true;
+    }
+
+    uint8_t raw[8] = { 9, 0x03, 0x00, 0x00, 0x00, 0x01 };
+    uint16_t crc = rtuCrc(raw, 6);
+    raw[6] = crc & 0xFF;
+    raw[7] = crc >> 8;
+    agent.clear();
+    agent.send(Modbus::ByteBuffer(static_cast<const uint8_t*>(raw), sizeof(raw)));
+
+    Bytes resp;
+    uint32_t t0 = millis();
+    while (millis() - t0 < 1000) {
+        agent.poll();
+        if (agent.hasData()) { resp = agent.fetch(); break; }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(5, resp.size(), "no exception for an unencodable response");
+    TEST_ASSERT_EQUAL_HEX8(9, resp[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x83, resp[1]);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(Modbus::SLAVE_DEVICE_FAILURE, resp[2], "unexpected exception code");
+}
+
 void setup() {
     // Debug port
     Serial.setTxBufferSize(2048);
@@ -2009,6 +2129,10 @@ void setup() {
     
     // Gap handling tests (rejectUndefined = false)
     RUN_TEST(test_gap_handling_comprehensive);
+
+    // Malformed requests
+    RUN_TEST(test_malformed_requests_exceptions);
+    RUN_TEST(test_unencodable_response_exception);
 
     // Runtime reconfiguration tests
     RUN_TEST(test_runtime_set_slave_id);

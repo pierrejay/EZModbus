@@ -82,6 +82,7 @@ public:
     Result setSilenceTimeBaud(); 
     Result sendFrame(const Modbus::Frame& frame, TxResultCallback txCallback, void* ctx) override;
     bool isReady() override;
+    void waitTxCallbackDone(void* ctx) override;
     TaskHandle_t getRxTxTaskHandle();
 
 private:
@@ -106,15 +107,16 @@ private:
     void* _txCallbackCtx; // Stores context for TX callback
     
     // Data processing
-    // _rxEventQueue: receives RX events from HAL (only the handle, belongs to HAL layer)
+    // _rxEventQueue: UART event queue (only the handle, belongs to HAL layer). The rxTxTask waits
+    // on it alone: its own events (TaskEvent) are posted into it as UART event types beyond the
+    // driver's range, so that no QueueSet is needed (a queue fed by the UART ISR can't be safely
+    // added to / removed from a set)
     QueueHandle_t _rxEventQueue = nullptr;
-    // _txRequestQueue: just a dummy signaling queue so that we can use xQueueSet 
-    // to wait for both RX and TX without wasting CPU
-    StaticQueue_t _txRequestQueueBuffer;
-    alignas(4) uint8_t _txRequestQueueStorage[1 * sizeof(void*)];
-    QueueHandle_t _txRequestQueue = nullptr; 
-    // _eventQueueSet: Combines RX event queue + UART event queue
-    QueueSetHandle_t _eventQueueSet = nullptr;
+    enum TaskEvent : int {
+        TASK_WAKE_UP = UART_EVENT_MAX,  // Wake up the task so that it checks _isInitialized
+        TASK_TX_REQUEST                 // A frame is ready in _txBuffer
+    };
+    bool postTaskEvent(TaskEvent taskEvent);
 
     // Miscellaneous
     RoundTripTimer _rtt{};
@@ -142,6 +144,7 @@ private:
     StaticTask_t _rxTxTaskBuffer;
     StackType_t _rxTxTaskStack[RXTX_TASK_STACK_SIZE];
     TaskHandle_t _rxTxTaskHandle = nullptr;
+    std::atomic<uint32_t> _rxTxTaskParked{0}; // Set by the task once it no longer uses this object (see killRxTxTask())
 
     // ===================================================================================
     // HELPER METHODS

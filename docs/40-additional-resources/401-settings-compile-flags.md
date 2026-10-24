@@ -69,6 +69,13 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
     * Timeout before aborting a request if no response received from server (ms)
     * Default: 1000
 
+### ModbusBridge.hpp
+
+* **`EZMODBUS_BRIDGE_TIMEOUT_MS`**
+    * Timeout before the bridge replies a `GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND` exception if the device behind it doesn't answer (ms)
+    * Can also be set per bridge in its constructor
+    * Default: 1000
+
 ### ModbusRTU.h
 
 * **`EZMODBUS_RTU_TASK_STACK_SIZE`**
@@ -117,6 +124,16 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
 * **`EZMODBUS_HAL_TCP_TASK_STACK_SIZE`**
     * Stack size of TCP driver task (bytes)
     * Default: 4096
+* **`EZMODBUS_HAL_TCP_KEEPALIVE_IDLE_S`**
+    * TCP keepalive: idle time before the first probe (s), 0 disables keepalive
+    * A dead peer (powered off, cable cut) is detected after `IDLE + INTVL × CNT` seconds without traffic, and its connection is closed
+    * Default: 10
+* **`EZMODBUS_HAL_TCP_KEEPALIVE_INTVL_S`**
+    * TCP keepalive: interval between probes (s)
+    * Default: 5
+* **`EZMODBUS_HAL_TCP_KEEPALIVE_CNT`**
+    * TCP keepalive: unanswered probes before the connection is closed (#)
+    * Default: 3
 
 ### ModbusDebug.hpp
 

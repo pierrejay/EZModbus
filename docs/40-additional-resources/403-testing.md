@@ -22,21 +22,29 @@ Each test category ensures key functionality works as expected:
 * CRC, MBAP, reg count, error handling
 * ~1500 frame tests
 
-**Server tests:**
+**RTU server tests:**
 
 * Word storage
-* Request & exception handling
+* Request & exception handling (malformed requests, unencodable responses)
 * ~40 test cases
 
-**Client tests:**
+**RTU client tests:**
 
 * Sync & async operations
-* Timeout handling, error recovery
-* ~40 test cases
+* Timeout handling, error recovery, interface lifecycle
+* ~60 test cases
+
+**TCP tests (client & server):**
+
+* Framing, connection identity (reused sockets), reconnection, keepalive
+* Interface & HAL lifecycle
+* ~60 test cases
 
 **Bridge tests**
 
-* Still quite basic, but checks bridge initialization & round-trip operation
+* Round-trip operation, gateway exceptions, lifecycle
+* Client request engine concurrency (timeouts, TX results, synchronous fallback)
+* ~20 test cases
 
 For more details on the testing methodology, see the `test/` directory of the lib.
 

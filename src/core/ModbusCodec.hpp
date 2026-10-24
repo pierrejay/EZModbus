@@ -116,11 +116,11 @@ namespace ModbusCodec {
         // All regular slave IDs are valid
         if (slaveId >= 1 && slaveId <= Modbus::MAX_SLAVE_ID) return true;
 
+        // Extended (TCP Unit IDs): 248-255 are valid too, 0 keeps the broadcast rules below
+        if (extendedSlaveId && slaveId != 0) return true;
+
         // For responses, only regular slaves IDs are valid
         if (type == Modbus::RESPONSE) return false;
-
-        // If extendedSlaveId is true, we won't check further
-        if (extendedSlaveId) return true;
 
         // For requests:
         switch ((Modbus::FunctionCode)fc) {
@@ -205,6 +205,16 @@ namespace ModbusCodec {
         if (!isValidMessageType(frame.type)) {
             return Error(ERR_INVALID_TYPE);
         }
+        // An exception response only carries the function code & the exception code:
+        // it may answer a function code we don't support (ILLEGAL_FUNCTION)
+        if (frame.type == Modbus::RESPONSE && frame.exceptionCode != Modbus::NULL_EXCEPTION) {
+            if ((uint8_t)frame.fc == 0 || ((uint8_t)frame.fc & 0x80)) return Error(ERR_INVALID_FC);
+            if (!isValidExceptionCode((uint8_t)frame.exceptionCode, frame.type)) return Error(ERR_INVALID_EXCEPTION);
+            if (!isValidSlaveId((uint8_t)frame.slaveId, (uint8_t)frame.fc, frame.type, extendedSlaveId)) {
+                return Error(ERR_INVALID_SLAVEID);
+            }
+            return Success();
+        }
         if (!isValidFunctionCode((uint8_t)frame.fc)) {
             return Error(ERR_INVALID_FC);
         }
@@ -222,6 +232,43 @@ namespace ModbusCodec {
         }
         // isValidRegisterCount() already checks data size
         return Success();
+    }
+
+    /* @brief Build the request to hand to the application when a request can't be decoded
+     * @note Per the Modbus spec, a request received without communication error but that
+     *       can't be handled is answered with an exception: ILLEGAL_FUNCTION for an unsupported
+     *       function code, ILLEGAL_DATA_VALUE for an inconsistent structure (length, quantity...)
+     * @note The application decides whether to answer (slave ID, broadcast)
+     * @param decodeResult The decode error
+     * @param slaveId The raw slave/unit ID of the request
+     * @param rawFc The raw function code of the request
+     * @param frame Filled with a request carrying the exception to answer
+     * @return true if the decode error calls for an exception, false otherwise (no answer)
+     */
+    inline bool makeRejectedRequest(Result decodeResult, uint8_t slaveId, uint8_t rawFc, Modbus::Frame& frame) {
+        Modbus::ExceptionCode ec;
+        switch (decodeResult) {
+            case ERR_INVALID_FC:
+            case ERR_INVALID_EXCEPTION:
+                ec = Modbus::ILLEGAL_FUNCTION;
+                break;
+            case ERR_INVALID_LEN:
+            case ERR_INVALID_REG_COUNT:
+            case ERR_INVALID_BYTE_COUNT:
+            case ERR_INVALID_DATA:
+                ec = Modbus::ILLEGAL_DATA_VALUE;
+                break;
+            default:
+                return false; // e.g. CRC error, invalid slave ID: never answered
+        }
+        if (rawFc & 0x80) ec = Modbus::ILLEGAL_FUNCTION; // Function codes 0x80+ don't exist in requests
+
+        frame.clear();
+        frame.type = Modbus::REQUEST;
+        frame.fc = (Modbus::FunctionCode)(rawFc & 0x7F);
+        frame.slaveId = slaveId;
+        frame.exceptionCode = ec;
+        return true;
     }
 
 /* @brief The Modbus PDU codec.
@@ -249,16 +296,25 @@ class PDU {
         pdu.fc = (Modbus::FunctionCode)bytes[0];
         pdu.exceptionCode = Modbus::NULL_EXCEPTION;
         
-        // Flip FC bit 7 if exception code is not NULL
+        // FC bit 7 flags an exception response. It may answer a function code we don't support
+        // (ILLEGAL_FUNCTION), so any non-zero function code is accepted there
         bool isException = ((uint8_t)pdu.fc & 0x80) != 0;
-        if (isException) pdu.fc = (Modbus::FunctionCode)((uint8_t)pdu.fc & 0x7F);
-        if (!isValidFunctionCode(pdu.fc)) return HandleError(pdu, ERR_INVALID_FC);
+        if (isException) {
+            if (type == Modbus::REQUEST) return HandleError(pdu, ERR_INVALID_FC);
+            pdu.fc = (Modbus::FunctionCode)((uint8_t)pdu.fc & 0x7F);
+            if (pdu.fc == Modbus::NULL_FC) return HandleError(pdu, ERR_INVALID_FC);
+        } else if (!isValidFunctionCode(pdu.fc)) {
+            return HandleError(pdu, ERR_INVALID_FC);
+        }
 
         // Validate exception code
         if (isException) {
             if (bytes.size() != 2) return HandleError(pdu, ERR_INVALID_LEN);
             uint8_t ec = bytes.data()[1];
-            if (!isValidExceptionCode(ec, type)) return HandleError(pdu, ERR_INVALID_EXCEPTION);
+            // NULL_EXCEPTION is only valid in normal frames: here it would turn into a success
+            if (ec == Modbus::NULL_EXCEPTION || !isValidExceptionCode(ec, type)) {
+                return HandleError(pdu, ERR_INVALID_EXCEPTION);
+            }
             pdu.exceptionCode = (Modbus::ExceptionCode)ec;
             return SUCCESS;
         }

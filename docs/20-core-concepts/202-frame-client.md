@@ -11,7 +11,7 @@ At the heart of EZModbus is the `Modbus::Frame` structure - a representation of 
 struct Frame {
     Modbus::MsgType type;           // REQUEST or RESPONSE
     Modbus::FunctionCode fc;        // Function code (READ_COILS, WRITE_REGISTER, etc.)
-    uint8_t slaveId;                // Device ID (1-247, or 0 for broadcast)
+    uint8_t slaveId;                // Device ID (1-247, up to 255 over TCP, or 0 for broadcast)
     uint16_t regAddress;            // Starting register address
     uint16_t regCount;              // Number of registers/coils to read/write
     std::array<uint16_t, 125> data; // Register values or coil states (packed)
