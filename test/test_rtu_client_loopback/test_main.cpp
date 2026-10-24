@@ -1704,6 +1704,26 @@ void test_rx_zero_byte_read_keeps_buffer() {
     TEST_ASSERT_EQUAL_UINT16(0x1234, resp.data[0]);
 }
 
+// Regression: setTimeoutMicroseconds() cast the symbol count to uint8_t before saturating it: a
+// long timeout wrapped around to a short one (264 symbols -> 8 instead of the maximum). The applied
+// threshold is read back from the frame-gap backstop, which includes it.
+void test_uart_long_timeout_saturates() {
+    const uint64_t usPerSymbol = (11ULL * 1000000ULL) / ezm_uart.getBaudrate();
+    const uint64_t originalGapUs = ezm_uart.getRxFrameGapTimeoutUs();
+    esp_err_t baseErr = ezm_uart.setTimeoutThreshold(1);
+    const uint64_t baseGapUs = ezm_uart.getRxFrameGapTimeoutUs(); // Threshold of 1 symbol
+    esp_err_t longErr = ezm_uart.setTimeoutMicroseconds(264 * usPerSymbol);
+    const uint64_t appliedSymbols = (ezm_uart.getRxFrameGapTimeoutUs() - baseGapUs) / usPerSymbol + 1;
+    // Restore the interface's threshold
+    ezm_uart.setTimeoutThreshold((originalGapUs - baseGapUs) / usPerSymbol + 1);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(ESP_OK, baseErr);
+    TEST_ASSERT_EQUAL(ESP_OK, longErr);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(ModbusHAL::UART::MAX_TOUT_THRESH - 1, appliedSymbols, "long timeout not saturated");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(originalGapUs, ezm_uart.getRxFrameGapTimeoutUs(), "threshold not restored");
+}
+
 // ===================================================================================
 // RUNTIME UART RECONFIGURATION TESTS
 // ===================================================================================
@@ -2031,6 +2051,7 @@ void setup() {
 
     // RX robustness tests
     RUN_TEST(test_rx_zero_byte_read_keeps_buffer);
+    RUN_TEST(test_uart_long_timeout_saturates);
 
     // Runtime reconfiguration tests
     RUN_TEST(test_runtime_uart_reconfig);

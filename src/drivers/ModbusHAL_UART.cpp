@@ -464,12 +464,11 @@ esp_err_t UART::setTimeoutMicroseconds(uint64_t timeout_us) {
     uint64_t usPerUartSymbol = (static_cast<uint64_t>(bitsPerUartSymbol) * 1000000ULL) / _baud_rate;
     if (usPerUartSymbol == 0) return ESP_ERR_INVALID_ARG;
 
-    // Calculate the threshold in number of UART symbols
-    uint8_t threshold = static_cast<uint8_t>((timeout_us + usPerUartSymbol - 1) / usPerUartSymbol);
-    
-    // Apply limits
-    if (threshold == 0) threshold = 1;
-    if (threshold >= MAX_TOUT_THRESH) threshold = MAX_TOUT_THRESH - 1;
+    // Calculate the threshold in number of UART symbols, limited before narrowing it
+    uint64_t symbols = (timeout_us + usPerUartSymbol - 1) / usPerUartSymbol;
+    if (symbols == 0) symbols = 1;
+    if (symbols >= MAX_TOUT_THRESH) symbols = MAX_TOUT_THRESH - 1;
+    uint8_t threshold = static_cast<uint8_t>(symbols);
 
     // Configure the timeout
     esp_err_t err = setTimeoutThreshold(threshold);
