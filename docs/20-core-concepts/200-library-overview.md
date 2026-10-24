@@ -92,4 +92,4 @@ Usually, the HAL, interface & application objects live for the whole program and
 
 * Each layer must outlive the ones using it: destroy the applications (Client, Server, Bridge) first, then the interface, then the HAL. Objects declared in this order in the same scope are destroyed in the reverse order automatically.
 * A destructor waits until no background task uses the object anymore (callback running, frame being sent): up to several seconds during a TCP reconnection. A request still pending is aborted (best effort).
-* Never destroy an object from one of its own callbacks.
+* Never destroy an object from one of its own callbacks, nor while another task may still use it (e.g. sending requests).

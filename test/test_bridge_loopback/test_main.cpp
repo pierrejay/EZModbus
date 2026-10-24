@@ -709,6 +709,298 @@ void test_bridge_answered_request_timer_spares_next() {
     TEST_ASSERT_TRUE_MESSAGE(bExpired, "request B didn't time out at its own deadline");
 }
 
+// Regression: when sendFrame() failed at once, the failure was applied twice: by the TX callback,
+// then by sendRequest() itself. If the first completion started request B (here from the
+// completion callback), the second one ended B with A's failure.
+struct FailFirstSendMaster : public DummyMaster {
+    bool failNext = true;
+    Result sendFrame(const Modbus::Frame& frame, TxResultCallback txCallback, void* ctx) override {
+        if (failNext) {
+            failNext = false;
+            if (txCallback) txCallback(ERR_SEND_FAILED, ctx);
+            return ERR_SEND_FAILED;
+        }
+        return DummyMaster::sendFrame(frame, txCallback, ctx);
+    }
+};
+static constexpr uint32_t LOCAL_CLIENT_LONG_TIMEOUT_MS = 500;
+static Modbus::Client* retryClient = nullptr;
+static Modbus::Frame retryResp;
+static volatile Modbus::Client::Result retryTracker = Modbus::Client::NODATA;
+static volatile Modbus::Client::Result retryStartRes = Modbus::Client::NODATA;
+
+void test_client_sync_send_failure_applied_once() {
+    static FailFirstSendMaster masterSide;
+    alignas(Modbus::Client) static uint8_t storage[sizeof(Modbus::Client)];
+    retryClient = new (storage) Modbus::Client(masterSide, LOCAL_CLIENT_LONG_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, retryClient->begin());
+
+    // Request A fails at once; its completion callback starts request B
+    auto onA = [](Modbus::Client::Result, const Modbus::Frame*, void*) {
+        retryStartRes = retryClient->sendRequest(LOCAL_BRIDGE_REQUEST, retryResp, (Modbus::Client::Result*)&retryTracker);
+    };
+    Modbus::Client::Result aRes = retryClient->sendRequest(LOCAL_BRIDGE_REQUEST, onA, nullptr);
+    Modbus::Client::Result bState = retryTracker; // B is sent & waits for its response
+    retryClient->~Client();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TX_FAILED, aRes, "request A should fail");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, retryStartRes, "request B not started");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::NODATA, bState, "request B ended by the failure of request A");
+}
+
+// Regression: a timeout shorter than a tick (here 0 ms) gave a timer period of 0 ticks, which
+// FreeRTOS rejects. It must be rounded up to 1 tick: the request times out.
+void test_client_zero_timeout() {
+    static DummyMaster masterSide;
+    alignas(Modbus::Client) static uint8_t storage[sizeof(Modbus::Client)];
+    auto* client = new (storage) Modbus::Client(masterSide, 0);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, client->begin());
+
+    Modbus::Frame resp;
+    Modbus::Client::Result tracker = Modbus::Client::NODATA;
+    volatile Modbus::Client::Result& result = tracker; // Written by the timer daemon
+    Modbus::Client::Result sendRes = client->sendRequest(LOCAL_BRIDGE_REQUEST, resp, &tracker);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (result == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < 100) vTaskDelay(1);
+    client->~Client();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, sendRes, "request not started");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, tracker, "request didn't time out");
+}
+
+// ===================================================================================
+// CLIENT REQUEST ENGINE: CONCURRENCY
+// Interleavings made deterministic by holding a task where the engine waits: the interface's
+// abort (called under the Client mutex), the timer daemon (blocked by a pending function, or
+// suspended while it waits for the Client mutex), or a synchronous caller (suspended likewise).
+// ===================================================================================
+
+struct ControlledMaster : public DummyMaster {
+    // When holdAbort is set, the first abort is held until abortRelease is given
+    StaticSemaphore_t abortReleaseBuf;
+    SemaphoreHandle_t abortRelease = xSemaphoreCreateBinaryStatic(&abortReleaseBuf);
+    volatile bool holdAbort = false;
+    volatile bool abortEntered = false;
+    volatile uint32_t aborts = 0;
+    void abortCurrentTransaction() override {
+        aborts++;
+        if (!holdAbort || abortEntered) return;
+        abortEntered = true;
+        xSemaphoreTake(abortRelease, portMAX_DELAY);
+    }
+
+    // When holdTx is set, the TX result is held until deliverTxResult()
+    volatile bool holdTx = false;
+    TxResultCallback heldTxCallback = nullptr;
+    void* heldTxCtx = nullptr;
+    Result sendFrame(const Modbus::Frame& frame, TxResultCallback txCallback, void* ctx) override {
+        if (!holdTx) return DummyMaster::sendFrame(frame, txCallback, ctx);
+        heldTxCallback = txCallback;
+        heldTxCtx = ctx;
+        return SUCCESS;
+    }
+    void deliverTxResult(Result result) {
+        TxResultCallback cb = heldTxCallback;
+        heldTxCallback = nullptr;
+        if (cb) cb(result, heldTxCtx);
+    }
+
+    void reset() {
+        holdAbort = false;
+        abortEntered = false;
+        aborts = 0;
+        holdTx = false;
+        heldTxCallback = nullptr;
+        xSemaphoreTake(abortRelease, 0);
+    }
+};
+
+// Timer daemon held by a pending function until released
+static StaticSemaphore_t daemonReleaseBuf;
+static SemaphoreHandle_t daemonRelease = xSemaphoreCreateBinaryStatic(&daemonReleaseBuf);
+static void holdTimerDaemon() {
+    xTimerPendFunctionCall([](void*, uint32_t) { xSemaphoreTake(daemonRelease, portMAX_DELAY); },
+                           nullptr, 0, portMAX_DELAY);
+    vTaskDelay(pdMS_TO_TICKS(5));
+}
+static void releaseTimerDaemon() {
+    xSemaphoreGive(daemonRelease);
+    vTaskDelay(pdMS_TO_TICKS(5));
+}
+
+// Synchronous request A sent from its own task
+struct SyncCaller {
+    Modbus::Client* client;
+    volatile bool done;
+    volatile Modbus::Client::Result result;
+};
+static StaticTask_t syncCallerTcb;
+static StackType_t syncCallerStack[4096];
+static TaskHandle_t startSyncCaller(SyncCaller& caller) {
+    return xTaskCreateStatic([](void* arg) {
+        auto* c = static_cast<SyncCaller*>(arg);
+        Modbus::Frame resp;
+        c->result = c->client->sendRequest(LOCAL_BRIDGE_REQUEST, resp);
+        c->done = true;
+        vTaskDelete(nullptr);
+    }, "syncCaller", sizeof(syncCallerStack) / sizeof(StackType_t), &caller, 2, syncCallerStack, &syncCallerTcb);
+}
+
+static bool waitFlag(volatile bool& flag, uint32_t maxMs) {
+    uint32_t t0 = Modbus::TIME_MS();
+    while (!flag && Modbus::TIME_MS() - t0 < maxMs) vTaskDelay(1);
+    return flag;
+}
+
+static ControlledMaster controlledMaster;
+alignas(Modbus::Client) static uint8_t concurrencyClientStorage[sizeof(Modbus::Client)];
+static constexpr uint32_t SYNC_WAIT_MS = LOCAL_CLIENT_TIMEOUT_MS + 100; // Timeout + fallback margin
+
+// A timeout callback of A already running (waiting for the Client mutex) while A ends and B
+// starts: it must not end B before B's own deadline. A ends by its synchronous fallback, held in
+// the interface's abort; the daemon, which reached A's timeout callback meanwhile, is suspended
+// while B starts, then resumed.
+void test_client_late_timeout_callback_spares_next() {
+    controlledMaster.reset();
+    controlledMaster.holdAbort = true;
+    auto* client = new (concurrencyClientStorage) Modbus::Client(controlledMaster, LOCAL_CLIENT_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, client->begin());
+    TaskHandle_t daemon = xTimerGetTimerDaemonTaskHandle();
+
+    holdTimerDaemon(); // A's timer can't fire: A's synchronous wait expires first
+    SyncCaller a = { client, false, Modbus::Client::NODATA };
+    startSyncCaller(a);
+    bool fallbackHeld = waitFlag(controlledMaster.abortEntered, SYNC_WAIT_MS + 200);
+    releaseTimerDaemon(); // A's timeout callback runs & waits for the Client mutex
+    vTaskDelay(pdMS_TO_TICKS(20));
+    vTaskSuspend(daemon);
+    xSemaphoreGive(controlledMaster.abortRelease); // A's fallback ends A
+    bool aDone = waitFlag(a.done, 500);
+
+    Modbus::Frame respB;
+    Modbus::Client::Result trackerB = Modbus::Client::NODATA;
+    volatile Modbus::Client::Result& resultB = trackerB; // Written by the timer daemon
+    uint32_t tB = Modbus::TIME_MS();
+    Modbus::Client::Result sendB = client->sendRequest(LOCAL_BRIDGE_REQUEST, respB, &trackerB);
+    vTaskResume(daemon); // A's timeout callback resumes while B is active
+    vTaskDelay(pdMS_TO_TICKS(5));
+    Modbus::Client::Result bAfterLateCallback = resultB;
+    while (resultB == Modbus::Client::NODATA && Modbus::TIME_MS() - tB < LOCAL_CLIENT_TIMEOUT_MS + 100) vTaskDelay(1);
+    uint32_t bElapsed = Modbus::TIME_MS() - tB;
+    client->~Client();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(fallbackHeld && aDone, "request A not ended by its synchronous fallback");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, a.result, "request A should time out");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, sendB, "request B not started");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::NODATA, bAfterLateCallback, "request B ended by A's late timeout callback");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, trackerB, "request B didn't time out");
+    TEST_ASSERT_TRUE_MESSAGE(bElapsed >= LOCAL_CLIENT_TIMEOUT_MS, "request B timed out early");
+}
+
+// The synchronous fallback of A, resumed after A ended and B started, must not end B. A ends by
+// its timeout callback, held in the interface's abort; A's caller, whose wait expired meanwhile,
+// is suspended while it waits for the Client mutex, B starts, then the caller is resumed.
+void test_client_sync_fallback_spares_next() {
+    controlledMaster.reset();
+    controlledMaster.holdAbort = true;
+    auto* client = new (concurrencyClientStorage) Modbus::Client(controlledMaster, LOCAL_CLIENT_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, client->begin());
+
+    SyncCaller a = { client, false, Modbus::Client::NODATA };
+    uint32_t tA = Modbus::TIME_MS();
+    TaskHandle_t caller = startSyncCaller(a);
+    bool timeoutHeld = waitFlag(controlledMaster.abortEntered, LOCAL_CLIENT_TIMEOUT_MS + 200);
+    while (Modbus::TIME_MS() - tA < SYNC_WAIT_MS + 30) vTaskDelay(1); // A's wait expired: its fallback waits
+    vTaskSuspend(caller);
+    xSemaphoreGive(controlledMaster.abortRelease); // A's timeout callback ends A
+    vTaskDelay(pdMS_TO_TICKS(5));
+
+    Modbus::Frame respB;
+    Modbus::Client::Result trackerB = Modbus::Client::NODATA;
+    volatile Modbus::Client::Result& resultB = trackerB; // Written by the timer daemon
+    Modbus::Client::Result sendB = client->sendRequest(LOCAL_BRIDGE_REQUEST, respB, &trackerB);
+    vTaskResume(caller); // A's fallback resumes while B is active
+    bool aDone = waitFlag(a.done, 500);
+    Modbus::Client::Result bAfterFallback = resultB;
+    uint32_t abortsAfterFallback = controlledMaster.aborts;
+    uint32_t t0 = Modbus::TIME_MS();
+    while (resultB == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < LOCAL_CLIENT_TIMEOUT_MS + 100) vTaskDelay(1);
+    client->~Client();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(timeoutHeld, "request A's timeout callback not reached");
+    TEST_ASSERT_TRUE_MESSAGE(aDone, "request A's caller didn't return");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, a.result, "request A should time out");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, sendB, "request B not started");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::NODATA, bAfterFallback, "request B ended by A's synchronous fallback");
+    TEST_ASSERT_EQUAL_MESSAGE(1, abortsAfterFallback, "request B aborted by A's synchronous fallback");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, trackerB, "request B didn't time out");
+}
+
+// A's TX result held beyond its timeout (e.g. interface reconnecting): B is refused until it
+// comes back, and the late result doesn't complete A a second time.
+void test_client_late_tx_result_gates_next() {
+    controlledMaster.reset();
+    controlledMaster.holdTx = true;
+    auto* client = new (concurrencyClientStorage) Modbus::Client(controlledMaster, LOCAL_CLIENT_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, client->begin());
+
+    Modbus::Frame respA;
+    Modbus::Client::Result trackerA = Modbus::Client::NODATA;
+    volatile Modbus::Client::Result& resultA = trackerA; // Written by the timer daemon
+    Modbus::Client::Result sendA = client->sendRequest(LOCAL_BRIDGE_REQUEST, respA, &trackerA);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (resultA == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < LOCAL_CLIENT_TIMEOUT_MS + 100) vTaskDelay(1);
+    Modbus::Client::Result aTimedOut = trackerA;
+
+    Modbus::Frame respB;
+    Modbus::Client::Result trackerB = Modbus::Client::NODATA;
+    Modbus::Client::Result sendBWhileHeld = client->sendRequest(LOCAL_BRIDGE_REQUEST, respB, &trackerB);
+    controlledMaster.holdTx = false;
+    controlledMaster.deliverTxResult(ModbusInterface::IInterface::ERR_SEND_FAILED); // Late TX result of A
+    Modbus::Client::Result aAfterLateResult = trackerA;
+    Modbus::Client::Result sendBAfter = client->sendRequest(LOCAL_BRIDGE_REQUEST, respB, &trackerB);
+    client->~Client();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, sendA, "request A not started");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, aTimedOut, "request A should time out");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_BUSY, sendBWhileHeld, "request B accepted before A's TX result");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, aAfterLateResult, "request A completed a second time");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, sendBAfter, "request B refused after A's TX result");
+}
+
+// The timer can't be re-armed (timer command queue full): the request isn't started, and nothing
+// is published nor delivered.
+static volatile uint32_t rearmFailureCallbacks = 0;
+
+void test_client_timer_rearm_failure() {
+    controlledMaster.reset();
+    auto* client = new (concurrencyClientStorage) Modbus::Client(controlledMaster, LOCAL_CLIENT_LONG_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, client->begin());
+
+    holdTimerDaemon();
+    uint32_t queued = 0;
+    while (xTimerPendFunctionCall([](void*, uint32_t) {}, nullptr, 0, 0) == pdPASS) queued++;
+    rearmFailureCallbacks = 0;
+    Modbus::Client::Result sendRes = client->sendRequest(LOCAL_BRIDGE_REQUEST,
+        [](Modbus::Client::Result, const Modbus::Frame*, void*) { rearmFailureCallbacks++; }, nullptr);
+    bool readyAfter = client->isReady();
+    releaseTimerDaemon();
+    vTaskDelay(pdMS_TO_TICKS(20));
+    uint32_t callbacks = rearmFailureCallbacks;
+    client->~Client();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(queued > 0, "timer command queue not filled");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, sendRes, "request started without its timer");
+    TEST_ASSERT_TRUE_MESSAGE(readyAfter, "client not ready after a failed start");
+    TEST_ASSERT_EQUAL_MESSAGE(0, callbacks, "failed start delivered a completion");
+}
+
 // Regression: if the timer command couldn't be queued, the request was forwarded without
 // any timeout. The bridge must answer instead (the requester can retry).
 void test_bridge_timer_command_failure() {
@@ -822,6 +1114,12 @@ void setup() {
     RUN_TEST(test_server_rejects_overlaps_at_zero_and_same_start);
     RUN_TEST(test_bridge_begin_registers_once);
     RUN_TEST(test_bridge_answered_request_timer_spares_next);
+    RUN_TEST(test_client_sync_send_failure_applied_once);
+    RUN_TEST(test_client_late_timeout_callback_spares_next);
+    RUN_TEST(test_client_sync_fallback_spares_next);
+    RUN_TEST(test_client_late_tx_result_gates_next);
+    RUN_TEST(test_client_timer_rearm_failure);
+    RUN_TEST(test_client_zero_timeout); // Last: crashed (assert) before the fix
     RUN_TEST(test_bridge_timer_command_failure);
     UNITY_END();
 }

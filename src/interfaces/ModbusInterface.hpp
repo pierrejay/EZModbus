@@ -116,7 +116,8 @@ namespace ModbusInterface {
         /* @brief TX result callback type
          * @param result The result of the TX operation
          * @param ctx Internal context pointer
-         * @note Called from rxTxTask context when TX operation completes
+         * @note Called from rxTxTask context when TX operation completes, or from the caller of
+         *       sendFrame() when it fails at once
          */
         using TxResultCallback = void (*)(Result result, void* ctx);
 
@@ -132,6 +133,8 @@ namespace ModbusInterface {
          * @param txCallback Callback to call when TX completes (optional)
          * @param ctx Internal context pointer passed to callback (optional)
          * @return The result of the operation
+         * @note Contract: each call invokes txCallback exactly once, whatever the result (before
+         *       returning when it fails at once, from the interface task otherwise)
          */
         virtual Result sendFrame(const Modbus::Frame& frame, 
                                  TxResultCallback txCallback = nullptr, void* ctx = nullptr) = 0;
@@ -144,6 +147,8 @@ namespace ModbusInterface {
         /* @brief Abort current transaction (cleanup hint from client)
          * @note Called when client times out to allow transport cleanup
          * @note Default implementation is no-op for stateless transports
+         * @note Contract: short & non-blocking, never calls the application back nor takes its
+         *       locks (the Client calls it under its own mutex)
          */
         virtual void abortCurrentTransaction() {};
 
