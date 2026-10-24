@@ -82,6 +82,7 @@ public:
     Result setSilenceTimeBaud(); 
     Result sendFrame(const Modbus::Frame& frame, TxResultCallback txCallback, void* ctx) override;
     bool isReady() override;
+    void waitTxCallbackDone(void* ctx) override;
     TaskHandle_t getRxTxTaskHandle();
 
 private:

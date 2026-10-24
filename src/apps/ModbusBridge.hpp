@@ -104,9 +104,13 @@ public:
      * @note The interfaces call the bridge from their tasks: destroy them first
      */
     ~Bridge() {
-        // The interfaces must not call this object anymore
+        // The interfaces must not call this object anymore: a request still held by the master
+        // interface is aborted (best effort), and its TX result waited for
         interface1.removeRcvCallbacks(this);
         interface2.removeRcvCallbacks(this);
+        if (_pendingActive && masterInterface) masterInterface->abortCurrentTransaction();
+        interface1.waitTxCallbackDone(this);
+        interface2.waitTxCallbackDone(this);
         if (!_timer) return;
         xTimerDelete(_timer, portMAX_DELAY);
         // Fence: runs in the timer daemon after the delete command, once no callback can run
@@ -195,8 +199,8 @@ private:
     ModbusInterface::IInterface& interface1;
     ModbusInterface::IInterface& interface2;
     // Aliases depending on their respective roles
-    ModbusInterface::IInterface* masterInterface;
-    ModbusInterface::IInterface* slaveInterface;
+    ModbusInterface::IInterface* masterInterface = nullptr;
+    ModbusInterface::IInterface* slaveInterface = nullptr;
 
     // Request forwarded to the master side, waiting for its response
     uint32_t _timeoutMs;

@@ -255,6 +255,22 @@ bool RTU::isReady() {
     return true;
 }
 
+/* @brief Wait until no TX result callback registered with a context is pending or running
+ * @param ctx The context passed to sendFrame()
+ * @note The TX slot holds the callback until it returned (see handleTxRequest())
+ * @note No wait from the rxTxTask itself (called from a callback)
+ */
+void RTU::waitTxCallbackDone(void* ctx) {
+    if (xTaskGetCurrentTaskHandle() == _rxTxTaskHandle) return;
+    while (true) {
+        {
+            Lock guard(_txMutex);
+            if (_txBuffer.size() == 0 || _txCallbackCtx != ctx) return;
+        }
+        vTaskDelay(1);
+    }
+}
+
 /* @brief Get the handle of the RX/TX task
  * @return The handle of the RX/TX task
  */
@@ -522,9 +538,12 @@ RTU::Result RTU::handleTxRequest() {
     }
 
     notifyTxResult(send_res);
-    _txResultCallback = nullptr; 
-    _txCallbackCtx = nullptr;
-    _txBuffer.clear(); // Safe because it's locked from sendFrame() call until we clear it here
+    {
+        Lock guard(_txMutex); // Read by waitTxCallbackDone()
+        _txResultCallback = nullptr;
+        _txCallbackCtx = nullptr;
+        _txBuffer.clear(); // Safe because it's locked from sendFrame() call until we clear it here
+    }
     return send_res;
 }
 

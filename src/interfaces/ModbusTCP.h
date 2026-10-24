@@ -102,6 +102,7 @@ public:
     Result sendFrame(const Modbus::Frame &frame, TxResultCallback txCallback, void* ctx) override;
     bool isReady() override;
     void abortCurrentTransaction() override;
+    void waitTxCallbackDone(void* ctx) override;
     TaskHandle_t getRxTxTaskHandle();
 
 private:

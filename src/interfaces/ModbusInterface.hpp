@@ -147,6 +147,12 @@ namespace ModbusInterface {
          */
         virtual void abortCurrentTransaction() {};
 
+        /* @brief Wait until no TX result callback registered with a context is pending or running
+         * @param ctx The context passed to sendFrame() (application destruction)
+         * @note Default implementation for interfaces calling TX callbacks from sendFrame() only
+         */
+        virtual void waitTxCallbackDone(void* ctx) {};
+
         /* @brief Get the role of the interface
          * @return The role of the interface
          */

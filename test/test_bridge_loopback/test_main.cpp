@@ -520,6 +520,7 @@ struct BlockingAbortMaster : public DummyMaster {
     SemaphoreHandle_t release = xSemaphoreCreateBinaryStatic(&releaseBuf);
     volatile bool entered = false;
     void abortCurrentTransaction() override {
+        if (entered) return; // Only the timeout callback's abort is held
         entered = true;
         xSemaphoreTake(release, portMAX_DELAY);
     }

@@ -439,8 +439,11 @@ Client::Client(ModbusInterface::IInterface& interface, uint32_t timeoutMs) :
 {}
 
 Client::~Client() {
-    // The interface & the timeout timer must not call this object anymore
+    // The interface & the timeout timer must not call this object anymore: a request still
+    // held by the interface is aborted (best effort), and its TX result waited for
     _interface.removeRcvCallbacks(this);
+    if (_pendingRequest.isActive()) _interface.abortCurrentTransaction();
+    _interface.waitTxCallbackDone(this);
     _pendingRequest.deleteTimer();
     // Cleanup any active pending request
     _pendingRequest.clear();

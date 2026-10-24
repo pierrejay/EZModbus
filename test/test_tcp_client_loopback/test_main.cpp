@@ -1651,6 +1651,88 @@ void test_client_no_late_write_after_reconnect() {
     Modbus::Logger::logln();
 }
 
+// Regression: a Client destroyed while the interface still held its request (e.g. reconnecting)
+// returned at once: the interface later called its TX result callback on the destroyed object,
+// and sent the request for nobody. The destructor must abort the request & wait until the
+// interface released it. Slow reconnection as above (filled backlog).
+alignas(Modbus::Client) static uint8_t destroyedClientStorage[sizeof(Modbus::Client)];
+
+struct TcpClientDestroyer {
+    Modbus::Client* client;
+    volatile bool done;
+    volatile bool busyAtReturn;
+};
+static StaticTask_t tcpClientDestroyerTcb;
+static StackType_t tcpClientDestroyerStack[4096];
+
+static void tcpClientDestroyerTask(void* arg) {
+    auto* destroyer = static_cast<TcpClientDestroyer*>(arg);
+    destroyer->client->~Client();
+    destroyer->busyAtReturn = !rawServerClientIfc.isReady();
+    destroyer->done = true;
+    vTaskDelete(nullptr);
+}
+
+void test_client_destroyed_while_interface_holds_request() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_CLIENT_DESTROYED_WHILE_INTERFACE_HOLDS_REQUEST");
+
+    beginRawServerClient();
+    TEST_ASSERT_FALSE_MESSAGE(rawServerClientHal.isClientConnected(), "client should start disconnected");
+    int listenSock = rawListen(RAW_SERVER_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0, "raw server listen failed");
+    int filler = rawConnect(RAW_SERVER_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(filler >= 0, "filler connect failed");
+
+    // The request waits in the interface while it reconnects (~3 s)
+    auto* client = new (destroyedClientStorage) Modbus::Client(rawServerClientIfc, RAW_SERVER_CLIENT_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, client->begin());
+    Modbus::Frame req = {
+        .type = Modbus::REQUEST,
+        .fc = Modbus::WRITE_REGISTER,
+        .slaveId = TEST_SLAVE_ID,
+        .regAddress = 0,
+        .regCount = 1,
+        .exceptionCode = Modbus::NULL_EXCEPTION
+    };
+    req.data[0] = 0x1234;
+    Modbus::Frame resp;
+    Modbus::Client::Result tracker = Modbus::Client::NODATA;
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, client->sendRequest(req, resp, &tracker));
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Destroy the client meanwhile, then let the reconnection complete
+    TcpClientDestroyer destroyer = { client, false, false };
+    xTaskCreateStatic(tcpClientDestroyerTask, "tcpClientDestroyer", sizeof(tcpClientDestroyerStack) / sizeof(StackType_t),
+                      &destroyer, 1, tcpClientDestroyerStack, &tcpClientDestroyerTcb);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    int fillerPeer = ::accept(listenSock, nullptr, nullptr);
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(listenSock, &rfds);
+    timeval tv = { .tv_sec = 5, .tv_usec = 0 };
+    int peer = (::select(listenSock + 1, &rfds, nullptr, nullptr, &tv) == 1) ? ::accept(listenSock, nullptr, nullptr) : -1;
+    if (peer >= 0) rawSetupPeer(peer);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (!destroyer.done && Modbus::TIME_MS() - t0 < 6000) vTaskDelay(pdMS_TO_TICKS(5));
+
+    // Nothing must be sent for the destroyed client
+    uint8_t buf[RAW_READ_HR_REQ_SIZE];
+    size_t got = (peer >= 0) ? rawRecvExact(peer, buf, sizeof(buf)) : 0;
+    ::close(fillerPeer);
+    ::close(filler);
+    closeRawServer(peer, listenSock);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(destroyer.done, "client destructor didn't return");
+    TEST_ASSERT_FALSE_MESSAGE(destroyer.busyAtReturn, "client destroyed while the interface still held its request");
+    TEST_ASSERT_TRUE_MESSAGE(peer >= 0, "client did not reconnect");
+    TEST_ASSERT_EQUAL_MESSAGE(0, got, "request of a destroyed client was sent");
+
+    Modbus::Logger::logln("TEST_CLIENT_DESTROYED_WHILE_INTERFACE_HOLDS_REQUEST - OK");
+    Modbus::Logger::logln();
+}
+
 // Regression: the interface released its TX slot before calling the TX result callback: in
 // between, another task could submit request B, and the result of A (e.g. A dropped after its
 // timeout, or a broadcast sent) was applied by the Client to B. The interface must stay busy
@@ -3447,6 +3529,7 @@ void setup() {
     RUN_TEST(test_late_response_not_matched_to_next_request);
     RUN_TEST(test_client_rx_coalesced_responses);
     RUN_TEST(test_client_no_late_write_after_reconnect);
+    RUN_TEST(test_client_destroyed_while_interface_holds_request);
     RUN_TEST(test_client_null_exception_response_rejected);
     RUN_TEST(test_interface_busy_until_tx_callback_returned);
     RUN_TEST(test_server_rx_fragmented_request);

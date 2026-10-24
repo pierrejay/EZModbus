@@ -260,6 +260,22 @@ void TCP::abortCurrentTransaction() {
     (void)xQueueSend(_txnControlQueue, &dummy, 0);
 }
 
+/* @brief Wait until no TX result callback registered with a context is pending or running
+ * @param ctx The context passed to sendFrame()
+ * @note The TX slot holds the callback until it returned (see handleTxRequest())
+ * @note No wait from the rxTxTask itself (called from a callback)
+ */
+void TCP::waitTxCallbackDone(void* ctx) {
+    if (xTaskGetCurrentTaskHandle() == _rxTxTaskHandle) return;
+    while (true) {
+        {
+            Lock guard(_txMutex);
+            if (_txBuffer.size() == 0 || _txCtx.ctx != ctx) return;
+        }
+        vTaskDelay(1);
+    }
+}
+
 /* @brief Get the handle of the poll task.
  * @return The handle of the poll task.
  */
