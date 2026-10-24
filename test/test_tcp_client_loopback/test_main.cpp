@@ -1076,10 +1076,10 @@ void test_timeout_client_interface() {
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result); // The send itself should succeed (request queued)
 
     // Wait a bit more than the default timeout
-    uint32_t startTime = TIME_MS();
+    uint32_t startTime = Modbus::TIME_MS();
     // client.getRequestTimeoutMs() would be better if available, using Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS as fallback
     uint32_t timeoutDuration = Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS;
-    while (TIME_MS() - startTime < timeoutDuration + 100) {
+    while (Modbus::TIME_MS() - startTime < timeoutDuration + 100) {
         vTaskDelay(pdMS_TO_TICKS(1));
         if (tracker == Modbus::Client::ERR_TIMEOUT) break;
         // client.poll(); // Client poll is now internal via its own task. User doesn't call it.
@@ -1144,8 +1144,8 @@ void test_timeout_client_interface() {
     TEST_ASSERT_START();
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result); // Send initiated
 
-    startTime = TIME_MS();
-    while (TIME_MS() - startTime < timeoutDuration + 100) {
+    startTime = Modbus::TIME_MS();
+    while (Modbus::TIME_MS() - startTime < timeoutDuration + 100) {
         vTaskDelay(pdMS_TO_TICKS(1));
         if (tracker == Modbus::Client::ERR_TIMEOUT) break;
     }
@@ -1195,9 +1195,9 @@ void test_timeout_server() {
     vTaskSuspend(serverTaskHandle);
     
     // Wait for client timeout
-    uint32_t startTime = TIME_MS();
+    uint32_t startTime = Modbus::TIME_MS();
     uint32_t timeoutDuration = Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS + 200; // Add margin
-    while (TIME_MS() - startTime < timeoutDuration) {
+    while (Modbus::TIME_MS() - startTime < timeoutDuration) {
         vTaskDelay(pdMS_TO_TICKS(5));
         if (tracker != Modbus::Client::NODATA) break;
     }
@@ -1464,8 +1464,8 @@ static void runLateResponseScenario(uint16_t port, ModbusHAL::TCP& hal, ModbusIn
     rawSetupPeer(peer);
 
     auto waitTracker = [](volatile Modbus::Client::Result& tracker, uint32_t maxMs) {
-        uint32_t t0 = TIME_MS();
-        while (tracker == Modbus::Client::NODATA && TIME_MS() - t0 < maxMs) vTaskDelay(pdMS_TO_TICKS(5));
+        uint32_t t0 = Modbus::TIME_MS();
+        while (tracker == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < maxMs) vTaskDelay(pdMS_TO_TICKS(5));
     };
 
     constexpr uint16_t VALUE_A = 0xAAAA;
@@ -1491,8 +1491,8 @@ static void runLateResponseScenario(uint16_t port, ModbusHAL::TCP& hal, ModbusIn
     TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, trackerA, "request A should time out");
 
     // Let the interface process the abort signal before sending B
-    uint32_t t0 = TIME_MS();
-    while (!ifc.isReady() && TIME_MS() - t0 < 200) vTaskDelay(pdMS_TO_TICKS(1));
+    uint32_t t0 = Modbus::TIME_MS();
+    while (!ifc.isReady() && Modbus::TIME_MS() - t0 < 200) vTaskDelay(pdMS_TO_TICKS(1));
 
     // 2) Request B on the same connection
     req.regAddress = 1;
@@ -1596,8 +1596,8 @@ void test_client_no_late_write_after_reconnect() {
     Modbus::Frame writeResp;
     Modbus::Client::Result tracker = Modbus::Client::NODATA;
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, lateWriteClient.sendRequest(writeReq, writeResp, &tracker));
-    uint32_t t0 = TIME_MS();
-    while (tracker == Modbus::Client::NODATA && TIME_MS() - t0 < LATE_WRITE_CLIENT_TIMEOUT_MS + 200) vTaskDelay(pdMS_TO_TICKS(5));
+    uint32_t t0 = Modbus::TIME_MS();
+    while (tracker == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < LATE_WRITE_CLIENT_TIMEOUT_MS + 200) vTaskDelay(pdMS_TO_TICKS(5));
     TEST_ASSERT_START();
     TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, tracker, "write should time out while reconnecting");
 
@@ -2004,8 +2004,8 @@ void test_hal_rx_notifications_never_block_send() {
 
     int serverSock = -1;
     TEST_ASSERT_EQUAL_MESSAGE(pdTRUE, xQueuePeek(rxQueue, &serverSock, pdMS_TO_TICKS(500)), "no RX event from HAL");
-    uint32_t t0 = TIME_MS();
-    while (uxQueueMessagesWaiting(rxQueue) < ModbusHAL::TCP::RX_QUEUE_SIZE && TIME_MS() - t0 < 500) {
+    uint32_t t0 = Modbus::TIME_MS();
+    while (uxQueueMessagesWaiting(rxQueue) < ModbusHAL::TCP::RX_QUEUE_SIZE && Modbus::TIME_MS() - t0 < 500) {
         vTaskDelay(pdMS_TO_TICKS(1));
     }
     TEST_ASSERT_EQUAL_MESSAGE(ModbusHAL::TCP::RX_QUEUE_SIZE, uxQueueMessagesWaiting(rxQueue), "RX queue should be full");
@@ -2017,8 +2017,8 @@ void test_hal_rx_notifications_never_block_send() {
     TaskHandle_t probeTask = xTaskCreateStatic(halSendProbeTask, "halSendProbe", sizeof(halSendProbeStack) / sizeof(StackType_t),
                                                &probe, tskIDLE_PRIORITY + 1, halSendProbeStack, &halSendProbeTcb);
     TEST_ASSERT_NOT_NULL(probeTask);
-    t0 = TIME_MS();
-    while (!probe.done && TIME_MS() - t0 < 500) vTaskDelay(pdMS_TO_TICKS(5));
+    t0 = Modbus::TIME_MS();
+    while (!probe.done && Modbus::TIME_MS() - t0 < 500) vTaskDelay(pdMS_TO_TICKS(5));
 
     TEST_ASSERT_START();
     TEST_ASSERT_TRUE_MESSAGE(probe.done, "sendMsg() blocked while the RX queue was full");
@@ -2251,8 +2251,8 @@ void test_interface_recreate_under_rx_traffic() {
 
     // Stop the sender (it acks by setting the flag back), then clean up
     detachStressRunning = false;
-    uint32_t t0 = TIME_MS();
-    while (!detachStressRunning && TIME_MS() - t0 < 500) vTaskDelay(pdMS_TO_TICKS(5));
+    uint32_t t0 = Modbus::TIME_MS();
+    while (!detachStressRunning && Modbus::TIME_MS() - t0 < 500) vTaskDelay(pdMS_TO_TICKS(5));
     vTaskDelete(sender);
     ::close(sock);
     halForLifecycleServer.stop();

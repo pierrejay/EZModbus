@@ -209,7 +209,7 @@ void myCallback(Modbus::Client::Result result, const Modbus::Frame* response, vo
         logModbusResult("Request %d (%s): OK with no response (RTT: %d ms)\n", 
                  ctx->requestId, 
                  ctx->description,
-                 TIME_MS() - ctx->timestamp);
+                 Modbus::TIME_MS() - ctx->timestamp);
         return;
     }
     // 3. Success path with response
@@ -220,7 +220,7 @@ void myCallback(Modbus::Client::Result result, const Modbus::Frame* response, vo
                  ctx->requestId, 
                  ctx->description,
                  Modbus::toString(ec),
-                 TIME_MS() - ctx->timestamp);
+                 Modbus::TIME_MS() - ctx->timestamp);
         return;
       // Response with data
     } else { 
@@ -229,7 +229,7 @@ void myCallback(Modbus::Client::Result result, const Modbus::Frame* response, vo
                  ctx->requestId, 
                  ctx->description,
                  value, 
-                 TIME_MS() - ctx->timestamp);
+                 Modbus::TIME_MS() - ctx->timestamp);
         return;
     } 
 }
@@ -240,7 +240,7 @@ Modbus::Frame request = { /* request details */ };
 
 RequestContext ctx = {
     .requestId = 1001,
-    .timestamp = TIME_MS(),
+    .timestamp = Modbus::TIME_MS(),
     .description = "Temperature sensor read"
 };
 

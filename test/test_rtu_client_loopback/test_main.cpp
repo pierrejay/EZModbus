@@ -1057,10 +1057,10 @@ void test_request_timeout() {
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result); // The send itself should succeed (request queued)
 
     // Wait a bit more than the default timeout
-    uint32_t startTime = TIME_MS();
+    uint32_t startTime = Modbus::TIME_MS();
     // client.getRequestTimeoutMs() would be better if available, using Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS as fallback
     uint32_t timeoutDuration = Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS;
-    while (TIME_MS() - startTime < timeoutDuration + 100) {
+    while (Modbus::TIME_MS() - startTime < timeoutDuration + 100) {
         vTaskDelay(pdMS_TO_TICKS(1));
         if (tracker == Modbus::Client::ERR_TIMEOUT) break;
         // client.poll(); // Client poll is now internal via its own task. User doesn't call it.
@@ -1119,8 +1119,8 @@ void test_request_timeout() {
     TEST_ASSERT_START();
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, result); // Send initiated
 
-    startTime = TIME_MS();
-    while (TIME_MS() - startTime < timeoutDuration + 100) {
+    startTime = Modbus::TIME_MS();
+    while (Modbus::TIME_MS() - startTime < timeoutDuration + 100) {
         vTaskDelay(pdMS_TO_TICKS(1));
         if (tracker == Modbus::Client::ERR_TIMEOUT) break;
     }
@@ -1854,6 +1854,29 @@ void test_recreate_under_rx_traffic() {
     Modbus::Logger::logln();
 }
 
+// User code may define its own global names matching EZModbus internal helpers (here a
+// mutex, a buffer, a time function...): EZModbus keeps them out of the global namespace, so
+// that including it never collides with user code (this test fails to compile otherwise).
+class Mutex { public: int id = 1; };
+struct Lock { int id = 2; };
+struct ByteBuffer { int id = 3; };
+class BinarySemaphore { public: int id = 4; };
+inline uint32_t TIME_MS() { return 42; }
+inline uint64_t TIME_US() { return 43; }
+inline void WAIT_MS(uint32_t) {}
+inline void WAIT_US(uint32_t) {}
+
+void test_user_names_dont_collide() {
+    Mutex mutex; Lock lock; ByteBuffer buffer; BinarySemaphore semaphore;
+    WAIT_MS(0); WAIT_US(0);
+    TEST_ASSERT_EQUAL(1, mutex.id);
+    TEST_ASSERT_EQUAL(2, lock.id);
+    TEST_ASSERT_EQUAL(3, buffer.id);
+    TEST_ASSERT_EQUAL(4, semaphore.id);
+    TEST_ASSERT_EQUAL(42, TIME_MS());
+    TEST_ASSERT_EQUAL(43, (uint32_t)TIME_US());
+}
+
 void setup() {
     // Debug port
     Serial.setTxBufferSize(2048);
@@ -1901,6 +1924,7 @@ void setup() {
 
     // Run tests
     UNITY_BEGIN();
+    RUN_TEST(test_user_names_dont_collide);
 
     // Register all generated tests
     #define X(Name, ReadSingle, ReadMulti, Addr, Expect, FC) \

@@ -74,8 +74,14 @@ namespace ModbusHAL {
     class TCP;                      // TCP socket driver
 }
 
-// FreeRTOS utilities & types
-class Mutex;                    // RAII mutex wrapper
-class Lock;                     // RAII lock guard
-class ByteBuffer;               // Vector-like binary data handler
+// Internal FreeRTOS utilities & types (kept out of the global namespace,
+// aliased in the namespaces above, e.g. Modbus::TIME_MS() or Modbus::ByteBuffer)
+namespace ModbusTypeDef {
+    class Mutex;                    // RAII mutex wrapper
+    class Lock;                     // RAII lock guard
+    class BinarySemaphore;          // Binary semaphore wrapper
+    class ByteBuffer;               // Vector-like binary data handler
+    TIME_MS(), TIME_US();           // Time since boot
+    WAIT_MS(), WAIT_US();           // Delays
+}
 ```

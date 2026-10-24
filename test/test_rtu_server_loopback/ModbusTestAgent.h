@@ -22,7 +22,7 @@ public:
     }
 
     // Push data to be "received" by the Modbus library
-    void send(const ByteBuffer& data) {
+    void send(const Modbus::ByteBuffer& data) {
         // Send data to the UART that will be read by the Modbus library
         _serial.write(data.data(), data.size());
         _serial.flush();
@@ -37,7 +37,7 @@ public:
     // Push hexadecimal string (easier for test writing)
     void send(const char* hexStr) {
         Bytes data = toBytes(hexStr);
-        ByteBuffer buffer(data.data(), data.size());
+        Modbus::ByteBuffer buffer(data.data(), data.size());
         send(buffer);
     }
 

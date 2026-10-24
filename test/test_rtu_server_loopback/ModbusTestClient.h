@@ -30,7 +30,7 @@ public:
 
         // Encode the frame
         uint8_t _raw[256];
-        ByteBuffer requestBytes(_raw, sizeof(_raw));
+        Modbus::ByteBuffer requestBytes(_raw, sizeof(_raw));
         auto encodeResult = ModbusCodec::RTU::encode(request, requestBytes);
         if (encodeResult != ModbusCodec::SUCCESS) {
             // //_lastError = "Failed to encode request";
@@ -82,7 +82,7 @@ public:
 
         // Encode the frame
         uint8_t _raw[256];
-        ByteBuffer requestBytes(_raw, sizeof(_raw));
+        Modbus::ByteBuffer requestBytes(_raw, sizeof(_raw));
         auto encodeResult = ModbusCodec::RTU::encode(request, requestBytes);
         if (encodeResult != ModbusCodec::SUCCESS) {
             // //_lastError = "Failed to encode request";
@@ -137,7 +137,7 @@ public:
 
         // Encode the frame
         uint8_t _raw[256];
-        ByteBuffer requestBytes(_raw, sizeof(_raw));
+        Modbus::ByteBuffer requestBytes(_raw, sizeof(_raw));
         auto encodeResult = ModbusCodec::RTU::encode(request, requestBytes);
         if (encodeResult != ModbusCodec::SUCCESS) {
             // //_lastError = "Failed to encode request";
@@ -192,7 +192,7 @@ public:
 
         // Encode the frame
         uint8_t _raw[256];
-        ByteBuffer requestBytes(_raw, sizeof(_raw));
+        Modbus::ByteBuffer requestBytes(_raw, sizeof(_raw));
         auto encodeResult = ModbusCodec::RTU::encode(request, requestBytes);
         if (encodeResult != ModbusCodec::SUCCESS) {
             // //_lastError = "Failed to encode request";
@@ -247,7 +247,7 @@ public:
 
         // Encode the frame
         uint8_t _raw[256];
-        ByteBuffer requestBytes(_raw, sizeof(_raw));
+        Modbus::ByteBuffer requestBytes(_raw, sizeof(_raw));
         auto encodeResult = ModbusCodec::RTU::encode(request, requestBytes);
         if (encodeResult != ModbusCodec::SUCCESS) {
             //_lastError = "Failed to encode request";
@@ -302,7 +302,7 @@ public:
 
         // Encode the frame
         uint8_t _raw[256];
-        ByteBuffer requestBytes(_raw, sizeof(_raw));
+        Modbus::ByteBuffer requestBytes(_raw, sizeof(_raw));
         auto encodeResult = ModbusCodec::RTU::encode(request, requestBytes);
         if (encodeResult != ModbusCodec::SUCCESS) {
             //_lastError = "Failed to encode request";
@@ -370,7 +370,7 @@ public:
 
         // Encode the frame
         uint8_t _raw[256];
-        ByteBuffer requestBytes(_raw, sizeof(_raw));
+        Modbus::ByteBuffer requestBytes(_raw, sizeof(_raw));
         auto encodeResult = ModbusCodec::RTU::encode(request, requestBytes);
         if (encodeResult != ModbusCodec::SUCCESS) {
             //_lastError = "Failed to encode request";
@@ -475,7 +475,7 @@ public:
 
         // Encode the frame
         uint8_t _raw[256];
-        ByteBuffer requestBytes(_raw, sizeof(_raw));
+        Modbus::ByteBuffer requestBytes(_raw, sizeof(_raw));
         auto encodeResult = ModbusCodec::RTU::encode(_txFrame, requestBytes);
         if (encodeResult != ModbusCodec::SUCCESS) {
             //_lastError = "Failed to encode request";
@@ -548,7 +548,7 @@ private:
     ModbusTestAgent& _agent;
     std::string _lastError;
     uint8_t _rxBuf[256];
-    ByteBuffer _rxBuffer;
+    Modbus::ByteBuffer _rxBuffer;
     std::vector<uint16_t> _rxData;
     size_t _rxDataIndex;
     Modbus::Frame _txFrame;

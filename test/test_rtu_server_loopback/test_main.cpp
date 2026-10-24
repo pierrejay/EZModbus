@@ -1960,7 +1960,7 @@ void test_malformed_requests_exceptions() {
         raw[1 + c.pduLen] = crc & 0xFF;
         raw[2 + c.pduLen] = crc >> 8;
         agent.clear();
-        ByteBuffer frame(static_cast<const uint8_t*>(raw), 3 + c.pduLen);
+        Modbus::ByteBuffer frame(static_cast<const uint8_t*>(raw), 3 + c.pduLen);
         agent.send(frame);
 
         Bytes resp;
@@ -2016,7 +2016,7 @@ void test_unencodable_response_exception() {
     raw[6] = crc & 0xFF;
     raw[7] = crc >> 8;
     agent.clear();
-    agent.send(ByteBuffer(static_cast<const uint8_t*>(raw), sizeof(raw)));
+    agent.send(Modbus::ByteBuffer(static_cast<const uint8_t*>(raw), sizeof(raw)));
 
     Bytes resp;
     uint32_t t0 = millis();

@@ -26,6 +26,14 @@
 #include "freertos/event_groups.h"
 #include "esp_timer.h"
 
+#endif // NATIVE_TEST
+
+// Internal helpers of the library, kept out of the global namespace so that they never collide
+// with user code. They are aliased in the library namespaces (see the end of this file).
+namespace ModbusTypeDef {
+
+#ifndef NATIVE_TEST
+
 // ===================================================================================
 // TIMING MACROS
 // ===================================================================================
@@ -276,3 +284,61 @@ private:
     size_t   _cap;
 };
 
+} // namespace ModbusTypeDef
+
+
+// ===================================================================================
+// ALIASES IN THE LIBRARY NAMESPACES
+// ===================================================================================
+
+namespace Modbus {
+    using ModbusTypeDef::ByteBuffer;
+#ifndef NATIVE_TEST
+    using ModbusTypeDef::TIME_MS;
+    using ModbusTypeDef::TIME_US;
+    using ModbusTypeDef::WAIT_MS;
+    using ModbusTypeDef::WAIT_US;
+    using ModbusTypeDef::Mutex;
+    using ModbusTypeDef::Lock;
+    using ModbusTypeDef::BinarySemaphore;
+#endif
+} // namespace Modbus
+
+namespace ModbusHAL {
+    using ModbusTypeDef::ByteBuffer;
+#ifndef NATIVE_TEST
+    using ModbusTypeDef::TIME_MS;
+    using ModbusTypeDef::TIME_US;
+    using ModbusTypeDef::WAIT_MS;
+    using ModbusTypeDef::WAIT_US;
+    using ModbusTypeDef::Mutex;
+    using ModbusTypeDef::Lock;
+    using ModbusTypeDef::BinarySemaphore;
+#endif
+} // namespace ModbusHAL
+
+namespace ModbusInterface {
+    using ModbusTypeDef::ByteBuffer;
+#ifndef NATIVE_TEST
+    using ModbusTypeDef::TIME_MS;
+    using ModbusTypeDef::TIME_US;
+    using ModbusTypeDef::WAIT_MS;
+    using ModbusTypeDef::WAIT_US;
+    using ModbusTypeDef::Mutex;
+    using ModbusTypeDef::Lock;
+    using ModbusTypeDef::BinarySemaphore;
+#endif
+} // namespace ModbusInterface
+
+namespace ModbusCodec {
+    using ModbusTypeDef::ByteBuffer;
+#ifndef NATIVE_TEST
+    using ModbusTypeDef::TIME_MS;
+    using ModbusTypeDef::TIME_US;
+    using ModbusTypeDef::WAIT_MS;
+    using ModbusTypeDef::WAIT_US;
+    using ModbusTypeDef::Mutex;
+    using ModbusTypeDef::Lock;
+    using ModbusTypeDef::BinarySemaphore;
+#endif
+} // namespace ModbusCodec

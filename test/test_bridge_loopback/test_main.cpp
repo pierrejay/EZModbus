@@ -196,7 +196,7 @@ void test_read_holding_register() {
         .data       = {}
     };
     uint8_t _rawRequest[ModbusCodec::TCP::MAX_FRAME_SIZE];
-    ByteBuffer requestBytes(_rawRequest, sizeof(_rawRequest));
+    Modbus::ByteBuffer requestBytes(_rawRequest, sizeof(_rawRequest));
     ModbusCodec::TCP::encode(request, requestBytes, 0);
 
     // Connect our dummy client & inject the frame in the bridge
@@ -214,7 +214,7 @@ void test_read_holding_register() {
 
     
     uint8_t _rawResponse[ModbusCodec::TCP::MAX_FRAME_SIZE];
-    ByteBuffer responseBytes(_rawResponse, sizeof(_rawResponse));
+    Modbus::ByteBuffer responseBytes(_rawResponse, sizeof(_rawResponse));
     uint32_t reqStartTime = millis();
     while (!tcpClient.available()) {
         if (millis() - reqStartTime > 1000) {
@@ -249,7 +249,7 @@ void test_write_holding_register() {
         .data       = {42}
     };
     uint8_t _rawRequest[ModbusCodec::TCP::MAX_FRAME_SIZE];
-    ByteBuffer requestBytes(_rawRequest, sizeof(_rawRequest));
+    Modbus::ByteBuffer requestBytes(_rawRequest, sizeof(_rawRequest));
     ModbusCodec::TCP::encode(request, requestBytes, 1);
 
     // Connect our dummy client & inject the frame in the bridge
@@ -267,7 +267,7 @@ void test_write_holding_register() {
 
     
     uint8_t _rawResponse[ModbusCodec::TCP::MAX_FRAME_SIZE];
-    ByteBuffer responseBytes(_rawResponse, sizeof(_rawResponse));
+    Modbus::ByteBuffer responseBytes(_rawResponse, sizeof(_rawResponse));
     uint32_t reqStartTime = millis();
     while (!tcpClient.available()) {
         if (millis() - reqStartTime > 1000) {
@@ -325,7 +325,7 @@ static size_t bridgeReceive(uint8_t* buf, size_t cap, uint32_t timeoutMs) {
 
 static bool bridgeSend(const Modbus::Frame& request, uint16_t tid) {
     uint8_t raw[ModbusCodec::TCP::MAX_FRAME_SIZE];
-    ByteBuffer bytes(raw, sizeof(raw));
+    Modbus::ByteBuffer bytes(raw, sizeof(raw));
     if (ModbusCodec::TCP::encode(request, bytes, tid) != ModbusCodec::SUCCESS) return false;
     if (!bridgeConnect()) return false;
     while (tcpClient.available()) tcpClient.read(); // Drop leftovers from a previous exchange
