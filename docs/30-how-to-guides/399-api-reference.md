@@ -18,7 +18,7 @@ namespace Modbus {
     };
 
     // Function codes
-    enum FunctionCode {
+    enum FunctionCode : int {
         NULL_FC = 0x00,
         READ_COILS                 = 0x01,
         READ_DISCRETE_INPUTS       = 0x02,
@@ -32,7 +32,7 @@ namespace Modbus {
     };
 
     // Exception codes
-    enum ExceptionCode {
+    enum ExceptionCode : int {
         NULL_EXCEPTION         = 0x00,
         ILLEGAL_FUNCTION       = 0x01,
         ILLEGAL_DATA_ADDRESS   = 0x02,

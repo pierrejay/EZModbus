@@ -57,8 +57,9 @@ namespace Modbus {
 
     /* @brief The type of a function code.
      * @note Representation of the function codes used in the Modbus protocol.
+     * @note Fixed underlying type: any byte received can be stored (e.g. an unsupported function code)
      */
-    enum FunctionCode {
+    enum FunctionCode : int {
         NULL_FC = 0x00,
         READ_COILS = 0x01,
         READ_DISCRETE_INPUTS = 0x02,
@@ -117,8 +118,9 @@ namespace Modbus {
 
     /* @brief The type of an exception code.
      * @note This is a representation of the exception codes used in the Modbus protocol.
+     * @note Fixed underlying type: any byte received can be stored before being validated
      */
-    enum ExceptionCode {
+    enum ExceptionCode : int {
         NULL_EXCEPTION = 0x00,
         ILLEGAL_FUNCTION = 0x01,
         ILLEGAL_DATA_ADDRESS = 0x02,
