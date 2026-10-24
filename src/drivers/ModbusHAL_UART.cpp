@@ -165,6 +165,7 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
     }
 
     _is_driver_installed = true;
+    if (out_event_queue) *out_event_queue = _internal_event_queue_handle;
 
     // Guarantee an RX idle-timeout event at the end of every frame, even one that ends exactly
     // on a FIFO-full boundary (required for LP-UART)

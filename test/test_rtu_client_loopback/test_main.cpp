@@ -1724,6 +1724,23 @@ void test_uart_long_timeout_saturates() {
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(originalGapUs, ezm_uart.getRxFrameGapTimeoutUs(), "threshold not restored");
 }
 
+// Regression: begin(&queue) never wrote the driver's event queue to its parameter. Spare HAL on
+// UART0 (console on USB), pins left unchanged.
+void test_uart_begin_returns_event_queue() {
+    ModbusHAL::UART::IDFConfig cfg;
+    cfg.uartNum = UART_NUM_0;
+    ModbusHAL::UART spare(cfg);
+    QueueHandle_t queue = nullptr;
+    esp_err_t err = spare.begin(&queue);
+    QueueHandle_t registered = spare.getRegisteredEventQueue();
+    spare.end();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(ESP_OK, err);
+    TEST_ASSERT_NOT_NULL(registered);
+    TEST_ASSERT_EQUAL_PTR_MESSAGE(registered, queue, "event queue not returned");
+}
+
 // ===================================================================================
 // RUNTIME UART RECONFIGURATION TESTS
 // ===================================================================================
@@ -2052,6 +2069,7 @@ void setup() {
     // RX robustness tests
     RUN_TEST(test_rx_zero_byte_read_keeps_buffer);
     RUN_TEST(test_uart_long_timeout_saturates);
+    RUN_TEST(test_uart_begin_returns_event_queue);
 
     // Runtime reconfiguration tests
     RUN_TEST(test_runtime_uart_reconfig);
