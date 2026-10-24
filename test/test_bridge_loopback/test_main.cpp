@@ -714,6 +714,58 @@ void test_server_busy_ignores_other_slave_ids() {
     TEST_ASSERT_TRUE_MESSAGE(heldAnswered, "held request not answered once released");
 }
 
+// Regression: with rejectUndefined = false, a request starting inside a multi-register Word was
+// handled as a gap (zeros read, write dropped) instead of a partial Word access. And looking up the
+// Word holding an address gave up on the first Word of another type before it (the store keeps all
+// types sorted together), so such a Word was missed. Returns the exception answered, -1 if none.
+static int serverException(ModbusInterface::Dummy& side, Modbus::FunctionCode fc, uint16_t addr) {
+    Modbus::Frame request = {
+        .type = Modbus::REQUEST, .fc = fc, .slaveId = 1,
+        .regAddress = addr, .regCount = 1, .data = {}
+    };
+    Modbus::Frame response;
+    side.transmitFrame(request);
+    return side.getReceivedFrame(response) ? (int)response.exceptionCode : -1;
+}
+
+static void checkStartInsideWordRejected(Modbus::IWordStore& store, const char* storeName) {
+    static ModbusInterface::Dummy side;
+    alignas(Modbus::Server) static uint8_t storage[sizeof(Modbus::Server)];
+    auto* server = new (storage) Modbus::Server(side, store, 1, false);
+    Modbus::Word words[2];
+    words[0].type = Modbus::HOLDING_REGISTER; // Registers 10-13
+    words[0].startAddr = 10;
+    words[0].nbRegs = 4;
+    words[1].type = Modbus::COIL;             // Coil 12, in between in the store
+    words[1].startAddr = 12;
+    words[1].nbRegs = 1;
+    for (auto& word : words) {
+        word.readHandler = serverReadHandler;
+        word.writeHandler = serverWriteHandler;
+    }
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, server->addWords(words, 2));
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, server->begin());
+
+    Modbus::Word found = server->getWord(Modbus::HOLDING_REGISTER, 13);
+    int readInside = serverException(side, Modbus::READ_HOLDING_REGISTERS, 11);
+    int readBehindCoil = serverException(side, Modbus::READ_HOLDING_REGISTERS, 13);
+    int writeInside = serverException(side, Modbus::WRITE_REGISTER, 11);
+    server->~Server();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(found.type == Modbus::HOLDING_REGISTER && found.startAddr == 10, storeName);
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::ILLEGAL_DATA_ADDRESS, readInside, storeName);
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::ILLEGAL_DATA_ADDRESS, readBehindCoil, storeName);
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::ILLEGAL_DATA_ADDRESS, writeInside, storeName);
+}
+
+void test_server_rejects_start_inside_word() {
+    static Modbus::StaticWordStore<2> staticStore;
+    static Modbus::DynamicWordStore dynamicStore(2);
+    checkStartInsideWordRejected(staticStore, "static store");
+    checkStartInsideWordRejected(dynamicStore, "dynamic store");
+}
+
 // Regression: when Bridge::begin() couldn't register its slave callback, the master one stayed
 // in place, and every call to begin() (retry, or a second call after a success) registered the
 // callbacks again: each request was then forwarded several times. The slave side's callback
@@ -1190,6 +1242,7 @@ void setup() {
     RUN_TEST(test_server_begin_retry_registers_once);
     RUN_TEST(test_server_rejects_overlaps_at_zero_and_same_start);
     RUN_TEST(test_server_busy_ignores_other_slave_ids);
+    RUN_TEST(test_server_rejects_start_inside_word);
     RUN_TEST(test_bridge_begin_registers_once);
     RUN_TEST(test_bridge_answered_request_timer_spares_next);
     RUN_TEST(test_client_sync_send_failure_applied_once);

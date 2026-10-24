@@ -312,6 +312,11 @@ Server::Result Server::handleRead(const Modbus::Frame& request, Modbus::Frame& r
                 response.exceptionCode = Modbus::ILLEGAL_DATA_ADDRESS;
                 return Error(Server::ERR_RCV_ILLEGAL_DATA_ADDRESS, "no word found at address");
             } else {
+                // A gap can't start inside a Word (only the request start can)
+                if (_wordStore.findContaining(regType, currentAddr)) {
+                    response.exceptionCode = Modbus::ILLEGAL_DATA_ADDRESS;
+                    return Error(Server::ERR_RCV_ILLEGAL_DATA_ADDRESS, "Partial Word access not allowed");
+                }
                 // Handle gap: find next Word and skip gap
                 Word* nextWord = _wordStore.findNext(regType, currentAddr);
                 uint32_t gapEnd = (nextWord && nextWord->startAddr < endAddr) ? 
@@ -470,6 +475,11 @@ Server::Result Server::handleWrite(const Modbus::Frame& request, Modbus::Frame& 
                 response.exceptionCode = Modbus::ILLEGAL_DATA_ADDRESS;
                 return Error(Server::ERR_RCV_ILLEGAL_DATA_ADDRESS, "No Word found at address during validation");
             } else {
+                // A gap can't start inside a Word (only the request start can)
+                if (_wordStore.findContaining(regType, scanAddr)) {
+                    response.exceptionCode = Modbus::ILLEGAL_DATA_ADDRESS;
+                    return Error(Server::ERR_RCV_ILLEGAL_DATA_ADDRESS, "Partial Word access not allowed during validation");
+                }
                 // Handle gap: find next Word and skip gap
                 Word* nextWord = _wordStore.findNext(regType, scanAddr);
                 uint32_t gapEnd = (nextWord && nextWord->startAddr < endAddr) ? 
@@ -769,11 +779,11 @@ Server::Result Server::addWords(const Word* words, size_t count) {
 
 /* @brief Get a word from the server
  * @param type The type of word to get
- * @param startAddr The starting address of the word to get
+ * @param address Any address of the word to get (not only its start address)
  * @return The copy of the word if found, otherwise an empty word
  */
-Word Server::getWord(Modbus::RegisterType type, uint16_t startAddr) {
-    auto word = findWordEntry(type, startAddr);
+Word Server::getWord(Modbus::RegisterType type, uint16_t address) {
+    auto word = findWordEntry(type, address);
     if (!word) return Word();
     return *word;
 }

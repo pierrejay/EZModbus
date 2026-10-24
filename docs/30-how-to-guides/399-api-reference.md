@@ -396,7 +396,7 @@ namespace Modbus {
         Result addWords(const std::vector<Word>& words);
         Result addWords(const Word* words, size_t count);
         Result clearAllWords();
-        Word getWord(RegisterType type, uint16_t startAddr);
+        Word getWord(RegisterType type, uint16_t address); // Word holding this address
 
         bool isBusy();
         uint8_t getSlaveId() const;

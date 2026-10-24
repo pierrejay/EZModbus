@@ -150,7 +150,7 @@ public:
     Result addWord(const Word& word);
     Result addWords(const std::vector<Word>& words);
     Result addWords(const Word* words, size_t count);
-    Word getWord(Modbus::RegisterType type, uint16_t startAddr);
+    Word getWord(Modbus::RegisterType type, uint16_t address); // Word holding this address
     
     bool isBusy();
 
