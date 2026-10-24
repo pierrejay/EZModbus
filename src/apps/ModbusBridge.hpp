@@ -25,6 +25,7 @@ public:
     // Max time for the device behind the bridge to answer, before replying a
     // GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND exception to the requester
     static constexpr uint32_t DEFAULT_TIMEOUT_MS = (uint32_t)EZMODBUS_BRIDGE_TIMEOUT_MS;
+    static constexpr TickType_t TIMER_CMD_TOUT_TICKS = pdMS_TO_TICKS(5) > 0 ? pdMS_TO_TICKS(5) : 1; // Bounded wait for FreeRTOS timer commands
 
 // ===================================================================================
 // RESULT TYPES
@@ -97,6 +98,27 @@ public:
         : interface1(Interface1)
         , interface2(Interface2)
         , _timeoutMs(timeoutMs) {}
+
+    /* @brief Destructor
+     * @note Waits until the timeout timer is deleted and its callback can't run anymore
+     * @note The interfaces call the bridge from their tasks: destroy them first
+     */
+    ~Bridge() {
+        if (!_timer) return;
+        xTimerDelete(_timer, portMAX_DELAY);
+        // Fence: runs in the timer daemon after the delete command, once no callback can run
+        if (xTaskGetCurrentTaskHandle() != xTimerGetTimerDaemonTaskHandle()) {
+            while (_timerFence.tryTake()) {} // Purge the semaphore
+            xTimerPendFunctionCall([](void* ctx, uint32_t) {
+                static_cast<Bridge*>(ctx)->_timerFence.giveForce();
+            }, this, 0, portMAX_DELAY);
+            _timerFence.take();
+        }
+        _timer = nullptr;
+    }
+
+    Bridge(const Bridge&) = delete;
+    Bridge& operator=(const Bridge&) = delete;
 
     /* @brief Initialize the bridge
      * @return The result of the initialization
@@ -181,6 +203,7 @@ private:
     uint32_t _pendingStartMs = 0;
     TimerHandle_t _timer = nullptr;
     StaticTimer_t _timerBuf;
+    BinarySemaphore _timerFence;   // Signals that the timer daemon processed the timer deletion
 
 // ===================================================================================
 // PRIVATE METHODS
@@ -212,7 +235,11 @@ private:
             _pendingStartMs = TIME_MS();
             _pendingActive = true;
         }
-        xTimerReset(_timer, 0);
+        if (xTimerReset(_timer, TIMER_CMD_TOUT_TICKS) != pdPASS) {
+            // No timeout guarantee: don't forward, the requester can retry
+            closePendingWithException(Modbus::SLAVE_DEVICE_BUSY);
+            return;
+        }
 
         // A TX failure is reported through the callback (synchronously or not)
         masterInterface->sendFrame(request, [](ModbusInterface::IInterface::Result result, void* ctx) {

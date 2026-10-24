@@ -440,6 +440,70 @@ void test_bridge_malformed_request_exception() {
     TEST_ASSERT_EQUAL_HEX8(Modbus::ILLEGAL_FUNCTION, resp[8]);
 }
 
+// ===================================================================================
+// BRIDGE LIFECYCLE (in-memory bridges between dummy interfaces)
+// The slave side injects requests, the master side swallows them (silent device).
+// ===================================================================================
+
+struct DummyMaster : public ModbusInterface::Dummy {
+    DummyMaster() { _role = Modbus::MASTER; }
+};
+static constexpr uint32_t LOCAL_BRIDGE_TIMEOUT_MS = 100;
+static const Modbus::Frame LOCAL_BRIDGE_REQUEST = {
+    .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID,
+    .regAddress = READ_HOLDING_ADDR, .regCount = 1, .data = {}
+};
+
+// Regression: the timeout timer kept a pointer to the bridge and fired after its destruction
+void test_bridge_destroyed_with_armed_timer() {
+    static ModbusInterface::Dummy slaveSide;
+    static DummyMaster masterSide;
+    alignas(Modbus::Bridge) static uint8_t storage[sizeof(Modbus::Bridge)];
+    auto* localBridge = new (storage) Modbus::Bridge(masterSide, slaveSide, LOCAL_BRIDGE_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Bridge::SUCCESS, localBridge->begin());
+
+    slaveSide.transmitFrame(LOCAL_BRIDGE_REQUEST); // Forwarded, timeout armed
+    Modbus::Frame frame;
+    TEST_ASSERT_TRUE_MESSAGE(masterSide.getReceivedFrame(frame), "request not forwarded");
+
+    localBridge->~Bridge();
+    vTaskDelay(pdMS_TO_TICKS(LOCAL_BRIDGE_TIMEOUT_MS * 3));
+    bool answered = slaveSide.getReceivedFrame(frame);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_FALSE_MESSAGE(answered, "timeout fired after the bridge was destroyed");
+}
+
+// Regression: if the timer command couldn't be queued, the request was forwarded without
+// any timeout. The bridge must answer instead (the requester can retry).
+void test_bridge_timer_command_failure() {
+    static ModbusInterface::Dummy slaveSide;
+    static DummyMaster masterSide;
+    static Modbus::Bridge localBridge(masterSide, slaveSide, LOCAL_BRIDGE_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Bridge::SUCCESS, localBridge.begin());
+
+    // Saturate the timer command queue: suspend the timer daemon so it can't drain it
+    static StaticTimer_t floodTimerBuf;
+    TimerHandle_t floodTimer = xTimerCreateStatic("flood", pdMS_TO_TICKS(1000), pdFALSE, nullptr,
+                                                  [](TimerHandle_t) {}, &floodTimerBuf);
+    TaskHandle_t daemon = xTimerGetTimerDaemonTaskHandle();
+    vTaskSuspend(daemon);
+    while (xTimerReset(floodTimer, 0) == pdPASS) {}
+
+    slaveSide.transmitFrame(LOCAL_BRIDGE_REQUEST);
+    Modbus::Frame forwardedFrame, answer;
+    bool forwarded = masterSide.getReceivedFrame(forwardedFrame);
+    bool answered = slaveSide.getReceivedFrame(answer);
+
+    vTaskResume(daemon);
+    xTimerStop(floodTimer, pdMS_TO_TICKS(100));
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_FALSE_MESSAGE(forwarded, "request forwarded without a timeout");
+    TEST_ASSERT_TRUE_MESSAGE(answered, "no answer when the timeout can't be armed");
+    TEST_ASSERT_EQUAL(Modbus::SLAVE_DEVICE_BUSY, answer.exceptionCode);
+}
+
 void setUp() {
     // Clear both RX buffers before each test
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -516,6 +580,8 @@ void setup() {
     RUN_TEST(test_bridge_forward_failure_gateway_exception);
     RUN_TEST(test_bridge_late_response_not_forwarded);
     RUN_TEST(test_bridge_malformed_request_exception);
+    RUN_TEST(test_bridge_destroyed_with_armed_timer);
+    RUN_TEST(test_bridge_timer_command_failure);
     UNITY_END();
 }
 
