@@ -8,8 +8,6 @@
 #include "core/ModbusCore.h"
 #include "core/ModbusCodec.hpp"
 #include "utils/ModbusDebug.hpp"
-#include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
 
 namespace ModbusInterface {
 
@@ -214,22 +212,6 @@ namespace ModbusInterface {
         Modbus::Role _role;
         bool _catchAllSlaveIds = false; // Can be overridden by the derived class to ignore Slave ID field (especially TCP server)
         bool _extendedSlaveIds = false; // Can be overridden by the derived class to accept slave IDs up to 255 (TCP Unit IDs)
-
-        /* @brief Add a queue to / remove a queue from a QueueSet
-         * @return True on success
-         * @note FreeRTOS only allows it while the queue is empty, so the queue is drained first.
-         *       The driver may keep posting RX events meanwhile, hence the retries. Dropping RX
-         *       events is harmless here (stale or re-signaled by the driver).
-         */
-        static bool setQueueMembership(QueueHandle_t queue, QueueSetHandle_t set, bool add) {
-            for (int attempt = 0; attempt < 10; attempt++) {
-                xQueueReset(queue);
-                BaseType_t res = add ? xQueueAddToSet(queue, set) : xQueueRemoveFromSet(queue, set);
-                if (res == pdPASS) return true;
-                vTaskDelay(1);
-            }
-            return false;
-        }
 
     }; // class IInterface
 

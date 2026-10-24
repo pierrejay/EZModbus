@@ -1756,7 +1756,7 @@ void test_runtime_uart_reconfig() {
 // non-empty queue from a set, so the UART queue kept a reference to the freed set and
 // no interface could be attached to that UART anymore.
 // The request targets an absent slave, so that no RX traffic follows.
-// Last test of the suite: it destroys & recreates the shared `ezm` interface.
+// Destroys & recreates the shared `ezm` interface (end of the suite).
 void test_destroy_while_transmitting() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_DESTROY_WHILE_TRANSMITTING");
@@ -1796,6 +1796,61 @@ void test_destroy_while_transmitting() {
     TEST_ASSERT_EQUAL_MESSAGE(baseline, uxTaskGetNumberOfTasks(), "unexpected task count after re-init");
 
     Modbus::Logger::logln("TEST_DESTROY_WHILE_TRANSMITTING - OK");
+    Modbus::Logger::logln();
+}
+
+// Interface destruction/re-creation while the UART keeps receiving: the UART driver posts
+// events continuously. The interface waits on the UART event queue alone (no QueueSet), so
+// there is nothing to detach: every re-creation must succeed.
+static constexpr int RECREATE_STRESS_CYCLES = 20;
+static volatile bool rxStressRunning = false;
+static StaticTask_t rxStressTaskTcb;
+static StackType_t rxStressTaskStack[2048];
+
+// Sends garbage bytes to the EZModbus master's RX every 2 ms (from the server side UART)
+static void rxStressSenderTask(void*) {
+    const uint8_t garbage[8] = { 0x55, 0xAA, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06 };
+    while (rxStressRunning) {
+        mbt_uart.write(garbage, sizeof(garbage));
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    rxStressRunning = true; // Ack: the task no longer uses the UART
+    vTaskSuspend(nullptr);
+}
+
+// Last test of the suite: it destroys & recreates the shared `ezm` interface.
+void test_recreate_under_rx_traffic() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_RECREATE_UNDER_RX_TRAFFIC");
+
+    vTaskDelay(pdMS_TO_TICKS(50)); // Let the idle task clean up tasks deleted by previous tests
+    const UBaseType_t baseline = uxTaskGetNumberOfTasks();
+
+    rxStressRunning = true;
+    TaskHandle_t sender = xTaskCreateStatic(rxStressSenderTask, "rxStress", sizeof(rxStressTaskStack) / sizeof(StackType_t),
+                                            nullptr, tskIDLE_PRIORITY + 1, rxStressTaskStack, &rxStressTaskTcb);
+    TEST_ASSERT_NOT_NULL(sender);
+
+    int failedCycle = -1;
+    for (int i = 0; i < RECREATE_STRESS_CYCLES && failedCycle < 0; i++) {
+        ezm.~RTU();
+        vTaskDelay(pdMS_TO_TICKS(5)); // UART events keep coming meanwhile
+        new (&ezm) ModbusInterface::RTU(ezm_uart, Modbus::MASTER);
+        if (ezm.begin() != ModbusInterface::IInterface::SUCCESS) failedCycle = i;
+        vTaskDelay(pdMS_TO_TICKS(10 + (i % 7) * 3));
+    }
+
+    // Stop the sender (it acks by setting the flag back)
+    rxStressRunning = false;
+    uint32_t t0 = millis();
+    while (!rxStressRunning && millis() - t0 < 500) vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelete(sender);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(-1, failedCycle, "interface begin() failed after a re-creation under RX traffic");
+    TEST_ASSERT_EQUAL_MESSAGE(baseline, uxTaskGetNumberOfTasks(), "unexpected task count after the stress test");
+
+    Modbus::Logger::logln("TEST_RECREATE_UNDER_RX_TRAFFIC - OK");
     Modbus::Logger::logln();
 }
 
@@ -1903,6 +1958,7 @@ void setup() {
 
     // Lifecycle (last: destroys & recreates the shared interface)
     RUN_TEST(test_destroy_while_transmitting);
+    RUN_TEST(test_recreate_under_rx_traffic);
 
     UNITY_END();
 }
