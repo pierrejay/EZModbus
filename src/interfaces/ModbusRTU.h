@@ -115,6 +115,8 @@ private:
     QueueHandle_t _txRequestQueue = nullptr; 
     // _eventQueueSet: Combines RX event queue + UART event queue
     QueueSetHandle_t _eventQueueSet = nullptr;
+    bool _rxQueueInSet = false;      // Set membership, for cleanup
+    bool _txQueueInSet = false;
 
     // Miscellaneous
     RoundTripTimer _rtt{};
@@ -142,6 +144,7 @@ private:
     StaticTask_t _rxTxTaskBuffer;
     StackType_t _rxTxTaskStack[RXTX_TASK_STACK_SIZE];
     TaskHandle_t _rxTxTaskHandle = nullptr;
+    std::atomic<uint32_t> _rxTxTaskParked{0}; // Set by the task once it no longer uses this object (see killRxTxTask())
 
     // ===================================================================================
     // HELPER METHODS

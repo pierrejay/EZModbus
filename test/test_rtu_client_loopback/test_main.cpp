@@ -1749,6 +1749,56 @@ void test_runtime_uart_reconfig() {
     }
 }
 
+// Regression: the interface destructor slept 150 ms instead of waiting for its task,
+// which can be busy for much longer (here transmitting a ~255-byte frame, ~270 ms at
+// 9600 baud), then deleted its queue set while the UART event queue was not empty (the
+// wake-up event it had just posted was never consumed): FreeRTOS refuses to remove a
+// non-empty queue from a set, so the UART queue kept a reference to the freed set and
+// no interface could be attached to that UART anymore.
+// The request targets an absent slave, so that no RX traffic follows.
+// Last test of the suite: it destroys & recreates the shared `ezm` interface.
+void test_destroy_while_transmitting() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_DESTROY_WHILE_TRANSMITTING");
+
+    // Slow line so that the transmission lasts ~270 ms (the suite runs at a high baud rate)
+    const uint32_t origBaud = ezm_uart.getBaudrate();
+    TEST_ASSERT_EQUAL(ESP_OK, ezm_uart.setBaudrate(9600));
+
+    vTaskDelay(pdMS_TO_TICKS(50)); // Let the idle task clean up tasks deleted by previous tests
+    const UBaseType_t baseline = uxTaskGetNumberOfTasks();
+
+    Modbus::Frame req = {
+        .type = Modbus::REQUEST,
+        .fc = Modbus::WRITE_MULTIPLE_REGISTERS,
+        .slaveId = 99, // No server answers this ID
+        .regAddress = 0,
+        .regCount = Modbus::MAX_REGISTERS_WRITE,
+        .data = {},
+        .exceptionCode = Modbus::NULL_EXCEPTION
+    };
+    Modbus::Frame resp;
+    Modbus::Client::Result tracker = Modbus::Client::NODATA;
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, client.sendRequest(req, resp, &tracker));
+    vTaskDelay(pdMS_TO_TICKS(20)); // The interface task is now transmitting
+
+    ezm.~RTU();
+    const UBaseType_t afterDestroy = uxTaskGetNumberOfTasks();
+    vTaskDelay(pdMS_TO_TICKS(500)); // Before the fix, let the still-running task end before reusing the object
+
+    ezm_uart.setBaudrate(origBaud);
+    new (&ezm) ModbusInterface::RTU(ezm_uart, Modbus::MASTER);
+    const auto beginRes = ezm.begin();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(baseline - 1, afterDestroy, "interface task still running after destruction");
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusInterface::IInterface::SUCCESS, beginRes, "cannot attach a new interface to the UART");
+    TEST_ASSERT_EQUAL_MESSAGE(baseline, uxTaskGetNumberOfTasks(), "unexpected task count after re-init");
+
+    Modbus::Logger::logln("TEST_DESTROY_WHILE_TRANSMITTING - OK");
+    Modbus::Logger::logln();
+}
+
 void setup() {
     // Debug port
     Serial.setTxBufferSize(2048);
@@ -1850,6 +1900,9 @@ void setup() {
 
     // Runtime reconfiguration tests
     RUN_TEST(test_runtime_uart_reconfig);
+
+    // Lifecycle (last: destroys & recreates the shared interface)
+    RUN_TEST(test_destroy_while_transmitting);
 
     UNITY_END();
 }

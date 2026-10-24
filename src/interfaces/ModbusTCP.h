@@ -148,7 +148,6 @@ private:
     // Lifecycle management
     void beginCleanup();
     void killRxTxTask();
-    static bool setQueueMembership(QueueHandle_t queue, QueueSetHandle_t set, bool add);
     
     // RX frame processing
     Result processReceivedFrame(const ByteBuffer& frameBytes, int socketNum);

@@ -287,22 +287,6 @@ void TCP::beginCleanup() {
     // Do not delete HAL RX queue as it belongs to _tcpHAL
 }
 
-/* @brief Add a queue to / remove a queue from a QueueSet
- * @return True on success
- * @note FreeRTOS only allows it while the queue is empty, so the queue is drained first.
- *       The HAL may keep posting RX events meanwhile, hence the retries. Dropping RX
- *       events is harmless: unread data stays in the socket and is signaled again.
- */
-bool TCP::setQueueMembership(QueueHandle_t queue, QueueSetHandle_t set, bool add) {
-    for (int attempt = 0; attempt < 10; attempt++) {
-        xQueueReset(queue);
-        BaseType_t res = add ? xQueueAddToSet(queue, set) : xQueueRemoveFromSet(queue, set);
-        if (res == pdPASS) return true;
-        vTaskDelay(1);
-    }
-    return false;
-}
-
 /* @brief Kill the RX/TX task
  * @note Called when the interface is destroyed
  * @note Waits for the task to finish its current work (e.g. an RX assembly or a send),

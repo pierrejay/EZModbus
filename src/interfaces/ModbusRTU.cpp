@@ -62,20 +62,18 @@ RTU::Result RTU::begin() {
         return Error(ERR_INIT_FAILED, "failed to create event queue set");
     }
 
-    // Flush rxEventQueue prior to adding it to the set
-    // This is necessary so parasitic events that occur before RTU initialization do not prevent the QueueSet from being created
-    uart_event_t dump;
-    while (xQueueReceive(_rxEventQueue, &dump, 0) == pdTRUE) { }
-
-    // Add queues to QueueSet
-    if (xQueueAddToSet(_rxEventQueue, _eventQueueSet) != pdPASS) {
+    // Add queues to QueueSet (parasitic UART events that occurred before RTU initialization
+    // are flushed, so that they do not prevent the queue from being added to the set)
+    if (!setQueueMembership(_rxEventQueue, _eventQueueSet, true)) {
         beginCleanup();
         return Error(ERR_INIT_FAILED, "failed to add RX event queue to set");
     }
-    if (xQueueAddToSet(_txRequestQueue, _eventQueueSet) != pdPASS) {
+    _rxQueueInSet = true;
+    if (!setQueueMembership(_txRequestQueue, _eventQueueSet, true)) {
         beginCleanup();
         return Error(ERR_INIT_FAILED, "failed to add TX request queue to set");
     }
+    _txQueueInSet = true;
 
     // Flush the buffers prior to starting the task
     _rxBuffer.clear();
@@ -84,6 +82,7 @@ RTU::Result RTU::begin() {
     _isInitialized = true; // Needed for the task not to terminate prematurely
 
     // Create the RX/TX task
+    _rxTxTaskParked = 0;
     _rxTxTaskHandle = xTaskCreateStatic(
         /*pxTaskCode*/      rxTxTask,
         /*pcName*/          "ModbusRTU_RxTxTask", 
@@ -289,9 +288,14 @@ TaskHandle_t RTU::getRxTxTaskHandle() {
 void RTU::beginCleanup() {
     // Clean up resources in reverse order of creation
     if (_eventQueueSet) {
-        if (_rxEventQueue) xQueueRemoveFromSet(_rxEventQueue, _eventQueueSet);
-        if (_txRequestQueue) xQueueRemoveFromSet(_txRequestQueue, _eventQueueSet);
-        vQueueDelete(_eventQueueSet);
+        if (_rxQueueInSet) _rxQueueInSet = !setQueueMembership(_rxEventQueue, _eventQueueSet, false);
+        if (_txQueueInSet) _txQueueInSet = !setQueueMembership(_txRequestQueue, _eventQueueSet, false);
+        if (!_rxQueueInSet && !_txQueueInSet) {
+            vQueueDelete(_eventQueueSet);
+        } else {
+            // Never delete a set still referenced by a queue: leak it instead
+            Modbus::Debug::LOG_MSG("Failed to detach queues from QueueSet, leaking it");
+        }
         _eventQueueSet = nullptr;
     }
     
@@ -306,17 +310,25 @@ void RTU::beginCleanup() {
 
 /* @brief Kill the RX/TX task
  * @note Called when the interface is destroyed
+ * @note Waits for the task to finish its current work (e.g. a transmission), then deletes
+ *       it. A static task must not self-delete: its TCB & stack (members of this object)
+ *       stay referenced until the idle task cleans it up.
  */
 void RTU::killRxTxTask() {
-    if (_rxTxTaskHandle && _rxEventQueue) {
+    if (!_rxTxTaskHandle) return;
+    if (_rxEventQueue) {
         // Send a dummy event to wake up the rxTxTask
         uart_event_t dummy_evt = {
             .type = UART_EVENT_MAX,
             .size = 0,
             .timeout_flag = false }; 
         xQueueSend(_rxEventQueue, &dummy_evt, 0); 
-        vTaskDelay(pdMS_TO_TICKS(RXTX_QUEUE_CHECK_TIMEOUT_MS + 50)); // Wait a bit more than RxTxTask queue check timeout
     }
+    while (!_rxTxTaskParked || eTaskGetState(_rxTxTaskHandle) != eSuspended) {
+        vTaskDelay(1);
+    }
+    vTaskDelete(_rxTxTaskHandle);
+    _rxTxTaskHandle = nullptr;
 }
 
 /* @brief Process a received Modbus frame
@@ -598,8 +610,8 @@ void RTU::rxTxTask(void* rtu) {
     } 
 
     Modbus::Debug::LOG_MSGF("Modbus RxTx Task stopping for UART port %d", self->_uartHAL.getPort());
-    self->_rxTxTaskHandle = nullptr; 
-    vTaskDelete(NULL); 
+    self->_rxTxTaskParked = 1; // Last access to the object
+    vTaskSuspend(nullptr);     // Deleted by killRxTxTask()
 }
 
 } // namespace ModbusInterface
