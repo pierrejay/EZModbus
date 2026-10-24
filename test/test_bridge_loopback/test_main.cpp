@@ -637,6 +637,38 @@ void test_server_rejects_overlaps_at_zero_and_same_start() {
     TEST_ASSERT_TRUE_MESSAGE(overlapAccepted(dynDisjoint, 0, 1, 1, 1), "disjoint words rejected");
 }
 
+// Regression: when Bridge::begin() couldn't register its slave callback, the master one stayed
+// in place, and every call to begin() (retry, or a second call after a success) registered the
+// callbacks again: each request was then forwarded several times. The slave side's callback
+// slots are filled to make the slave registration fail.
+void test_bridge_begin_registers_once() {
+    static ModbusInterface::Dummy slaveSide;
+    static DummyMaster masterSide;
+    static uint8_t fillers[ModbusInterface::IInterface::MAX_RCV_CALLBACKS];
+    for (auto& filler : fillers) {
+        slaveSide.setRcvCallback([](const Modbus::Frame&, void*) {}, &filler);
+    }
+    alignas(Modbus::Bridge) static uint8_t storage[sizeof(Modbus::Bridge)];
+    auto* bridge = new (storage) Modbus::Bridge(masterSide, slaveSide, LOCAL_BRIDGE_TIMEOUT_MS);
+
+    Modbus::Bridge::Result failedRes = bridge->begin();
+    size_t masterAfterFailure = masterSide.callbackCount();
+    for (auto& filler : fillers) slaveSide.removeRcvCallbacks(&filler);
+    Modbus::Bridge::Result retryRes = bridge->begin();
+    Modbus::Bridge::Result againRes = bridge->begin();
+    size_t masterRegistered = masterSide.callbackCount();
+    size_t slaveRegistered = slaveSide.callbackCount();
+    bridge->~Bridge();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(Modbus::Bridge::SUCCESS, failedRes, "begin() should fail on the slave callback");
+    TEST_ASSERT_EQUAL_MESSAGE(0, masterAfterFailure, "master callback left after a failed begin()");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Bridge::SUCCESS, retryRes, "begin() retry failed");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Bridge::SUCCESS, againRes, "second begin() failed");
+    TEST_ASSERT_EQUAL_MESSAGE(1, masterRegistered, "master callback registered more than once");
+    TEST_ASSERT_EQUAL_MESSAGE(1, slaveRegistered, "slave callback registered more than once");
+}
+
 // Regression: if the timer command couldn't be queued, the request was forwarded without
 // any timeout. The bridge must answer instead (the requester can retry).
 void test_bridge_timer_command_failure() {
@@ -748,6 +780,7 @@ void setup() {
     RUN_TEST(test_client_destroyed_while_timeout_runs);
     RUN_TEST(test_server_begin_retry_registers_once);
     RUN_TEST(test_server_rejects_overlaps_at_zero_and_same_start);
+    RUN_TEST(test_bridge_begin_registers_once);
     RUN_TEST(test_bridge_timer_command_failure);
     UNITY_END();
 }

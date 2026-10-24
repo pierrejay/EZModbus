@@ -165,6 +165,10 @@ public:
             return Error(ERR_INIT_FAILED, "failed to initialize slave interface");
         }
         
+        // Registered once whatever the number of calls, and none left if begin() fails
+        interface1.removeRcvCallbacks(this);
+        interface2.removeRcvCallbacks(this);
+
         // Configure the master interface callback to redirect to the slave
         auto resSetCbMaster = masterInterface->setRcvCallback([](const Modbus::Frame& frame, void* ctx) {
             auto* self = static_cast<Bridge*>(ctx);
@@ -184,6 +188,7 @@ public:
             }
         }, this);
         if (resSetCbSlave != ModbusInterface::IInterface::SUCCESS) {
+            masterInterface->removeRcvCallbacks(this);
             return Error(ERR_INIT_FAILED, "failed to set slave interface callback");
         }
 
