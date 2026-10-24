@@ -3062,15 +3062,17 @@ void test_client_reconnect_on_first_request() {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
     
-    // Suspend the server task & stop the HAL server
+    // Suspend the server task, then tear down the server side & the client side
+    // (applications first, then interfaces, then HALs)
     vTaskSuspend(modbusTestServerTaskHandle);
+    server.~Server();
+    mbt.~TCP();
     halForServer.stop();
     vTaskDelay(pdMS_TO_TICKS(500));
-    
-    // Stop the client HAL & destruct the client & interface
-    halForClient.stop();
-    ezm.~TCP();
+
     client.~Client();
+    ezm.~TCP();
+    halForClient.stop();
     vTaskDelay(pdMS_TO_TICKS(500));
     
     // Reconstruct the client & client interface
@@ -3091,12 +3093,10 @@ void test_client_reconnect_on_first_request() {
     halForServer.begin();
     
     // Reconstruct server interface & restart it
-    mbt.~TCP();
     new (&mbt) ModbusInterface::TCP(halForServer, Modbus::SERVER);
     mbt.begin();
     
     // Reconstruct Modbus server & restart it to register callbacks properly
-    server.~Server();
     new (&server) Modbus::Server(mbt, dynamicStore);
     server.begin();
     

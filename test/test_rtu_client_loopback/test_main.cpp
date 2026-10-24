@@ -1767,6 +1767,7 @@ void test_destroy_while_transmitting() {
 
     vTaskDelay(pdMS_TO_TICKS(50)); // Let the idle task clean up tasks deleted by previous tests
     const UBaseType_t baseline = uxTaskGetNumberOfTasks();
+    client.~Client(); // The application goes first (rebuilt at the end)
 
     Modbus::Frame req = {
         .type = Modbus::REQUEST,
@@ -1777,9 +1778,7 @@ void test_destroy_while_transmitting() {
         .data = {},
         .exceptionCode = Modbus::NULL_EXCEPTION
     };
-    Modbus::Frame resp;
-    Modbus::Client::Result tracker = Modbus::Client::NODATA;
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, client.sendRequest(req, resp, &tracker));
+    const auto sendRes = ezm.sendFrame(req, nullptr, nullptr);
     vTaskDelay(pdMS_TO_TICKS(20)); // The interface task is now transmitting
 
     ezm.~RTU();
@@ -1789,8 +1788,11 @@ void test_destroy_while_transmitting() {
     ezm_uart.setBaudrate(origBaud);
     new (&ezm) ModbusInterface::RTU(ezm_uart, Modbus::MASTER);
     const auto beginRes = ezm.begin();
+    new (&client) Modbus::Client(ezm);
+    client.begin();
 
     TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusInterface::IInterface::SUCCESS, sendRes, "cannot start the transmission");
     TEST_ASSERT_EQUAL_MESSAGE(baseline - 1, afterDestroy, "interface task still running after destruction");
     TEST_ASSERT_EQUAL_MESSAGE(ModbusInterface::IInterface::SUCCESS, beginRes, "cannot attach a new interface to the UART");
     TEST_ASSERT_EQUAL_MESSAGE(baseline, uxTaskGetNumberOfTasks(), "unexpected task count after re-init");
@@ -1830,6 +1832,7 @@ void test_recreate_under_rx_traffic() {
     TaskHandle_t sender = xTaskCreateStatic(rxStressSenderTask, "rxStress", sizeof(rxStressTaskStack) / sizeof(StackType_t),
                                             nullptr, tskIDLE_PRIORITY + 1, rxStressTaskStack, &rxStressTaskTcb);
     TEST_ASSERT_NOT_NULL(sender);
+    client.~Client(); // The application goes first (rebuilt at the end)
 
     int failedCycle = -1;
     for (int i = 0; i < RECREATE_STRESS_CYCLES && failedCycle < 0; i++) {
@@ -1845,6 +1848,8 @@ void test_recreate_under_rx_traffic() {
     uint32_t t0 = millis();
     while (!rxStressRunning && millis() - t0 < 500) vTaskDelay(pdMS_TO_TICKS(5));
     vTaskDelete(sender);
+    new (&client) Modbus::Client(ezm);
+    client.begin();
 
     TEST_ASSERT_START();
     TEST_ASSERT_EQUAL_MESSAGE(-1, failedCycle, "interface begin() failed after a re-creation under RX traffic");
