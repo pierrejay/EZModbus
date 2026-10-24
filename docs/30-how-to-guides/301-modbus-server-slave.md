@@ -523,6 +523,8 @@ As per the Modbus specification, a request received without communication error 
 
 Frames with a communication error (bad CRC, invalid MBAP header) are silently dropped.
 
+If a response can't be encoded (e.g. inconsistent data returned by the application), `SLAVE_DEVICE_FAILURE` is answered instead, so that the request never stays unanswered.
+
 ## Unit ID for Modbus TCP
 
 Modbus TCP devices are normally not addressed using the traditional `slaveId` field, but by their port and IP address.\

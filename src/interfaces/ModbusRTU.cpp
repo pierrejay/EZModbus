@@ -205,6 +205,8 @@ RTU::Result RTU::sendFrame(const Modbus::Frame& frame, TxResultCallback txCallba
         return Error(ERR_NOT_INITIALIZED, "RTU interface not initialized");
     }
 
+    bool replacedByException = false;
+
     // Update TX buffer under critical section (mutex protection)
     {
         Lock guard(_txMutex, 0); // try-lock no wait
@@ -220,9 +222,20 @@ RTU::Result RTU::sendFrame(const Modbus::Frame& frame, TxResultCallback txCallba
         // _txBuffer is considered free. Encode the frame.
         auto encodeResult = ModbusCodec::RTU::encode(frame, _txBuffer);
         if (encodeResult != ModbusCodec::SUCCESS) {
-            if (txCallback) txCallback(ERR_INVALID_FRAME, ctx);
             _txBuffer.clear(); // Don't leave the buffer in an invalid state
-            return Error(ERR_INVALID_FRAME, "encoding failed");
+            // Slave: a response that can't be encoded is replaced by SLAVE_DEVICE_FAILURE,
+            // so that the request is still answered
+            if (_role != Modbus::SLAVE || frame.type != Modbus::RESPONSE || Modbus::isBroadcastId(frame.slaveId) ||
+                !ModbusCodec::RTU::buildException(frame.slaveId, frame.fc, Modbus::SLAVE_DEVICE_FAILURE, _txBuffer)) {
+                _txBuffer.clear();
+                _txResultCallback = nullptr;
+                _txCallbackCtx = nullptr;
+                if (txCallback) txCallback(ERR_INVALID_FRAME, ctx);
+                return Error(ERR_INVALID_FRAME, "encoding failed");
+            }
+            replacedByException = true;
+            _txResultCallback = nullptr; // The caller is notified of the encoding failure below, not of the exception TX
+            _txCallbackCtx = nullptr;
         }
     } // Mutex released here (end of RAII scope)
 
@@ -242,6 +255,10 @@ RTU::Result RTU::sendFrame(const Modbus::Frame& frame, TxResultCallback txCallba
         return Error(ERR_SEND_FAILED, "failed to put encoded frame into TX queue");
     }
     
+    if (replacedByException) {
+        if (txCallback) txCallback(ERR_INVALID_FRAME, ctx);
+        return Error(ERR_INVALID_FRAME, "encoding failed, replying SLAVE_DEVICE_FAILURE");
+    }
     return Success(); 
 }
 

@@ -1852,6 +1852,59 @@ void test_server_malformed_requests_exceptions() {
     Modbus::Logger::logln();
 }
 
+// Regression: when the application's response couldn't be encoded, nothing was sent and
+// the TCP transaction stayed open: the client got no answer and every other request got
+// SLAVE_DEVICE_BUSY until the 5 s safety timeout. The server must answer SLAVE_DEVICE_FAILURE.
+// Isolated server whose application answers with an unencodable response (register count 0).
+static constexpr uint16_t BAD_RESPONSE_TEST_PORT = 518;
+ModbusHAL::TCP halForBadResponseServer(BAD_RESPONSE_TEST_PORT);
+ModbusInterface::TCP badResponseServerIf(halForBadResponseServer, Modbus::SERVER);
+
+void test_server_unencodable_response_exception() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_SERVER_UNENCODABLE_RESPONSE_EXCEPTION");
+
+    static bool initialized = false;
+    if (!initialized) {
+        TEST_ASSERT_TRUE(halForBadResponseServer.begin());
+        badResponseServerIf.setRcvCallback([](const Modbus::Frame& request, void* ctx) {
+            Modbus::Frame response;
+            response.clear();
+            response.type = Modbus::RESPONSE;
+            response.fc = request.fc;
+            response.slaveId = request.slaveId;
+            response.regAddress = request.regAddress;
+            response.regCount = 0; // Invalid: can't be encoded
+            static_cast<ModbusInterface::TCP*>(ctx)->sendFrame(response, nullptr, nullptr);
+        }, &badResponseServerIf);
+        TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, badResponseServerIf.begin());
+        initialized = true;
+    }
+
+    int sock = rawConnect(BAD_RESPONSE_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sock >= 0, "raw connect to server failed");
+
+    // Two requests in a row: the second one must not get SLAVE_DEVICE_BUSY
+    for (uint16_t tid = 0x0E11; tid <= 0x0E12; tid++) {
+        uint8_t req[RAW_READ_HR_REQ_SIZE];
+        rawBuildReadHrRequest(req, tid, 0);
+        TEST_ASSERT_TRUE(rawSendAll(sock, req, sizeof(req)));
+        uint8_t resp[9];
+        size_t got = rawRecvExact(sock, resp, sizeof(resp));
+
+        TEST_ASSERT_START();
+        TEST_ASSERT_EQUAL_MESSAGE(sizeof(resp), got, "no exception for an unencodable response");
+        TEST_ASSERT_EQUAL_HEX16(tid, rawTid(resp));
+        TEST_ASSERT_EQUAL_HEX8(TEST_SLAVE_ID, resp[6]);
+        TEST_ASSERT_EQUAL_HEX8(0x83, resp[7]);
+        TEST_ASSERT_EQUAL_HEX8_MESSAGE(Modbus::SLAVE_DEVICE_FAILURE, resp[8], "unexpected exception code");
+    }
+    ::close(sock);
+
+    Modbus::Logger::logln("TEST_SERVER_UNENCODABLE_RESPONSE_EXCEPTION - OK");
+    Modbus::Logger::logln();
+}
+
 // Regression: the HAL task posts one RX event per select() round while data is
 // unread on a socket, and used to post it with portMAX_DELAY while holding the
 // socket mutex. Once the RX queue was full (consumer busy), the HAL task blocked
@@ -3012,6 +3065,7 @@ void setup() {
     RUN_TEST(test_client_unit_id_255);
     RUN_TEST(test_server_unit_id_255);
     RUN_TEST(test_server_malformed_requests_exceptions);
+    RUN_TEST(test_server_unencodable_response_exception);
     RUN_TEST(test_hal_rx_notifications_never_block_send);
     RUN_TEST(test_hal_tcp_keepalive);
     RUN_TEST(test_hal_stop_joins_task);

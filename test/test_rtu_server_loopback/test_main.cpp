@@ -1989,6 +1989,50 @@ void test_malformed_requests_exceptions() {
     }
 }
 
+// When the application's response can't be encoded, the slave must answer
+// SLAVE_DEVICE_FAILURE instead of staying silent. An extra callback on the interface
+// answers requests to slave ID 9 (no Server uses it) with an unencodable response.
+void test_unencodable_response_exception() {
+    Modbus::Logger::logln("\nTEST_UNENCODABLE_RESPONSE_EXCEPTION");
+
+    static bool callbackSet = false;
+    if (!callbackSet) {
+        rtu.setRcvCallback([](const Modbus::Frame& request, void* /*ctx*/) {
+            if (request.slaveId != 9) return;
+            Modbus::Frame response;
+            response.clear();
+            response.type = Modbus::RESPONSE;
+            response.fc = request.fc;
+            response.slaveId = request.slaveId;
+            response.regAddress = request.regAddress;
+            response.regCount = 0; // Invalid: can't be encoded
+            rtu.sendFrame(response, nullptr, nullptr);
+        }, nullptr);
+        callbackSet = true;
+    }
+
+    uint8_t raw[8] = { 9, 0x03, 0x00, 0x00, 0x00, 0x01 };
+    uint16_t crc = rtuCrc(raw, 6);
+    raw[6] = crc & 0xFF;
+    raw[7] = crc >> 8;
+    agent.clear();
+    agent.send(ByteBuffer(static_cast<const uint8_t*>(raw), sizeof(raw)));
+
+    Bytes resp;
+    uint32_t t0 = millis();
+    while (millis() - t0 < 1000) {
+        agent.poll();
+        if (agent.hasData()) { resp = agent.fetch(); break; }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(5, resp.size(), "no exception for an unencodable response");
+    TEST_ASSERT_EQUAL_HEX8(9, resp[0]);
+    TEST_ASSERT_EQUAL_HEX8(0x83, resp[1]);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(Modbus::SLAVE_DEVICE_FAILURE, resp[2], "unexpected exception code");
+}
+
 void setup() {
     // Debug port
     Serial.setTxBufferSize(2048);
@@ -2087,6 +2131,7 @@ void setup() {
 
     // Malformed requests
     RUN_TEST(test_malformed_requests_exceptions);
+    RUN_TEST(test_unencodable_response_exception);
 
     // Runtime reconfiguration tests
     RUN_TEST(test_runtime_set_slave_id);

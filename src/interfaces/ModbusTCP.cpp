@@ -160,6 +160,8 @@ TCP::Result TCP::sendFrame(const Modbus::Frame &frame, TxResultCallback txCallba
         return Error(ERR_NOT_INITIALIZED, "TCP interface not initialized");
     }
 
+    bool replacedByException = false;
+
     // Update TX buffer under critical section (mutex protection)
     {
         Lock guard(_txMutex, 0); // try-lock no wait
@@ -176,16 +178,23 @@ TCP::Result TCP::sendFrame(const Modbus::Frame &frame, TxResultCallback txCallba
         uint16_t mbapTid = (_role == Modbus::CLIENT) ? getNextOutgoingTransactionId() : _currentTransaction.tid;
 
         if (ModbusCodec::TCP::encode(frame, _txBuffer, mbapTid) != ModbusCodec::SUCCESS) {
-            if (txCallback) txCallback(ERR_INVALID_FRAME, ctx);
             _txBuffer.clear();
-            return Error(ERR_INVALID_FRAME, "encoding failed");
+            // Server: a response that can't be encoded is replaced by SLAVE_DEVICE_FAILURE, so the
+            // transaction is still answered (it would otherwise stay open until the safety timeout)
+            if (_role != Modbus::SERVER || frame.type != Modbus::RESPONSE ||
+                !ModbusCodec::TCP::buildException(mbapTid, frame.slaveId, frame.fc, Modbus::SLAVE_DEVICE_FAILURE, _txBuffer)) {
+                _txBuffer.clear();
+                if (txCallback) txCallback(ERR_INVALID_FRAME, ctx);
+                return Error(ERR_INVALID_FRAME, "encoding failed");
+            }
+            replacedByException = true;
         }
 
-        // Fill TX metadata
+        // Fill TX metadata (the caller is notified of the encoding failure below, not of the exception TX)
         _txCtx.set(mbapTid, 
                    (_role == Modbus::SERVER) ? _currentTransaction.socketNum : -1, 
                    Modbus::isBroadcastId(frame.slaveId), 
-                   txCallback, 
+                   replacedByException ? nullptr : txCallback,
                    ctx);
         _txCtx.abortCount = _abortCount;
 
@@ -199,6 +208,10 @@ TCP::Result TCP::sendFrame(const Modbus::Frame &frame, TxResultCallback txCallba
         }
     } // Mutex released here (end of RAII scope)
 
+    if (replacedByException) {
+        if (txCallback) txCallback(ERR_INVALID_FRAME, ctx);
+        return Error(ERR_INVALID_FRAME, "encoding failed, replying SLAVE_DEVICE_FAILURE");
+    }
     return Success();
 }
 
