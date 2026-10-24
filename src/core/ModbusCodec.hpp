@@ -463,6 +463,7 @@ class PDU {
         if (pos != SIZE_MAX) {
             if (!bytes.resize(pos)) return Error(ERR_BUFFER_OVERFLOW);
         }
+        const size_t pduStart = bytes.size();
 
         // Flip FC bit 7 if exception code is not NULL
         uint8_t fc = (uint8_t)pdu.fc;
@@ -597,6 +598,11 @@ class PDU {
                 default:
                     return HandleError(bytes, ERR_INVALID_FC);
             }
+        }
+
+        // Bytes that didn't fit in the buffer were dropped
+        if (bytes.size() - pduStart != computePduLength(pdu, type)) {
+            return HandleError(bytes, ERR_BUFFER_OVERFLOW, "buffer too small for the PDU");
         }
 
         return Success();

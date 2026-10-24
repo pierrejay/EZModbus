@@ -1907,10 +1907,38 @@ void test_frame_getters_large_dstlen() {
     }
 }
 
+// Regression: the PDU encoder ignored the bytes it couldn't append to a too small buffer: the TCP
+// encoder (no CRC to append after it) then returned SUCCESS on a truncated frame.
+void test_codec_encode_rejects_truncated() {
+    using namespace Modbus;
+    Frame F;
+    F.type = REQUEST;
+    F.fc = WRITE_MULTIPLE_REGISTERS;
+    F.slaveId = 1;
+    F.regAddress = 0;
+    uint16_t regs[10] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    TEST_ASSERT_TRUE(F.setRegisters(regs, 10));
+    const size_t pduLen = 1 + 2 + 2 + 1 + 20;
+
+    uint8_t _tcp[ModbusCodec::TCP::MBAP_SIZE + pduLen];
+    ByteBuffer tcpShort(_tcp, sizeof(_tcp) - 1);
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::TCP::encode(F, tcpShort, 1), "truncated TCP frame encoded");
+    ByteBuffer tcpFit(_tcp, sizeof(_tcp));
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::TCP::encode(F, tcpFit, 1), "TCP frame fitting exactly rejected");
+    TEST_ASSERT_EQUAL(sizeof(_tcp), tcpFit.size());
+
+    uint8_t _rtu[1 + pduLen + 2];
+    ByteBuffer rtuShort(_rtu, 1 + pduLen - 1); // PDU truncated
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::RTU::encode(F, rtuShort), "truncated RTU frame encoded");
+    ByteBuffer rtuFit(_rtu, sizeof(_rtu));
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::RTU::encode(F, rtuFit), "RTU frame fitting exactly rejected");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_codec_rtu);
     RUN_TEST(test_codec_tcp);
+    RUN_TEST(test_codec_encode_rejects_truncated);
     RUN_TEST(test_codec_read_coils_bytecount_overflow);
     RUN_TEST(test_codec_write_multiple_regcount_validation);
     RUN_TEST(test_codec_exception_edge_cases);
