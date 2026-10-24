@@ -121,6 +121,7 @@ The following process is observed to optimize computation overhead:
 
     * Ideally do all `Word` additions to the store **before calling** `Server::begin()` (especially on servers exposing a large number of Words).
     * **Always monitor** the return value of `Server::addWord` especially if you add Words while the `Server` is running to be sure to catch any detect conflicts.
+    * `getWord()` isn't synchronized with `addWord()` / `addWords()` / `clearAllWords()`: if you change the store while the `Server` is running, call them from the same task.
 
 ### Capacity limit
 

@@ -723,6 +723,8 @@ Server::Result Server::addWords(const Word* words, size_t count) {
  * @param type The type of word to get
  * @param address Any address of the word to get (not only its start address)
  * @return The copy of the word if found, otherwise an empty word
+ * @note Not synchronized with addWord() / addWords() / clearAllWords() (store entries move on a
+ *       sorted insertion): when changing the store at runtime, call them from the same task
  */
 Word Server::getWord(Modbus::RegisterType type, uint16_t address) {
     auto word = findWordEntry(type, address);
