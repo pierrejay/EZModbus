@@ -31,7 +31,7 @@ Both interfaces rely on a FreeRTOS task to manage communication:
 * Modbus RTU interface: 4096 bytes stack size, `tskIDLE_PRIORITY + 1` priority & no core affinity
 * Modbus TCP interface: 4096 bytes stack size (or 6144 when logs enabled), `tskIDLE_PRIORITY + 1` priority & no core affinity
 
-Those tasks use an event-driven logic (fed by the driver & application layers event/data queues using `xQueueSet`) and do not consume useless CPU clocks when idle (e.g. continuous polling with `vTaskDelay(1)`).
+Those tasks use an event-driven logic (the TCP one waits on the socket & application queues with `xQueueSet`, the RTU one on the UART event queue alone) and do not consume useless CPU clocks when idle (e.g. continuous polling with `vTaskDelay(1)`).
 
 ### Application components
 
@@ -48,7 +48,8 @@ The main execution context that handles Modbus transactions is the task running 
 Stats from IDF ELF size analysis, per full Modbus stack (Client/Server app + RTU/TCP interface + driver, all declared globally)
 
 * ROM size (`.text` + `.rodata`):
-    * ~10KB of Flash for both Modbus RTU & TCP
+    * ~10KB of Flash for Modbus RTU
+    * ~13KB of Flash for Modbus TCP
 * RAM usage (`.bss`):
     * ~6KB for Modbus RTU
     * ~10KB for Modbus TCP

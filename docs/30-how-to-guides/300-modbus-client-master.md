@@ -349,7 +349,7 @@ The client provides several tools for effective error handling:
    * `ERR_BUSY` - Another transaction is in progress
    * `ERR_TX_FAILED` - Failed to transmit request
    * `ERR_TIMEOUT` - No response received within timeout
-   * `ERR_INVALID_RESPONSE` - Received response was invalid
+   * `ERR_TIMER_FAILURE` - The timeout timer couldn't be armed (request not started, can be retried)
 
 2.  **Exception Detection** - Modbus protocol exceptions from the slave can be easily decoded with the `toString` method:
 
@@ -375,7 +375,7 @@ Broadcast operations can significantly reduce bus traffic when updating multiple
 
 ## Setting custom request timeout
 
-The client enforces a timeout: if a response isn’t received within this timeframe, the request will be closed (marked as `ERR_TIMEOUT`), and the client layer will be ready to accept a new request. The default round-trip timeout is 1 second (`DEFAULT_REQUEST_TIMEOUT_MS` constant). For convenience, you can select another timeout when instanciating the client :
+The client enforces a timeout: if a response isn’t received within this timeframe, the request will be closed (marked as `ERR_TIMEOUT`), and the client layer will be ready to accept a new request as soon as the interface has released it (e.g. `ERR_BUSY` until a TCP reconnection in progress completes). The default round-trip timeout is 1 second (`DEFAULT_REQUEST_TIMEOUT_MS` constant). For convenience, you can select another timeout when instanciating the client :
 
 ```cpp
 Modbus::Client client(rtu, 5000); // Use a 5 second timeout

@@ -532,7 +532,7 @@ A `Unit ID` field exists in the Modbus TCP protocol, and is used to relay Modbus
 
 To make it work correctly, TCP manages the `slaveId` field as follows:
 
-* The TCP codec does not check the `slaveId` field in either direction, so it can be set to any value (even up to 255 i.e. above the Modbus RTU limit of 247)
+* The TCP codec accepts any Unit ID from 1 to 255 in either direction (i.e. above the Modbus RTU limit of 247), 0 being a broadcast
 * When used with a TCP interface, the server will accept any Unit ID value (with RTU, it will discard requests that do not match its own `slaveId` except for broadcast requests)
 * Broadcast requests (`slaveId` 0) are still handled correctly (response is dropped, request is completed right after handling the frame to the application layer)
 

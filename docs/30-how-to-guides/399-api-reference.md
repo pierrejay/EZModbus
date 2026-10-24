@@ -236,12 +236,18 @@ namespace ModbusInterface {
         virtual ~IInterface() = default;
 
         virtual Result begin() = 0;
+        // Calls txCallback exactly once per call, whatever the result
         virtual Result sendFrame(const Modbus::Frame& frame,
                                  TxResultCallback txCallback = nullptr,
                                  void* ctx = nullptr) = 0;
         virtual bool isReady() = 0;
+        // Short & non-blocking, never calls the application back
+        virtual void abortCurrentTransaction();
+        // Waits until no TX callback with this context is pending or running
+        virtual void waitTxCallbackDone(void* ctx);
         Modbus::Role getRole() const;
         Result setRcvCallback(RcvCallbackFn fn, void* ctx = nullptr);
+        void removeRcvCallbacks(void* ctx);    // Waits for a callback being called
     };
 }
 ```
