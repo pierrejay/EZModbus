@@ -2458,6 +2458,64 @@ void test_hal_send_bound_to_connection_no_reconnect() {
     Modbus::Logger::logln();
 }
 
+// Regression: beginServer() / beginClient() called directly (HAL built without a config) didn't
+// store the mode, IP & port: an interface on that HAL failed to begin, and a client had no target
+// to reconnect to. The spare HALs are rebuilt without a config for this test, then restored.
+void test_hal_direct_begin_stores_config() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_HAL_DIRECT_BEGIN_STORES_CONFIG");
+    spareServerHal.~TCP();
+    new (&spareServerHal) ModbusHAL::TCP();
+    spareClientHal.~TCP();
+    new (&spareClientHal) ModbusHAL::TCP();
+
+    // Server: an interface begins on it
+    bool serverBegun = spareServerHal.beginServer(SPARE_HAL_TEST_PORT);
+    auto* serverIfc = new (spareIfcStorage) ModbusInterface::TCP(spareServerHal, Modbus::SERVER);
+    auto serverIfcRes = serverIfc->begin();
+    serverIfc->~TCP();
+    spareServerHal.stop();
+
+    // Client: an interface begins on it, and it reconnects once the server closed the connection
+    int listenSock = rawListen(SPARE_HAL_TEST_PORT);
+    bool clientBegun = spareClientHal.beginClient(LOOPBACK_IP_STR, SPARE_HAL_TEST_PORT);
+    int peer = (listenSock >= 0 && clientBegun) ? ::accept(listenSock, nullptr, nullptr) : -1;
+    auto* clientIfc = new (spareIfcStorage) ModbusInterface::TCP(spareClientHal, Modbus::CLIENT);
+    auto clientIfcRes = clientIfc->begin();
+    clientIfc->~TCP();
+    if (peer >= 0) ::close(peer);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (spareClientHal.isClientConnected() && Modbus::TIME_MS() - t0 < 2000) vTaskDelay(pdMS_TO_TICKS(5));
+    const uint8_t byte = 0x00;
+    spareClientHal.sendMsg(&byte, 1); // Reconnects
+    int peer2 = -1;
+    if (listenSock >= 0) {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(listenSock, &fds);
+        timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+        if (::select(listenSock + 1, &fds, nullptr, nullptr, &tv) > 0) peer2 = ::accept(listenSock, nullptr, nullptr);
+    }
+    if (peer2 >= 0) ::close(peer2);
+    spareClientHal.stop();
+    if (listenSock >= 0) ::close(listenSock);
+
+    spareServerHal.~TCP();
+    new (&spareServerHal) ModbusHAL::TCP(SPARE_HAL_TEST_PORT);
+    spareClientHal.~TCP();
+    new (&spareClientHal) ModbusHAL::TCP(LOOPBACK_IP_STR, SPARE_HAL_TEST_PORT);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(serverBegun, "beginServer() failed");
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusInterface::TCP::SUCCESS, serverIfcRes, "server interface didn't begin");
+    TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0 && clientBegun && peer >= 0, "beginClient() didn't connect");
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusInterface::TCP::SUCCESS, clientIfcRes, "client interface didn't begin");
+    TEST_ASSERT_TRUE_MESSAGE(peer2 >= 0, "client HAL didn't reconnect");
+
+    Modbus::Logger::logln("TEST_HAL_DIRECT_BEGIN_STORES_CONFIG - OK");
+    Modbus::Logger::logln();
+}
+
 // ===================================================================================
 // LIFECYCLE: STOP / DESTRUCTION MUST JOIN THE TASKS
 // A task still running after stop() / destruction may access a destroyed object,
@@ -3544,6 +3602,7 @@ void setup() {
     RUN_TEST(test_hal_rx_notifications_never_block_send);
     RUN_TEST(test_hal_tcp_keepalive);
     RUN_TEST(test_hal_send_bound_to_connection_no_reconnect);
+    RUN_TEST(test_hal_direct_begin_stores_config);
     RUN_TEST(test_hal_stop_joins_task);
     RUN_TEST(test_interface_destroy_joins_task_and_detaches_queue);
     RUN_TEST(test_interface_recreate_under_rx_traffic);
