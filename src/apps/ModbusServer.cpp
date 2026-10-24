@@ -194,6 +194,17 @@ Server::Result Server::handleRequest(const Modbus::Frame& request,
     Server::Result finalRes = SUCCESS;
     const bool isBroadcast = Modbus::isBroadcastId(request.slaveId);
 
+    // Filter before taking the mutex: a busy server stays silent for frames it would ignore
+    // (on a shared RTU bus, requests addressed to other devices)
+    const bool catchAll = Modbus::isBroadcastId(_serverId) || sourceInterface.checkCatchAllSlaveIds();
+    if (!catchAll && (request.slaveId != _serverId) && !isBroadcast) {
+        return Error(Server::ERR_RCV_WRONG_SLAVE_ID);
+    }
+    // Ignore unsolicited responses from clients
+    if (request.type != Modbus::REQUEST) {
+        return Error(Server::ERR_RCV_INVALID_TYPE);
+    }
+
     { // Scope for mutex protection of WordStore access
         TickType_t timeout = (_reqMutexTimeoutMs == UINT32_MAX)
                              ? portMAX_DELAY 
@@ -210,19 +221,6 @@ Server::Result Server::handleRequest(const Modbus::Frame& request,
                     Modbus::makeException(request, response, Modbus::SLAVE_DEVICE_BUSY);
                     shouldReply = true;
                 }
-                break;
-            }
-
-            // Ignore requests not addressed to us
-            const bool catchAll = Modbus::isBroadcastId(_serverId) || sourceInterface.checkCatchAllSlaveIds();
-            if (!catchAll && (request.slaveId != _serverId) && !isBroadcast) {
-                finalRes = Error(Server::ERR_RCV_WRONG_SLAVE_ID);
-                break;
-            }
-
-            // Ignore unsolicited responses from clients
-            if (request.type != Modbus::REQUEST) {
-                finalRes = Error(Server::ERR_RCV_INVALID_TYPE);
                 break;
             }
 

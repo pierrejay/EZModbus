@@ -637,6 +637,83 @@ void test_server_rejects_overlaps_at_zero_and_same_start() {
     TEST_ASSERT_TRUE_MESSAGE(overlapAccepted(dynDisjoint, 0, 1, 1, 1), "disjoint words rejected");
 }
 
+// Regression: a busy server answered SLAVE_DEVICE_BUSY before checking the slave ID: on a shared
+// RTU bus, it answered requests addressed to another device. A first request received on another
+// interface (requests of a same interface are handled one by one) is held in its Word handler.
+struct HeldHandler {
+    StaticSemaphore_t releaseBuf;
+    SemaphoreHandle_t release = xSemaphoreCreateBinaryStatic(&releaseBuf);
+    volatile bool entered = false;
+};
+struct HeldRequest {
+    ModbusInterface::Dummy* side;
+    Modbus::Frame request;
+    volatile bool done;
+};
+static StaticTask_t heldRequestTcb;
+static StackType_t heldRequestStack[4096];
+
+static void heldRequestTask(void* arg) {
+    auto* held = static_cast<HeldRequest*>(arg);
+    held->side->transmitFrame(held->request);
+    held->done = true;
+    vTaskDelete(nullptr);
+}
+
+void test_server_busy_ignores_other_slave_ids() {
+    static ModbusInterface::Dummy busySide, side;
+    static Modbus::StaticWordStore<1> store;
+    static HeldHandler handler;
+    alignas(Modbus::Server) static uint8_t storage[sizeof(Modbus::Server)];
+    auto* server = new (storage) Modbus::Server({&busySide, &side}, store, 1, true, 10);
+    Modbus::Word word;
+    word.type = Modbus::HOLDING_REGISTER;
+    word.nbRegs = 1;
+    word.readHandler = [](const Modbus::Word&, uint16_t* outVals, void* userCtx) -> Modbus::ExceptionCode {
+        auto* held = static_cast<HeldHandler*>(userCtx);
+        held->entered = true;
+        xSemaphoreTake(held->release, portMAX_DELAY);
+        outVals[0] = 0;
+        return Modbus::NULL_EXCEPTION;
+    };
+    word.writeHandler = serverWriteHandler;
+    word.userCtx = &handler;
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, server->addWord(word));
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, server->begin());
+
+    Modbus::Frame request = {
+        .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = 1,
+        .regAddress = 0, .regCount = 1, .data = {}
+    };
+    HeldRequest held = { &busySide, request, false };
+    xTaskCreateStatic(heldRequestTask, "heldRequest", sizeof(heldRequestStack) / sizeof(StackType_t),
+                      &held, 1, heldRequestStack, &heldRequestTcb);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (!handler.entered && Modbus::TIME_MS() - t0 < 500) vTaskDelay(1);
+    bool busy = handler.entered;
+
+    // While busy: silent for another slave ID, SLAVE_DEVICE_BUSY for our own
+    Modbus::Frame frame;
+    request.slaveId = 2;
+    side.transmitFrame(request);
+    bool otherAnswered = side.getReceivedFrame(frame);
+    request.slaveId = 1;
+    side.transmitFrame(request);
+    bool ownBusy = side.getReceivedFrame(frame) && frame.exceptionCode == Modbus::SLAVE_DEVICE_BUSY;
+
+    xSemaphoreGive(handler.release);
+    t0 = Modbus::TIME_MS();
+    while (!held.done && Modbus::TIME_MS() - t0 < 1000) vTaskDelay(1);
+    bool heldAnswered = held.done && busySide.getReceivedFrame(frame) && frame.exceptionCode == Modbus::NULL_EXCEPTION;
+    if (held.done) server->~Server();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(busy, "first request not held in its handler");
+    TEST_ASSERT_FALSE_MESSAGE(otherAnswered, "busy server answered a request for another slave ID");
+    TEST_ASSERT_TRUE_MESSAGE(ownBusy, "busy server didn't answer SLAVE_DEVICE_BUSY to its own slave ID");
+    TEST_ASSERT_TRUE_MESSAGE(heldAnswered, "held request not answered once released");
+}
+
 // Regression: when Bridge::begin() couldn't register its slave callback, the master one stayed
 // in place, and every call to begin() (retry, or a second call after a success) registered the
 // callbacks again: each request was then forwarded several times. The slave side's callback
@@ -1112,6 +1189,7 @@ void setup() {
     RUN_TEST(test_client_destroyed_while_timeout_runs);
     RUN_TEST(test_server_begin_retry_registers_once);
     RUN_TEST(test_server_rejects_overlaps_at_zero_and_same_start);
+    RUN_TEST(test_server_busy_ignores_other_slave_ids);
     RUN_TEST(test_bridge_begin_registers_once);
     RUN_TEST(test_bridge_answered_request_timer_spares_next);
     RUN_TEST(test_client_sync_send_failure_applied_once);
