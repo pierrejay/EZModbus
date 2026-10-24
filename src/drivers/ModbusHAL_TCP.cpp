@@ -167,6 +167,24 @@ bool TCP::setupServerSocket(uint16_t port, uint32_t ip) {
     return true;
 }
 
+/* @brief Enable TCP keepalive on a connected socket
+ * @note Detects half-open connections (peer powered off, cable cut): the stack then
+ *       resets the socket, which the TCP task sees & closes like any other error
+ */
+static void enableKeepAlive(int sock) {
+    if (TCP::KEEPALIVE_IDLE_S <= 0) return;
+    int on = 1;
+    int idle = TCP::KEEPALIVE_IDLE_S;
+    int intvl = TCP::KEEPALIVE_INTVL_S;
+    int cnt = TCP::KEEPALIVE_CNT;
+    if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on)) < 0
+        || setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle)) < 0
+        || setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl)) < 0
+        || setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt)) < 0) {
+        Modbus::Debug::LOG_MSGF("Failed to enable keepalive on socket %d, errno: %d", sock, errno);
+    }
+}
+
 static uint32_t stringToIP(const char* ip_str) {
     struct in_addr addr;
     if (inet_pton(AF_INET, ip_str, &addr) == 1) {
@@ -260,6 +278,8 @@ bool TCP::setupClientSocket(const char* serverIP, uint16_t port) {
         Modbus::Debug::LOG_MSGF("Connected to %s:%u immediately!", serverIP, port);
     }
     
+    enableKeepAlive(newSocket);
+
     // Atomic assignment at the end (under Mutex)
     {
         Lock guard(_socketsMutex);
@@ -468,6 +488,7 @@ void TCP::runTcpTask() {
                         // Set new socket to non-blocking
                         int flags = fcntl(new_socket, F_GETFL, 0);
                         if (flags != -1 && fcntl(new_socket, F_SETFL, flags | O_NONBLOCK) != -1) {
+                            enableKeepAlive(new_socket);
                             _activeSockets[_activeSocketCount++] = new_socket;
                             char client_ip[INET_ADDRSTRLEN];
                             inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);

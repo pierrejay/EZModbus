@@ -25,6 +25,15 @@
 #ifndef EZMODBUS_HAL_TCP_TASK_STACK_SIZE // TCP RX/TX task stack size (bytes)
     #define EZMODBUS_HAL_TCP_TASK_STACK_SIZE 4096
 #endif
+#ifndef EZMODBUS_HAL_TCP_KEEPALIVE_IDLE_S // TCP keepalive: idle time before the first probe (s), 0 disables keepalive
+    #define EZMODBUS_HAL_TCP_KEEPALIVE_IDLE_S 10
+#endif
+#ifndef EZMODBUS_HAL_TCP_KEEPALIVE_INTVL_S // TCP keepalive: interval between probes (s)
+    #define EZMODBUS_HAL_TCP_KEEPALIVE_INTVL_S 5
+#endif
+#ifndef EZMODBUS_HAL_TCP_KEEPALIVE_CNT // TCP keepalive: unanswered probes before the connection is closed (#)
+    #define EZMODBUS_HAL_TCP_KEEPALIVE_CNT 3
+#endif
 
 
 namespace ModbusHAL {
@@ -40,6 +49,10 @@ public:
     static constexpr uint32_t SELECT_TIMEOUT_MS = 1000; // select() timeout in milliseconds (1s = low CPU usage)
     static constexpr uint32_t CONNECT_TIMEOUT_SEC = 5;  // Connect timeout in seconds (5s)
     static constexpr uint32_t SEND_BUDGET_MS = 50;      // Bounded retry budget to flush a short write (TX buffer full)
+    // Keepalive: a dead peer is detected after IDLE + INTVL * CNT seconds without traffic (25 s by default)
+    static constexpr int KEEPALIVE_IDLE_S = EZMODBUS_HAL_TCP_KEEPALIVE_IDLE_S;
+    static constexpr int KEEPALIVE_INTVL_S = EZMODBUS_HAL_TCP_KEEPALIVE_INTVL_S;
+    static constexpr int KEEPALIVE_CNT = EZMODBUS_HAL_TCP_KEEPALIVE_CNT;
 
     // Recovery configuration constants
     static constexpr int MAX_SELECT_ERRORS = 5;               // Max select() errors before long sleep

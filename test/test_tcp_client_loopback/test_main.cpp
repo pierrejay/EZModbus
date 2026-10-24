@@ -1855,6 +1855,73 @@ void test_hal_rx_notifications_never_block_send() {
 }
 
 // ===================================================================================
+// TCP KEEPALIVE
+// Without keepalive, a half-open connection (peer powered off, cable cut) is never
+// detected: it holds one of the server's connection slots forever, and a client keeps
+// sending into the void. A dead peer can't be simulated on loopback (the local stack
+// answers the probes), so we check the options set on the HAL sockets.
+// ===================================================================================
+
+static constexpr uint32_t MAX_DEAD_PEER_DETECTION_S = 60;
+static constexpr uint16_t KEEPALIVE_TEST_PORT = 517;
+ModbusHAL::TCP halForKeepAliveServer(KEEPALIVE_TEST_PORT);
+ModbusHAL::TCP halForKeepAliveClient(LOOPBACK_IP_STR, KEEPALIVE_TEST_PORT);
+
+static void assertKeepAlive(int fd, const char* side) {
+    int enabled = 0, idle = 0, intvl = 0, cnt = 0;
+    socklen_t len = sizeof(int);
+    getsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &enabled, &len);
+    len = sizeof(int); getsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, &len);
+    len = sizeof(int); getsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, &len);
+    len = sizeof(int); getsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, &len);
+    Modbus::Logger::logf("  %s socket %d: keepalive=%d idle=%ds intvl=%ds cnt=%d\n", side, fd, enabled, idle, intvl, cnt);
+    TEST_ASSERT_TRUE_MESSAGE(enabled != 0, "SO_KEEPALIVE not enabled");
+    TEST_ASSERT_TRUE_MESSAGE(idle > 0 && intvl > 0 && cnt > 0, "invalid keepalive parameters");
+    TEST_ASSERT_TRUE_MESSAGE((uint32_t)(idle + intvl * cnt) <= MAX_DEAD_PEER_DETECTION_S, "dead peer detection too slow");
+}
+
+static uint16_t localPort(int fd) {
+    sockaddr_in addr;
+    socklen_t len = sizeof(addr);
+    return (getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0) ? ntohs(addr.sin_port) : 0;
+}
+
+void test_hal_tcp_keepalive() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_HAL_TCP_KEEPALIVE");
+
+    TEST_ASSERT_TRUE_MESSAGE(halForKeepAliveServer.begin(), "server HAL begin failed");
+    TEST_ASSERT_TRUE_MESSAGE(halForKeepAliveClient.begin(), "client HAL begin failed");
+
+    // Server side socket: signaled by the server HAL once the client sends something
+    const uint8_t byte = 0x00;
+    TEST_ASSERT_TRUE_MESSAGE(halForKeepAliveClient.sendMsg(&byte, 1), "client HAL send failed");
+    int serverSock = -1;
+    TEST_ASSERT_EQUAL_MESSAGE(pdTRUE, xQueuePeek(halForKeepAliveServer.getRxQueueHandle(), &serverSock, pdMS_TO_TICKS(500)),
+                              "no RX event from server HAL");
+
+    // Client side socket: the one whose local port is the server socket's peer port
+    sockaddr_in peer;
+    socklen_t len = sizeof(peer);
+    TEST_ASSERT_EQUAL(0, getpeername(serverSock, reinterpret_cast<sockaddr*>(&peer), &len));
+    int clientSock = -1;
+    for (int fd = LWIP_SOCKET_OFFSET; fd < LWIP_SOCKET_OFFSET + CONFIG_LWIP_MAX_SOCKETS; fd++) {
+        if (fd != serverSock && localPort(fd) == ntohs(peer.sin_port)) { clientSock = fd; break; }
+    }
+
+    TEST_ASSERT_START();
+    assertKeepAlive(serverSock, "server");
+    TEST_ASSERT_TRUE_MESSAGE(clientSock >= 0, "client HAL socket not found");
+    assertKeepAlive(clientSock, "client");
+
+    halForKeepAliveClient.stop();
+    halForKeepAliveServer.stop();
+
+    Modbus::Logger::logln("TEST_HAL_TCP_KEEPALIVE - OK");
+    Modbus::Logger::logln();
+}
+
+// ===================================================================================
 // LIFECYCLE: STOP / DESTRUCTION MUST JOIN THE TASKS
 // A task still running after stop() / destruction may access a destroyed object,
 // or have its static TCB & stack reused by the next begin(). We check that the
@@ -2875,6 +2942,7 @@ void setup() {
     RUN_TEST(test_client_unit_id_255);
     RUN_TEST(test_server_unit_id_255);
     RUN_TEST(test_hal_rx_notifications_never_block_send);
+    RUN_TEST(test_hal_tcp_keepalive);
     RUN_TEST(test_hal_stop_joins_task);
     RUN_TEST(test_interface_destroy_joins_task_and_detaches_queue);
     RUN_TEST(test_modbus_exceptions);
