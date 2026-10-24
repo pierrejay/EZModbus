@@ -108,6 +108,9 @@ public:
 
     // Give access to RX queue for QueueSet integration (read only)
     QueueHandle_t getRxQueueHandle() const { return _rxQueue; }
+    // Add / remove the RX queue to / from the consumer's QueueSet (see attachRxQueue())
+    bool attachRxQueue(QueueSetHandle_t set);
+    bool detachRxQueue(QueueSetHandle_t set);
 
 private:
     // Task for handling socket events and data

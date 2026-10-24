@@ -120,6 +120,7 @@ private:
     ByteBuffer _txBuffer; // Linked to _txBuf
     TxCtx _txCtx; // Stores the current TX data context
     Mutex _txMutex; // Protects access to _txBuffer & _txCtx
+    Mutex _controlMutex; // Fences abortCurrentTransaction() against destruction (held for a few us only)
 
     // Transaction management
     TransactionCtx _currentTransaction; // IMPORTANT: must ONLY be written from rxTxTask context!

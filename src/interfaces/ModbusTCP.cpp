@@ -35,6 +35,11 @@ TCP::~TCP() {
         killRxTxTask();
     }
 
+    // Wait for in-flight API calls posting into our queues: the next ones see !_isInitialized.
+    // Nothing can post into them anymore, so that they can be detached from the set in one go.
+    { Lock guard(_txMutex); }      // sendFrame()
+    { Lock guard(_controlMutex); } // abortCurrentTransaction()
+
     // Delete the FreeRTOS objects created in begin()
     beginCleanup();
 }
@@ -98,18 +103,18 @@ TCP::Result TCP::begin() {
         return Error(ERR_INIT_FAILED, "failed to create QueueSet");
     }
 
-    // Add queues to QueueSet
-    if (!setQueueMembership(_rxEventQueue, _eventQueueSet, true)) {
+    // Add queues to QueueSet (the HAL adds its RX queue itself, as it owns its producer)
+    if (!_tcpHAL.attachRxQueue(_eventQueueSet)) {
         beginCleanup();
         return Error(ERR_INIT_FAILED, "failed to add HAL RX queue to set");
     }
     _rxQueueInSet = true;
-    if (!setQueueMembership(_txRequestQueue, _eventQueueSet, true)) {
+    if (xQueueAddToSet(_txRequestQueue, _eventQueueSet) != pdPASS) {
         beginCleanup();
         return Error(ERR_INIT_FAILED, "failed to add TX queue to set");
     }
     _txQueueInSet = true;
-    if (!setQueueMembership(_txnControlQueue, _eventQueueSet, true)) {
+    if (xQueueAddToSet(_txnControlQueue, _eventQueueSet) != pdPASS) {
         beginCleanup();
         return Error(ERR_INIT_FAILED, "failed to add Txn control queue to set");
     }
@@ -168,6 +173,12 @@ TCP::Result TCP::sendFrame(const Modbus::Frame &frame, TxResultCallback txCallba
         if (!guard.isLocked() || _txBuffer.size() != 0) {
             if (txCallback) txCallback(ERR_BUSY, ctx);
             return Error(ERR_BUSY, "TX already in progress");
+        }
+
+        // Checked again under the mutex: fenced by the destructor
+        if (!_isInitialized) {
+            if (txCallback) txCallback(ERR_NOT_INITIALIZED, ctx);
+            return Error(ERR_NOT_INITIALIZED, "TCP interface not initialized");
         }
 
         if (_role == Modbus::SERVER && (!_currentTransaction.active || _currentTransaction.socketNum == -1)) {
@@ -238,6 +249,7 @@ bool TCP::isReady() {
  * @note A request not sent yet (e.g. waiting for a reconnection) will not be sent at all
  */
 void TCP::abortCurrentTransaction() {
+    Lock guard(_controlMutex); // Fenced by the destructor
     if (!_isInitialized || !_txnControlQueue) return;
     _abortCount++;
     // Send a dummy signal, rxTxTask will take care of aborting the txn
@@ -263,13 +275,22 @@ TaskHandle_t TCP::getRxTxTaskHandle() {
 void TCP::beginCleanup() {
     // Clean up resources in reverse order of creation
     if (_eventQueueSet) {
-        if (_controlQueueInSet) _controlQueueInSet = !setQueueMembership(_txnControlQueue, _eventQueueSet, false);
-        if (_txQueueInSet) _txQueueInSet = !setQueueMembership(_txRequestQueue, _eventQueueSet, false);
-        if (_rxQueueInSet) _rxQueueInSet = !setQueueMembership(_rxEventQueue, _eventQueueSet, false);
+        // Queues can only be removed from a set while empty. Nothing posts into ours anymore
+        // (task joined, API calls fenced) and the HAL detaches its RX queue under its own mutex:
+        // each queue is emptied & removed in one go.
+        if (_controlQueueInSet) {
+            xQueueReset(_txnControlQueue);
+            _controlQueueInSet = (xQueueRemoveFromSet(_txnControlQueue, _eventQueueSet) != pdPASS);
+        }
+        if (_txQueueInSet) {
+            xQueueReset(_txRequestQueue);
+            _txQueueInSet = (xQueueRemoveFromSet(_txRequestQueue, _eventQueueSet) != pdPASS);
+        }
+        if (_rxQueueInSet) _rxQueueInSet = !_tcpHAL.detachRxQueue(_eventQueueSet);
         if (!_controlQueueInSet && !_txQueueInSet && !_rxQueueInSet) {
             vQueueDelete(_eventQueueSet);
         } else {
-            // Never delete a set still referenced by a queue: leak it instead
+            // Not expected (a producer bypassed the fences): never delete a set still referenced
             Modbus::Debug::LOG_MSG("Failed to detach queues from QueueSet, leaking it");
         }
         _eventQueueSet = nullptr;

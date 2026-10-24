@@ -778,6 +778,30 @@ void TCP::closeConnection(int socketNum, uint32_t connId) {
     if (connId != 0 && connectionIdLocked(socketNum) == connId) closeSocket(socketNum);
 }
 
+/* @brief Add the RX queue to the consumer's QueueSet
+ * @return True on success
+ * @note FreeRTOS only allows it while the queue is empty. The TCP task (the only producer)
+ *       posts while holding _socketsMutex: under that mutex, the queue can be emptied & added
+ *       in one go. Dropping pending notifications is harmless: unread data is signaled again.
+ */
+bool TCP::attachRxQueue(QueueSetHandle_t set) {
+    Lock guard(_socketsMutex);
+    if (!_rxQueue || !set) return false;
+    xQueueReset(_rxQueue);
+    return xQueueAddToSet(_rxQueue, set) == pdPASS;
+}
+
+/* @brief Remove the RX queue from the consumer's QueueSet
+ * @return True on success
+ * @note Same as attachRxQueue(): under _socketsMutex the queue can be emptied & removed in one go
+ */
+bool TCP::detachRxQueue(QueueSetHandle_t set) {
+    Lock guard(_socketsMutex);
+    if (!_rxQueue || !set) return false;
+    xQueueReset(_rxQueue);
+    return xQueueRemoveFromSet(_rxQueue, set) == pdPASS;
+}
+
 /* @brief Get a new connection ID (never 0) */
 uint32_t TCP::newConnectionIdLocked() {
     if (++_lastConnId == 0) ++_lastConnId;

@@ -2200,6 +2200,71 @@ void test_interface_destroy_joins_task_and_detaches_queue() {
     Modbus::Logger::logln();
 }
 
+// Interface destruction/re-creation while the HAL keeps signaling RX: once the interface task
+// is gone nobody reads the data, so the HAL re-posts its notification continuously. Detaching
+// the RX queue from the queue set must neither overflow the set (FreeRTOS assert) nor fail.
+// To keep the suite's RAM footprint unchanged, this test reuses the server HAL & interface
+// storage of test_interface_destroy_joins_task_and_detaches_queue(), and the probe task
+// buffers of test_hal_rx_notifications_never_block_send() (all free by now).
+static constexpr int DETACH_STRESS_CYCLES = 30;
+static volatile bool detachStressRunning = false;
+
+// Sends a request every 2 ms & drains whatever comes back (busy exceptions)
+static void detachStressSenderTask(void* arg) {
+    int sock = *static_cast<int*>(arg);
+    uint8_t req[RAW_READ_HR_REQ_SIZE];
+    uint8_t dump[64];
+    uint16_t tid = 0;
+    while (detachStressRunning) {
+        rawBuildReadHrRequest(req, tid++, 0);
+        ::send(sock, req, sizeof(req), MSG_DONTWAIT);
+        while (::recv(sock, dump, sizeof(dump), MSG_DONTWAIT) > 0) {}
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    detachStressRunning = true; // Ack: the task no longer uses the socket
+    vTaskSuspend(nullptr);
+}
+
+void test_interface_recreate_under_rx_traffic() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_INTERFACE_RECREATE_UNDER_RX_TRAFFIC");
+
+    const UBaseType_t baseline = settledTaskCount();
+    TEST_ASSERT_TRUE_MESSAGE(halForLifecycleServer.begin(), "server HAL begin failed");
+    static int sock;
+    sock = rawConnect(IFC_LIFECYCLE_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sock >= 0, "raw connect to server failed");
+
+    detachStressRunning = true;
+    TaskHandle_t sender = xTaskCreateStatic(detachStressSenderTask, "detachStress", sizeof(halSendProbeStack) / sizeof(StackType_t),
+                                            &sock, tskIDLE_PRIORITY + 1, halSendProbeStack, &halSendProbeTcb);
+    TEST_ASSERT_NOT_NULL(sender);
+
+    int failedCycle = -1;
+    for (int i = 0; i < DETACH_STRESS_CYCLES && failedCycle < 0; i++) {
+        auto* ifc = new (lifecycleIfcStorage1) ModbusInterface::TCP(halForLifecycleServer, Modbus::SERVER);
+        if (ifc->begin() != ModbusInterface::IInterface::SUCCESS) failedCycle = i;
+        vTaskDelay(pdMS_TO_TICKS(10 + (i % 7) * 3));
+        ifc->~TCP();
+        vTaskDelay(pdMS_TO_TICKS(5)); // Unread data keeps being signaled meanwhile
+    }
+
+    // Stop the sender (it acks by setting the flag back), then clean up
+    detachStressRunning = false;
+    uint32_t t0 = TIME_MS();
+    while (!detachStressRunning && TIME_MS() - t0 < 500) vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelete(sender);
+    ::close(sock);
+    halForLifecycleServer.stop();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(-1, failedCycle, "interface begin() failed after a re-creation under RX traffic");
+    TEST_ASSERT_EQUAL_MESSAGE(baseline, uxTaskGetNumberOfTasks(), "tasks left after the stress test");
+
+    Modbus::Logger::logln("TEST_INTERFACE_RECREATE_UNDER_RX_TRAFFIC - OK");
+    Modbus::Logger::logln();
+}
+
 void test_modbus_exceptions() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_MODBUS_EXCEPTIONS - CASE 1: READ EXCEPTION (ILLEGAL DATA ADDRESS)");
@@ -3128,6 +3193,7 @@ void setup() {
     RUN_TEST(test_hal_tcp_keepalive);
     RUN_TEST(test_hal_stop_joins_task);
     RUN_TEST(test_interface_destroy_joins_task_and_detaches_queue);
+    RUN_TEST(test_interface_recreate_under_rx_traffic);
     RUN_TEST(test_modbus_exceptions);
     RUN_TEST(test_invalid_parameters);
     RUN_TEST(test_broadcast_read_rejected);
