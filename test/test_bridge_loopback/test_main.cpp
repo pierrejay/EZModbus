@@ -669,6 +669,46 @@ void test_bridge_begin_registers_once() {
     TEST_ASSERT_EQUAL_MESSAGE(1, slaveRegistered, "slave callback registered more than once");
 }
 
+// Guard: an answered request's timer is no longer stopped (stopped after the mutex, it could
+// cancel the timer of a request forwarded meanwhile). Its later event must neither expire the
+// next request early nor prevent that request's own timeout.
+void test_bridge_answered_request_timer_spares_next() {
+    static ModbusInterface::Dummy slaveSide;
+    static DummyMaster masterSide;
+    alignas(Modbus::Bridge) static uint8_t storage[sizeof(Modbus::Bridge)];
+    auto* bridge = new (storage) Modbus::Bridge(masterSide, slaveSide, LOCAL_BRIDGE_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Bridge::SUCCESS, bridge->begin());
+    Modbus::Frame frame;
+
+    // Request A, answered at once
+    uint32_t tA = Modbus::TIME_MS();
+    slaveSide.transmitFrame(LOCAL_BRIDGE_REQUEST);
+    bool aForwarded = masterSide.getReceivedFrame(frame);
+    Modbus::Frame response = LOCAL_BRIDGE_REQUEST;
+    response.type = Modbus::RESPONSE;
+    response.data[0] = 0x1234;
+    masterSide.transmitFrame(response);
+    bool aAnswered = slaveSide.getReceivedFrame(frame) && frame.exceptionCode == Modbus::NULL_EXCEPTION;
+
+    // Request B, half a timeout later, never answered
+    vTaskDelay(pdMS_TO_TICKS(LOCAL_BRIDGE_TIMEOUT_MS / 2));
+    uint32_t tB = Modbus::TIME_MS();
+    slaveSide.transmitFrame(LOCAL_BRIDGE_REQUEST);
+    bool bForwarded = masterSide.getReceivedFrame(frame);
+    while (Modbus::TIME_MS() - tA < LOCAL_BRIDGE_TIMEOUT_MS + 20) vTaskDelay(1); // A's deadline passed
+    bool bExpiredEarly = slaveSide.getReceivedFrame(frame);
+    while (Modbus::TIME_MS() - tB < LOCAL_BRIDGE_TIMEOUT_MS + 50) vTaskDelay(1); // B's deadline passed
+    bool bExpired = slaveSide.getReceivedFrame(frame)
+                    && frame.exceptionCode == Modbus::GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND;
+    bridge->~Bridge();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(aForwarded && aAnswered, "request A not forwarded & answered");
+    TEST_ASSERT_TRUE_MESSAGE(bForwarded, "request B not forwarded");
+    TEST_ASSERT_FALSE_MESSAGE(bExpiredEarly, "request B expired at A's deadline");
+    TEST_ASSERT_TRUE_MESSAGE(bExpired, "request B didn't time out at its own deadline");
+}
+
 // Regression: if the timer command couldn't be queued, the request was forwarded without
 // any timeout. The bridge must answer instead (the requester can retry).
 void test_bridge_timer_command_failure() {
@@ -781,6 +821,7 @@ void setup() {
     RUN_TEST(test_server_begin_retry_registers_once);
     RUN_TEST(test_server_rejects_overlaps_at_zero_and_same_start);
     RUN_TEST(test_bridge_begin_registers_once);
+    RUN_TEST(test_bridge_answered_request_timer_spares_next);
     RUN_TEST(test_bridge_timer_command_failure);
     UNITY_END();
 }

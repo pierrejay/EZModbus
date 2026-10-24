@@ -275,29 +275,31 @@ private:
             }
             _pendingActive = false;
         }
-        xTimerStop(_timer, 0);
+        // The timer isn't stopped: its callback finds no expired request (stopping it here could
+        // cancel the timer of a request forwarded meanwhile)
         slaveInterface->sendFrame(response, nullptr, nullptr);
     }
 
     /* @brief Timer callback: the device behind the bridge didn't answer in time */
     static void timeoutCallback(TimerHandle_t timer) {
         auto* self = static_cast<Bridge*>(pvTimerGetTimerID(timer));
-        if (self->closePendingWithException(Modbus::GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND, true)) {
-            self->masterInterface->abortCurrentTransaction();
-        }
+        self->closePendingWithException(Modbus::GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND, true);
     }
 
     /* @brief Close the pending request (if any) by replying an exception to the slave side
-     * @param onlyIfExpired Only close it if its timeout has elapsed (a late timer event must
-     *        not expire a newer request before its own deadline)
+     * @param onTimeout Called by the timer: only close the request if its timeout has elapsed (a
+     *        late timer event must not expire a newer request), and abort it on the master side
      * @return True if a pending request was closed
+     * @note The abort is posted under the mutex: before a newer request can be forwarded, so that
+     *       it can't cancel it
      */
-    bool closePendingWithException(Modbus::ExceptionCode ec, bool onlyIfExpired = false) {
+    bool closePendingWithException(Modbus::ExceptionCode ec, bool onTimeout = false) {
         Modbus::Frame exception;
         {
             Lock guard(_pendingMutex);
             if (!_pendingActive) return false; // Already answered
-            if (onlyIfExpired && TIME_MS() - _pendingStartMs < _timeoutMs) return false;
+            if (onTimeout && TIME_MS() - _pendingStartMs < _timeoutMs) return false;
+            if (onTimeout) masterInterface->abortCurrentTransaction(); // Non-blocking
             _pendingActive = false;
             exception.clear();
             exception.type = Modbus::RESPONSE;
@@ -307,7 +309,6 @@ private:
             exception.regCount = _pending.regCount;
             exception.exceptionCode = ec;
         }
-        xTimerStop(_timer, 0);
         Modbus::Debug::LOG_MSGF("Bridge: replying exception %s", Modbus::toString(ec));
         slaveInterface->sendFrame(exception, nullptr, nullptr);
         return true;
