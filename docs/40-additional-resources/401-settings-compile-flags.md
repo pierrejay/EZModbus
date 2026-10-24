@@ -69,6 +69,13 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
     * Timeout before aborting a request if no response received from server (ms)
     * Default: 1000
 
+### ModbusBridge.hpp
+
+* **`EZMODBUS_BRIDGE_TIMEOUT_MS`**
+    * Timeout before the bridge replies a `GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND` exception if the device behind it doesn't answer (ms)
+    * Can also be set per bridge in its constructor
+    * Default: 1000
+
 ### ModbusRTU.h
 
 * **`EZMODBUS_RTU_TASK_STACK_SIZE`**
