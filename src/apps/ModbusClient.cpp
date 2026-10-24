@@ -87,7 +87,9 @@ void Client::PendingRequest::timeoutCallback(TimerHandle_t timer) {
         }
     }
 
-    // Valid timeout for current transaction
+    // Valid timeout for current transaction. A timeout only means that no response came in time:
+    // the request may have been sent (and executed). The abort is best effort: the interface
+    // drops the request if it hasn't started sending it yet (e.g. while reconnecting).
     pendingReq->_client->_interface.abortCurrentTransaction();
 
     // Use dedicated timer method
@@ -610,6 +612,10 @@ Client::Result Client::handleResponse(const Modbus::Frame& response)
     if (Modbus::isBroadcastId(reqSnapshot.slaveId)) {
         return Error(ERR_INVALID_RESPONSE, "response to broadcast");
     }
+
+    // Responses are matched by slave ID & FC (TCP responses are already paired by transaction ID).
+    // Over RTU, a response arriving after its request timed out can't be told apart from the
+    // answer to the next request: the timeout must exceed the slave's worst-case response time.
 
     // Check if the response is from the right slave (unless catch-all is enabled)
     if (!_interface.checkCatchAllSlaveIds() && response.slaveId != reqSnapshot.slaveId) {

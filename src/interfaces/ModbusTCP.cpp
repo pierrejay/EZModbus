@@ -207,6 +207,8 @@ TCP::Result TCP::sendFrame(const Modbus::Frame &frame, TxResultCallback txCallba
                    Modbus::isBroadcastId(frame.slaveId), 
                    replacedByException ? nullptr : txCallback,
                    ctx);
+        // Aborts from now on cancel this frame if not sent yet (best effort: an earlier abort,
+        // e.g. a timeout firing before this call, isn't seen)
         _txCtx.abortCount = _abortCount;
         _txCtx.connId = (_role == Modbus::SERVER) ? _currentTransaction.connId : 0;
 
@@ -246,7 +248,8 @@ bool TCP::isReady() {
 /* @brief Abort current transaction (cleanup hint from client)
  * @note Called when client times out to allow immediate cleanup
  * @note Safe to be called from outside (signals to txnControlQueue, managed by rxTxTask)
- * @note A request not sent yet (e.g. waiting for a reconnection) will not be sent at all
+ * @note A request not sent yet (e.g. waiting for a reconnection) is dropped if the interface
+ *       hasn't started sending it (best effort)
  */
 void TCP::abortCurrentTransaction() {
     Lock guard(_controlMutex); // Fenced by the destructor
