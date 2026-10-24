@@ -1651,6 +1651,53 @@ void test_client_no_late_write_after_reconnect() {
     Modbus::Logger::logln();
 }
 
+// Regression: a response PDU with the exception bit set but exception code 0 (e.g. 86 00)
+// was decoded as a normal response without error: a write got a SUCCESS without any
+// valid acknowledgement. The raw server answers a FC06 write with 86 00.
+void test_client_null_exception_response_rejected() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_CLIENT_NULL_EXCEPTION_RESPONSE_REJECTED");
+
+    int listenSock = rawListen(RAW_SERVER_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0, "raw server listen failed");
+    beginRawServerClient();
+
+    Modbus::Frame req = {
+        .type = Modbus::REQUEST,
+        .fc = Modbus::WRITE_REGISTER,
+        .slaveId = TEST_SLAVE_ID,
+        .regAddress = 0,
+        .regCount = 1,
+        .exceptionCode = Modbus::NULL_EXCEPTION
+    };
+    req.data[0] = 0x1234;
+    Modbus::Frame resp;
+    Modbus::Client::Result tracker = Modbus::Client::NODATA;
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, rawServerClient.sendRequest(req, resp, &tracker));
+    int peer = ::accept(listenSock, nullptr, nullptr);
+    TEST_ASSERT_TRUE_MESSAGE(peer >= 0, "accept() failed");
+    rawSetupPeer(peer);
+    uint8_t reqBytes[RAW_READ_HR_REQ_SIZE]; // FC06 request: same size as FC03
+    TEST_ASSERT_EQUAL_MESSAGE(sizeof(reqBytes), rawRecvExact(peer, reqBytes, sizeof(reqBytes)), "request not received");
+
+    const uint8_t bogus[] = {reqBytes[0], reqBytes[1], 0x00, 0x00, 0x00, 0x03, TEST_SLAVE_ID, 0x86, 0x00};
+    TEST_ASSERT_TRUE_MESSAGE(rawSendAll(peer, bogus, sizeof(bogus)), "send bogus response failed");
+
+    volatile Modbus::Client::Result& result = tracker; // Written by the client
+    uint32_t t0 = Modbus::TIME_MS();
+    while (result == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < RAW_SERVER_CLIENT_TIMEOUT_MS + 200) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    closeRawServer(peer, listenSock);
+    Modbus::Logger::logf("  result: %s\n", Modbus::Client::toString(tracker));
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, tracker, "86 00 must not complete the write");
+
+    Modbus::Logger::logln("TEST_CLIENT_NULL_EXCEPTION_RESPONSE_REJECTED - OK");
+    Modbus::Logger::logln();
+}
+
 // ===================================================================================
 // SERVER: RX STREAM FRAMING
 // A raw client talks to the main EZModbus test server (mbt).
@@ -1851,6 +1898,7 @@ struct MalformedCase {
 static const MalformedCase MALFORMED_CASES[] = {
     { "unsupported FC 0x2B",        TEST_SLAVE_ID, {0x2B, 0x0E, 0x01, 0x00}, 4,                          0xAB, 0x01 },
     { "request FC with bit 7 set",  TEST_SLAVE_ID, {0x83, 0x00, 0x00, 0x00, 0x01}, 5,                    0x83, 0x01 },
+    { "request FC 0x83, 2-byte PDU", TEST_SLAVE_ID, {0x83, 0x00}, 2,                                   0x83, 0x01 },
     { "FC03 quantity 126",          TEST_SLAVE_ID, {0x03, 0x00, 0x00, 0x00, 0x7E}, 5,                    0x83, 0x03 },
     { "FC03 truncated PDU",         TEST_SLAVE_ID, {0x03, 0x00, 0x00, 0x00}, 4,                          0x83, 0x03 },
     { "FC05 value not 0/FF00",      TEST_SLAVE_ID, {0x05, 0x00, 0x00, 0x12, 0x34}, 5,                    0x85, 0x03 },
@@ -3291,6 +3339,7 @@ void setup() {
     RUN_TEST(test_late_response_not_matched_to_next_request);
     RUN_TEST(test_client_rx_coalesced_responses);
     RUN_TEST(test_client_no_late_write_after_reconnect);
+    RUN_TEST(test_client_null_exception_response_rejected);
     RUN_TEST(test_server_rx_fragmented_request);
     RUN_TEST(test_server_rx_coalesced_requests);
     RUN_TEST(test_server_rx_truncated_request_closes_connection);

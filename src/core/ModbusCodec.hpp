@@ -296,16 +296,25 @@ class PDU {
         pdu.fc = (Modbus::FunctionCode)bytes[0];
         pdu.exceptionCode = Modbus::NULL_EXCEPTION;
         
-        // Flip FC bit 7 if exception code is not NULL
+        // FC bit 7 flags an exception response. It may answer a function code we don't support
+        // (ILLEGAL_FUNCTION), so any non-zero function code is accepted there
         bool isException = ((uint8_t)pdu.fc & 0x80) != 0;
-        if (isException) pdu.fc = (Modbus::FunctionCode)((uint8_t)pdu.fc & 0x7F);
-        if (!isValidFunctionCode(pdu.fc)) return HandleError(pdu, ERR_INVALID_FC);
+        if (isException) {
+            if (type == Modbus::REQUEST) return HandleError(pdu, ERR_INVALID_FC);
+            pdu.fc = (Modbus::FunctionCode)((uint8_t)pdu.fc & 0x7F);
+            if (pdu.fc == Modbus::NULL_FC) return HandleError(pdu, ERR_INVALID_FC);
+        } else if (!isValidFunctionCode(pdu.fc)) {
+            return HandleError(pdu, ERR_INVALID_FC);
+        }
 
         // Validate exception code
         if (isException) {
             if (bytes.size() != 2) return HandleError(pdu, ERR_INVALID_LEN);
             uint8_t ec = bytes.data()[1];
-            if (!isValidExceptionCode(ec, type)) return HandleError(pdu, ERR_INVALID_EXCEPTION);
+            // NULL_EXCEPTION is only valid in normal frames: here it would turn into a success
+            if (ec == Modbus::NULL_EXCEPTION || !isValidExceptionCode(ec, type)) {
+                return HandleError(pdu, ERR_INVALID_EXCEPTION);
+            }
             pdu.exceptionCode = (Modbus::ExceptionCode)ec;
             return SUCCESS;
         }
