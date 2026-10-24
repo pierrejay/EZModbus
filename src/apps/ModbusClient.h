@@ -304,6 +304,7 @@ private:
         StaticTimer_t _timerBuf;                      // Static timer buffer
         TimerHandle_t _timer = nullptr;               // FreeRTOS timer handle
         BinarySemaphore _timerKillSem;                // Signals timer flush completion
+        BinarySemaphore _timerDeleteFence;            // Signals that the timer daemon processed the timer deletion
         std::atomic<uint32_t> _timerCbDisarmed;       // Flag to indicate whether the timer callback is disarmed
 
         // Atomic gates for closing race protection
@@ -321,6 +322,7 @@ private:
         bool set(const Modbus::Frame& request, ResponseCallback cb, 
                  void* userCtx, uint32_t timeoutMs);
         void clear();
+        void deleteTimer();
         // Lock-free methods
         bool isActive() const;
         bool hasResponse() const;

@@ -511,6 +511,67 @@ void test_apps_remove_rcv_callbacks_on_destruction() {
     TEST_ASSERT_EQUAL_MESSAGE(0, bridgeLeft, "bridge callbacks left after destruction");
 }
 
+// Regression: the client destructor only stopped its timeout timer if it was still active: a
+// timeout callback already running (timer expired) kept using the destroyed client, and the
+// timer deletion was left pending. The interface's abort blocks to hold that callback while
+// another task destroys the client: the destructor must wait for it.
+struct BlockingAbortMaster : public DummyMaster {
+    StaticSemaphore_t releaseBuf;
+    SemaphoreHandle_t release = xSemaphoreCreateBinaryStatic(&releaseBuf);
+    volatile bool entered = false;
+    void abortCurrentTransaction() override {
+        entered = true;
+        xSemaphoreTake(release, portMAX_DELAY);
+    }
+};
+static constexpr uint32_t LOCAL_CLIENT_TIMEOUT_MS = 20;
+
+struct ClientDestroyer {
+    Modbus::Client* client;
+    volatile bool done;
+};
+static StaticTask_t clientDestroyerTcb;
+static StackType_t clientDestroyerStack[4096];
+
+static void clientDestroyerTask(void* arg) {
+    auto* destroyer = static_cast<ClientDestroyer*>(arg);
+    destroyer->client->~Client();
+    destroyer->done = true;
+    vTaskDelete(nullptr);
+}
+
+void test_client_destroyed_while_timeout_runs() {
+    static BlockingAbortMaster masterSide;
+    alignas(Modbus::Client) static uint8_t storage[sizeof(Modbus::Client)];
+    auto* client = new (storage) Modbus::Client(masterSide, LOCAL_CLIENT_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, client->begin());
+
+    // The request times out: its callback runs, held in the interface's abort
+    Modbus::Frame resp;
+    Modbus::Client::Result tracker = Modbus::Client::NODATA;
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, client->sendRequest(LOCAL_BRIDGE_REQUEST, resp, &tracker));
+    uint32_t t0 = Modbus::TIME_MS();
+    while (!masterSide.entered && Modbus::TIME_MS() - t0 < 500) vTaskDelay(1);
+    bool held = masterSide.entered;
+
+    // Destroy the client meanwhile, from another task
+    ClientDestroyer destroyer = { client, false };
+    if (held) {
+        xTaskCreateStatic(clientDestroyerTask, "clientDestroyer", sizeof(clientDestroyerStack) / sizeof(StackType_t),
+                          &destroyer, 1, clientDestroyerStack, &clientDestroyerTcb);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    bool returnedWhileRunning = destroyer.done;
+    xSemaphoreGive(masterSide.release);
+    t0 = Modbus::TIME_MS();
+    while (held && !destroyer.done && Modbus::TIME_MS() - t0 < 1000) vTaskDelay(1);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(held, "timeout callback not reached");
+    TEST_ASSERT_FALSE_MESSAGE(returnedWhileRunning, "client destroyed while its timeout callback was running");
+    TEST_ASSERT_TRUE_MESSAGE(destroyer.done, "client destructor didn't return");
+}
+
 // Regression: if the timer command couldn't be queued, the request was forwarded without
 // any timeout. The bridge must answer instead (the requester can retry).
 void test_bridge_timer_command_failure() {
@@ -619,6 +680,7 @@ void setup() {
     RUN_TEST(test_bridge_malformed_request_exception);
     RUN_TEST(test_bridge_destroyed_with_armed_timer);
     RUN_TEST(test_apps_remove_rcv_callbacks_on_destruction);
+    RUN_TEST(test_client_destroyed_while_timeout_runs);
     RUN_TEST(test_bridge_timer_command_failure);
     UNITY_END();
 }

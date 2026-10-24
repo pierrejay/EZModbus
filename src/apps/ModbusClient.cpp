@@ -390,13 +390,27 @@ bool Client::PendingRequest::snapshotIfActive(PendingSnapshot& out) {
     return true;
 }
 
+/* @brief Delete the timer, waiting until its callback can't run anymore
+ * @note A timeout callback already running completes first
+ */
+void Client::PendingRequest::deleteTimer() {
+    if (!_timer) return;
+    xTimerDelete(_timer, portMAX_DELAY);
+    // Fence: runs in the timer daemon after the delete command, once no callback can run
+    if (xTaskGetCurrentTaskHandle() != xTimerGetTimerDaemonTaskHandle()) {
+        while (_timerDeleteFence.tryTake()) {} // Purge the semaphore
+        xTimerPendFunctionCall([](void* ctx, uint32_t) {
+            static_cast<PendingRequest*>(ctx)->_timerDeleteFence.giveForce();
+        }, this, 0, portMAX_DELAY);
+        _timerDeleteFence.take();
+    }
+    _timer = nullptr;
+}
+
 /* @brief Destructor for PendingRequest - cleanup timer
  */
 Client::PendingRequest::~PendingRequest() {
-    if (_timer) {
-        xTimerDelete(_timer, 0);
-        _timer = nullptr;
-    }
+    deleteTimer();
 }
 
 
@@ -425,8 +439,9 @@ Client::Client(ModbusInterface::IInterface& interface, uint32_t timeoutMs) :
 {}
 
 Client::~Client() {
-    // The interface must not call this object anymore
+    // The interface & the timeout timer must not call this object anymore
     _interface.removeRcvCallbacks(this);
+    _pendingRequest.deleteTimer();
     // Cleanup any active pending request
     _pendingRequest.clear();
     _isInitialized = false;
