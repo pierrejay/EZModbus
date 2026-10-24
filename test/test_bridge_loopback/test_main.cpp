@@ -785,7 +785,7 @@ struct ControlledMaster : public DummyMaster {
     volatile bool abortEntered = false;
     volatile uint32_t aborts = 0;
     void abortCurrentTransaction() override {
-        aborts++;
+        aborts = aborts + 1;
         if (!holdAbort || abortEntered) return;
         abortEntered = true;
         xSemaphoreTake(abortRelease, portMAX_DELAY);
@@ -987,7 +987,7 @@ void test_client_timer_rearm_failure() {
     while (xTimerPendFunctionCall([](void*, uint32_t) {}, nullptr, 0, 0) == pdPASS) queued++;
     rearmFailureCallbacks = 0;
     Modbus::Client::Result sendRes = client->sendRequest(LOCAL_BRIDGE_REQUEST,
-        [](Modbus::Client::Result, const Modbus::Frame*, void*) { rearmFailureCallbacks++; }, nullptr);
+        [](Modbus::Client::Result, const Modbus::Frame*, void*) { rearmFailureCallbacks = rearmFailureCallbacks + 1; }, nullptr);
     bool readyAfter = client->isReady();
     releaseTimerDaemon();
     vTaskDelay(pdMS_TO_TICKS(20));
