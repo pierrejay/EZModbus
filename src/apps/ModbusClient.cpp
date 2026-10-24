@@ -616,6 +616,8 @@ Client::Result Client::handleResponse(const Modbus::Frame& response)
     // Responses are matched by slave ID & FC (TCP responses are already paired by transaction ID).
     // Over RTU, a response arriving after its request timed out can't be told apart from the
     // answer to the next request: the timeout must exceed the slave's worst-case response time.
+    // The content isn't checked against the request (e.g. echoed address, number of values): many
+    // slaves aren't strictly compliant, and the spec wouldn't identify the request anyway.
 
     // Check if the response is from the right slave (unless catch-all is enabled)
     if (!_interface.checkCatchAllSlaveIds() && response.slaveId != reqSnapshot.slaveId) {

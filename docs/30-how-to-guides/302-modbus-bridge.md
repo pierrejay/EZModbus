@@ -83,7 +83,7 @@ Modbus::Bridge bridge(rtuIface, tcpIface, 500); // 500 ms timeout
 ```
 
 !!! note
-    Keep the bridge timeout above the response time of the slowest device, and below the timeout of the clients connecting to the bridge. A response arriving after the timeout is dropped.
+    Keep the bridge timeout above the response time of the slowest device, and below the timeout of the clients connecting to the bridge. Over RTU, the protocol has no transaction ID: a response is matched to the pending request by slave ID & function code only. A response arriving after its timeout is dropped if no request is pending, but taken as the answer to a pending request to the same device & function code.
 
 !!! note
     The interfaces call the bridge from their own tasks: destroy them before the bridge (or keep the bridge for the whole program lifetime).

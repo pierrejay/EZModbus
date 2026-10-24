@@ -250,8 +250,9 @@ private:
     }
 
     /* @brief Forward a response from the master side to the slave side
-     * @note Only the response to the pending request is forwarded: a response arriving
-     *       after the timeout (or unsolicited) is dropped
+     * @note Matched to the pending request by slave ID & FC only (RTU has no transaction ID):
+     *       a late or unsolicited response is dropped, unless a request to the same slave & FC
+     *       is pending, which takes it as its answer
      */
     void forwardResponse(const Modbus::Frame& response) {
         {
