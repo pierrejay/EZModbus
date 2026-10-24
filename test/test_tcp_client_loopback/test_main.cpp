@@ -1440,6 +1440,27 @@ static uint16_t rawReadHrRespValue(const uint8_t* frame) {
     return (static_cast<uint16_t>(frame[9]) << 8) | frame[10];
 }
 
+static uint16_t localPort(int fd) {
+    sockaddr_in addr;
+    socklen_t len = sizeof(addr);
+    return (getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0) ? ntohs(addr.sin_port) : 0;
+}
+
+// Socket number of the server side of a loopback connection (-1 if not accepted yet):
+// the socket bound to serverPort whose peer is clientSock's local port
+static int rawServerSideSocket(uint16_t serverPort, int clientSock) {
+    const uint16_t clientPort = localPort(clientSock);
+    if (clientPort == 0) return -1;
+    for (int s = LWIP_SOCKET_OFFSET; s < LWIP_SOCKET_OFFSET + CONFIG_LWIP_MAX_SOCKETS; s++) {
+        if (localPort(s) != serverPort) continue;
+        sockaddr_in peer;
+        socklen_t len = sizeof(peer);
+        if (getpeername(s, reinterpret_cast<sockaddr*>(&peer), &len) != 0) continue; // Listening socket
+        if (ntohs(peer.sin_port) == clientPort) return s;
+    }
+    return -1;
+}
+
 // ===================================================================================
 // CLIENT: LATE RESPONSE SCENARIO
 // Request A is received by the raw server but left unanswered until the client
@@ -1995,6 +2016,75 @@ void test_server_response_not_sent_to_reused_socket() {
     Modbus::Logger::logln();
 }
 
+// Regression: while assembling a frame, the interface only checked the connection after
+// reading. When client A disconnected mid-frame and client B got the same socket number,
+// B's first bytes were read then dropped: the rest of B's frame was taken for a header,
+// found invalid, and B was disconnected. The interface task is held while A leaves & B
+// connects, so that B's request is waiting when it resumes the assembly of A's frame.
+// The test checks that B actually got A's server socket number.
+void test_server_rx_reused_socket_mid_frame() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_SERVER_RX_REUSED_SOCKET_MID_FRAME");
+
+    beginIsolatedServer([](const Modbus::Frame& request) {
+        Modbus::Frame response;
+        response.clear();
+        response.type = Modbus::RESPONSE;
+        response.fc = request.fc;
+        response.slaveId = request.slaveId;
+        response.regAddress = request.regAddress;
+        response.regCount = 1;
+        response.data[0] = 0xBBBB;
+        isolatedServerIf.sendFrame(response, nullptr, nullptr);
+    });
+
+    // Client A: start of a header, the interface waits for the rest
+    int sockA = rawConnect(ISOLATED_SERVER_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sockA >= 0, "client A connect failed");
+    uint8_t req[RAW_READ_HR_REQ_SIZE];
+    rawBuildReadHrRequest(req, 0x0A0A, 0);
+    TEST_ASSERT_TRUE(rawSendAll(sockA, req, 2));
+    vTaskDelay(pdMS_TO_TICKS(20));
+    const int serverSockA = rawServerSideSocket(ISOLATED_SERVER_TEST_PORT, sockA);
+    TEST_ASSERT_TRUE_MESSAGE(serverSockA >= 0, "client A not accepted");
+
+    // Hold the interface task while it waits for the rest (blocked, so not holding a HAL lock)
+    TaskHandle_t ifTask = isolatedServerIf.getRxTxTaskHandle();
+    for (int i = 0; i < 100 && eTaskGetState(ifTask) != eBlocked; i++) vTaskDelay(1);
+    TEST_ASSERT_EQUAL_MESSAGE(eBlocked, eTaskGetState(ifTask), "interface task not waiting");
+    vTaskSuspend(ifTask);
+
+    // A leaves, B connects on the same server socket number & sends a request
+    ::close(sockA);
+    vTaskDelay(pdMS_TO_TICKS(100)); // Let the server HAL notice & free A's socket
+    int sockB = rawConnect(ISOLATED_SERVER_TEST_PORT);
+    int serverSockB = -1;
+    for (int i = 0; i < 50 && sockB >= 0 && serverSockB < 0; i++) { // Until the HAL accepts B
+        vTaskDelay(pdMS_TO_TICKS(10));
+        serverSockB = rawServerSideSocket(ISOLATED_SERVER_TEST_PORT, sockB);
+    }
+    rawBuildReadHrRequest(req, 0x0B0B, 0);
+    bool sent = sockB >= 0 && rawSendAll(sockB, req, sizeof(req));
+    vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskResume(ifTask); // Before any assert: the following tests need the task
+    if (sockB >= 0 && !sent) ::close(sockB);
+    TEST_ASSERT_TRUE_MESSAGE(sent, "client B connect/send failed");
+    if (serverSockB != serverSockA) ::close(sockB);
+    TEST_ASSERT_EQUAL_MESSAGE(serverSockA, serverSockB, "client B didn't get A's server socket number");
+
+    uint8_t resp[RAW_READ_HR_RESP_SIZE];
+    size_t got = rawRecvExact(sockB, resp, sizeof(resp));
+    ::close(sockB);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(sizeof(resp), got, "client B got no response");
+    TEST_ASSERT_EQUAL_HEX16(0x0B0B, rawTid(resp));
+    TEST_ASSERT_EQUAL_HEX16(0xBBBB, rawReadHrRespValue(resp));
+
+    Modbus::Logger::logln("TEST_SERVER_RX_REUSED_SOCKET_MID_FRAME - OK");
+    Modbus::Logger::logln();
+}
+
 // Regression: the HAL task posts one RX event per select() round while data is
 // unread on a socket, and used to post it with portMAX_DELAY while holding the
 // socket mutex. Once the RX queue was full (consumer busy), the HAL task blocked
@@ -2093,12 +2183,6 @@ static void assertKeepAlive(int fd, const char* side) {
     TEST_ASSERT_TRUE_MESSAGE(enabled != 0, "SO_KEEPALIVE not enabled");
     TEST_ASSERT_TRUE_MESSAGE(idle > 0 && intvl > 0 && cnt > 0, "invalid keepalive parameters");
     TEST_ASSERT_TRUE_MESSAGE((uint32_t)(idle + intvl * cnt) <= MAX_DEAD_PEER_DETECTION_S, "dead peer detection too slow");
-}
-
-static uint16_t localPort(int fd) {
-    sockaddr_in addr;
-    socklen_t len = sizeof(addr);
-    return (getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0) ? ntohs(addr.sin_port) : 0;
 }
 
 void test_hal_tcp_keepalive() {
@@ -3215,6 +3299,7 @@ void setup() {
     RUN_TEST(test_server_malformed_requests_exceptions);
     RUN_TEST(test_server_unencodable_response_exception);
     RUN_TEST(test_server_response_not_sent_to_reused_socket);
+    RUN_TEST(test_server_rx_reused_socket_mid_frame);
     RUN_TEST(test_hal_rx_notifications_never_block_send);
     RUN_TEST(test_hal_tcp_keepalive);
     RUN_TEST(test_hal_stop_joins_task);

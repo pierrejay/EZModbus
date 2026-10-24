@@ -458,11 +458,10 @@ TCP::Result TCP::fetchSocketData(int socketNum, ByteBuffer& rcvBuf, uint16_t& rc
     while (true) {
         size_t currentSize = rcvBuf.size();
         rcvBuf.resize(frameLen); // Pre-reserve exactly what is missing
-        uint32_t readConnId = 0;
-        size_t n = _tcpHAL.readSocketData(socketNum, rcvBuf.begin() + currentSize, frameLen - currentSize, &readConnId);
-
         // The whole frame must come from the same connection (the socket number may be reused)
-        if (n != SIZE_MAX && connId != 0 && readConnId != connId) n = SIZE_MAX;
+        uint32_t readConnId = 0;
+        size_t n = _tcpHAL.readSocketData(socketNum, rcvBuf.begin() + currentSize, frameLen - currentSize,
+                                          connId, &readConnId);
         if (n != SIZE_MAX) connId = readConnId;
 
         if (n == SIZE_MAX) {

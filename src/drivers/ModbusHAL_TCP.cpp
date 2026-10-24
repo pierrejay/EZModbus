@@ -739,14 +739,16 @@ bool TCP::isReady() {
     }
 }
 
-size_t TCP::readSocketData(int socketNum, uint8_t* dst, size_t maxLen, uint32_t* connId) {
+size_t TCP::readSocketData(int socketNum, uint8_t* dst, size_t maxLen, uint32_t connId, uint32_t* actualConnId) {
     if (!dst || maxLen == 0) return SIZE_MAX;
 
-    // Read under the mutex so that the data & the connection ID match
+    // Check the connection under the mutex before reading: the data of another connection
+    // reusing the socket number must stay in its socket
     Lock guard(_socketsMutex);
     const uint32_t id = connectionIdLocked(socketNum);
     if (id == 0) return SIZE_MAX; // Socket no longer tracked (closed)
-    if (connId) *connId = id;
+    if (connId != 0 && id != connId) return SIZE_MAX; // Not the expected connection anymore
+    if (actualConnId) *actualConnId = id;
 
     ssize_t r = ::recv(socketNum, dst, maxLen, 0); // Non-bloquant (socket configuré O_NONBLOCK)
 

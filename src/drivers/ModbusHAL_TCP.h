@@ -93,7 +93,7 @@ public:
     // pass the ID of the connection an operation is meant for, 0 to skip the check
     bool sendMsg(const uint8_t* payload, const size_t len, const int destSocket = -1, int* actualSocket = nullptr,
                  uint32_t connId = 0, uint32_t* actualConnId = nullptr);
-    size_t readSocketData(int socketNum, uint8_t* dst, size_t maxLen, uint32_t* connId = nullptr);
+    size_t readSocketData(int socketNum, uint8_t* dst, size_t maxLen, uint32_t connId = 0, uint32_t* actualConnId = nullptr);
     void closeConnection(int socketNum, uint32_t connId);
     bool ensureClientConnected();
 
