@@ -573,6 +573,37 @@ void test_client_destroyed_while_timeout_runs() {
     TEST_ASSERT_TRUE_MESSAGE(destroyer.done, "client destructor didn't return");
 }
 
+// Regression: when Server::begin() failed on its second interface, the callback registered on
+// the first one stayed in place (calling a server that isn't initialized), and a retry added a
+// second one: each request was then handled twice.
+struct FailingBeginDummy : public ModbusInterface::Dummy {
+    bool failBegin = true;
+    Result begin() override { return failBegin ? ERR_INIT_FAILED : SUCCESS; }
+};
+
+void test_server_begin_retry_registers_once() {
+    static ModbusInterface::Dummy firstSide;
+    static FailingBeginDummy secondSide;
+    static Modbus::StaticWordStore<1> store;
+    alignas(Modbus::Server) static uint8_t storage[sizeof(Modbus::Server)];
+    auto* server = new (storage) Modbus::Server({&firstSide, &secondSide}, store);
+
+    Modbus::Server::Result failedRes = server->begin();
+    size_t leftAfterFailure = firstSide.callbackCount();
+    secondSide.failBegin = false;
+    Modbus::Server::Result retryRes = server->begin();
+    size_t firstAfterRetry = firstSide.callbackCount();
+    size_t secondAfterRetry = secondSide.callbackCount();
+    server->~Server();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(Modbus::Server::SUCCESS, failedRes, "begin() should fail on the second interface");
+    TEST_ASSERT_EQUAL_MESSAGE(0, leftAfterFailure, "callback left on the first interface after a failed begin()");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Server::SUCCESS, retryRes, "begin() retry failed");
+    TEST_ASSERT_EQUAL_MESSAGE(1, firstAfterRetry, "first interface callback registered more than once");
+    TEST_ASSERT_EQUAL_MESSAGE(1, secondAfterRetry, "second interface callback not registered once");
+}
+
 // Regression: if the timer command couldn't be queued, the request was forwarded without
 // any timeout. The bridge must answer instead (the requester can retry).
 void test_bridge_timer_command_failure() {
@@ -682,6 +713,7 @@ void setup() {
     RUN_TEST(test_bridge_destroyed_with_armed_timer);
     RUN_TEST(test_apps_remove_rcv_callbacks_on_destruction);
     RUN_TEST(test_client_destroyed_while_timeout_runs);
+    RUN_TEST(test_server_begin_retry_registers_once);
     RUN_TEST(test_bridge_timer_command_failure);
     UNITY_END();
 }
