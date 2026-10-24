@@ -139,7 +139,7 @@ On ESP32, the `DynamicWordStore` will be automatically added to PSRAM (if enable
 To ease the initialization process, the `addWords(Word* words, size_t count)` method will add several words from a buffer to the server.
 
 !!! note
-    This method is atomic, which means all Words will be added or none. If there's a validation issue with **any** of the Words you submit, it will return an error (`ERR_WORD_...`) and no Word will be stored consequently. The log trace will display which invalid Word returned the error first:
+    This method is atomic, which means all Words will be added or none. If there's a validation issue with **any** of the Words you submit (including an overlap, checked even before `begin()`), it will return an error (`ERR_WORD_...`) and no Word will be stored consequently. The log trace will display which invalid Word returned the error first:
 
     ```
     [ModbusServer.cpp::addWords:110] Error: Malformed handlers (holding register 23-24)

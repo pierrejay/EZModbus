@@ -766,6 +766,50 @@ void test_server_rejects_start_inside_word() {
     checkStartInsideWordRejected(dynamicStore, "dynamic store");
 }
 
+// Regression: addWords() wasn't all-or-nothing. Before begin(), the static store rejected an
+// overlapping Word while inserting it, after the previous ones of the batch (reported as a capacity
+// overflow); after begin(), the vector overload's in-batch check wrapped the end address of a Word
+// ending at 65535, letting the store reject it in the same way.
+static Modbus::Word handledWord(uint16_t startAddr, uint16_t nbRegs) {
+    Modbus::Word word;
+    word.type = Modbus::HOLDING_REGISTER;
+    word.startAddr = startAddr;
+    word.nbRegs = nbRegs;
+    word.readHandler = serverReadHandler;
+    word.writeHandler = serverWriteHandler;
+    return word;
+}
+
+void test_server_add_words_all_or_nothing() {
+    static ModbusInterface::Dummy side;
+    static Modbus::StaticWordStore<4> store;
+    alignas(Modbus::Server) static uint8_t storage[sizeof(Modbus::Server)];
+    auto* server = new (storage) Modbus::Server(side, store);
+
+    // Before begin(): overlap inside the batch, then the valid batch
+    const Modbus::Word overlapping[] = { handledWord(10, 1), handledWord(11, 1), handledWord(10, 1) };
+    auto overlapRes = server->addWords(overlapping, 3);
+    bool leftover = (bool)server->getWord(Modbus::HOLDING_REGISTER, 10);
+    auto retryRes = server->addWords(overlapping, 2);
+    auto singleRes = server->addWord(handledWord(11, 1)); // Overlaps a Word already added
+    auto begun = server->begin();
+
+    // After begin(): vector batch with a Word ending at 65535
+    std::vector<Modbus::Word> lastAddr = { handledWord(65530, 6), handledWord(65532, 1) };
+    auto lastAddrRes = server->addWords(lastAddr);
+    bool lastAddrLeftover = (bool)server->getWord(Modbus::HOLDING_REGISTER, 65530);
+    server->~Server();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Server::ERR_WORD_OVERLAP, overlapRes, "overlapping batch not reported as such");
+    TEST_ASSERT_FALSE_MESSAGE(leftover, "overlapping batch partly added");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Server::SUCCESS, retryRes, "valid batch rejected after a failed one");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Server::ERR_WORD_OVERLAP, singleRes, "overlapping Word not reported as such");
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, begun);
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Server::ERR_WORD_OVERLAP, lastAddrRes, "overlap ending at 65535 not reported as such");
+    TEST_ASSERT_FALSE_MESSAGE(lastAddrLeftover, "batch ending at 65535 partly added");
+}
+
 // Regression: when Bridge::begin() couldn't register its slave callback, the master one stayed
 // in place, and every call to begin() (retry, or a second call after a success) registered the
 // callbacks again: each request was then forwarded several times. The slave side's callback
@@ -1243,6 +1287,7 @@ void setup() {
     RUN_TEST(test_server_rejects_overlaps_at_zero_and_same_start);
     RUN_TEST(test_server_busy_ignores_other_slave_ids);
     RUN_TEST(test_server_rejects_start_inside_word);
+    RUN_TEST(test_server_add_words_all_or_nothing);
     RUN_TEST(test_bridge_begin_registers_once);
     RUN_TEST(test_bridge_answered_request_timer_spares_next);
     RUN_TEST(test_client_sync_send_failure_applied_once);

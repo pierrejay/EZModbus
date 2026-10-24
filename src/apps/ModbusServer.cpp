@@ -655,75 +655,16 @@ Server::Result Server::addWord(const Word& word) {
  * @note Atomic operation: all words will be added or none!
  */
 Server::Result Server::addWords(const std::vector<Word>& words) {
-    Lock guard(_serverMutex, 0);  // Try-lock global mutex
-    if (!guard.isLocked()) return Error(Server::ERR_WORD_BUSY);
-
-    // Quick capacity check (atomicity guarantee)
-    if ((_wordStore.totalCapacity() - _wordStore.totalSize()) < words.size()) {
-        return Error(Server::ERR_WORD_OVERFLOW, "WordStore capacity exceeded");
-    }
-
-    // Check validity of each word (basic validation only)
-    for (const auto& word : words) {
-        Server::Result res = isValidWordEntry(word);
-        if (res != Server::SUCCESS) {
-            Modbus::Debug::LOG_MSGF("Error (%s) : %s %d-%d", toString(res), Modbus::toString(word.type), 
-                                    word.startAddr, word.startAddr + word.nbRegs - 1);
-            return Error(res, "failed to add word");
-        }
-    }
-
-    // FAST PATH: Skip expensive overlap checks for bulk insertion
-    // Overlaps will be validated once in begin() after sorting
-    if (_isInitialized) {
-        // Only do overlap checks if server is already running (runtime additions)
-        for (const auto& word : words) {
-            if (wordOverlaps(word)) {
-                Modbus::Debug::LOG_MSGF("Error (%s) : %s %d-%d", toString(ERR_WORD_OVERLAP), Modbus::toString(word.type), 
-                                        word.startAddr, word.startAddr + word.nbRegs - 1);
-                return Error(Server::ERR_WORD_OVERLAP, "word overlaps with existing word");
-            }
-        }
-
-        // Check for overlaps within the batch itself
-        for (size_t i = 0; i < words.size(); ++i) {
-            for (size_t j = i + 1; j < words.size(); ++j) {
-                const auto& word1 = words[i];
-                const auto& word2 = words[j];
-                
-                // Only check words of the same type
-                if (word1.type == word2.type) {
-                    uint16_t word1End = word1.startAddr + word1.nbRegs;
-                    uint16_t word2End = word2.startAddr + word2.nbRegs;
-                    
-                    // Check for overlap
-                    if ((word1.startAddr < word2End) && (word2.startAddr < word1End)) {
-                        Modbus::Debug::LOG_MSGF("Error (%s) : %s %d-%d overlaps with %d-%d", toString(ERR_WORD_OVERLAP), 
-                                                Modbus::toString(word1.type), word1.startAddr, word1.startAddr + word1.nbRegs - 1,
-                                                word2.startAddr, word2.startAddr + word2.nbRegs - 1);
-                        return Error(Server::ERR_WORD_OVERLAP, "words overlap within batch");
-                    }
-                }
-            }
-        }
-    }
-
-    // Add each word to the store
-    for (const auto& word : words) {
-        Result res = addWordInternal(word);
-        if (res != SUCCESS) {
-            return res;  // Return first error encountered
-        }
-    }
-    
-    return Success();
+    if (words.empty()) return Success();
+    return addWords(words.data(), words.size());
 }
 
 /* @brief Add a set of words to the server
  * @param words Pointer to the Word buffer
  * @param count Number of words to add
  * @return Result::SUCCESS if the words were added successfully
- * @note Atomic operation: all words will be added or none!
+ * @note Atomic operation: all words will be added or none! The whole batch is checked
+ *       (O(n^2), meant for initialization) before inserting anything.
  */
 Server::Result Server::addWords(const Word* words, size_t count) {
     if (!words || count == 0) {
@@ -738,37 +679,38 @@ Server::Result Server::addWords(const Word* words, size_t count) {
         return Error(Server::ERR_WORD_OVERFLOW, "WordStore capacity exceeded");
     }
 
-    // 1) Validate each word
     for (size_t i = 0; i < count; ++i) {
-        Result res = isValidWordEntry(words[i]);
+        const Word& word = words[i];
+        // Validate each word
+        Result res = isValidWordEntry(word);
         if (res != SUCCESS) {
+            Modbus::Debug::LOG_MSGF("Error (%s) : %s %d-%d", toString(res), Modbus::toString(word.type),
+                                    word.startAddr, word.startAddr + word.nbRegs - 1);
             return Error(res, "failed to add word");
         }
-    }
 
-    // 2) Overlap checks if server already running
-    if (_isInitialized) {
-        for (size_t i = 0; i < count; ++i) {
-            if (wordOverlaps(words[i])) {
-                return Error(ERR_WORD_OVERLAP, "word overlaps with existing word");
-            }
+        // Overlap with the words already added
+        if (wordOverlaps(word)) {
+            Modbus::Debug::LOG_MSGF("Error (%s) : %s %d-%d", toString(ERR_WORD_OVERLAP), Modbus::toString(word.type),
+                                    word.startAddr, word.startAddr + word.nbRegs - 1);
+            return Error(ERR_WORD_OVERLAP, "word overlaps with existing word");
         }
 
-        // intra-batch overlap check (same logic as vector version)
-        for (size_t i = 0; i + 1 < count; ++i) {
-            for (size_t j = i + 1; j < count; ++j) {
-                if (words[i].type == words[j].type) {
-                    uint32_t endI = words[i].startAddr + words[i].nbRegs;
-                    uint32_t endJ = words[j].startAddr + words[j].nbRegs;
-                    if (words[i].startAddr < endJ && words[j].startAddr < endI) {
-                        return Error(ERR_WORD_OVERLAP, "words overlap within batch");
-                    }
-                }
+        // Overlap with the next words of the batch
+        uint32_t end = (uint32_t)word.startAddr + word.nbRegs;
+        for (size_t j = i + 1; j < count; ++j) {
+            const Word& other = words[j];
+            uint32_t otherEnd = (uint32_t)other.startAddr + other.nbRegs;
+            if (word.type == other.type && word.startAddr < otherEnd && other.startAddr < end) {
+                Modbus::Debug::LOG_MSGF("Error (%s) : %s %d-%d overlaps with %d-%d", toString(ERR_WORD_OVERLAP),
+                                        Modbus::toString(word.type), word.startAddr, word.startAddr + word.nbRegs - 1,
+                                        other.startAddr, other.startAddr + other.nbRegs - 1);
+                return Error(ERR_WORD_OVERLAP, "words overlap within batch");
             }
         }
     }
 
-    // 3) Insert each word
+    // Insert each word (can't fail anymore)
     for (size_t i = 0; i < count; ++i) {
         Result res = addWordInternal(words[i]);
         if (res != SUCCESS) return res;
@@ -869,6 +811,8 @@ bool Server::validateNoOverlapsInStore(Modbus::RegisterType type) {
 Server::Result Server::addWordInternal(const Word& word) {
     // Use WordStore (unified API)
     if (!_wordStore.insert(word)) {
+        // A sorted store also rejects an overlapping word
+        if (_wordStore.hasCapacity(word.type)) return Error(Server::ERR_WORD_OVERLAP, "word overlaps with existing word");
         return Error(Server::ERR_WORD_OVERFLOW, "WordStore insert failed - capacity exceeded");
     }
     return Success("Word added to WordStore");
