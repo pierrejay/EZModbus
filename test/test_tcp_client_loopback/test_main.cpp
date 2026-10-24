@@ -1448,20 +1448,34 @@ static uint16_t rawReadHrRespValue(const uint8_t* frame) {
 // B must complete with its own value.
 // ===================================================================================
 
-static constexpr uint32_t LATE_RESPONSE_CLIENT_TIMEOUT_MS = 300;
+// The client tests against a raw server share one EZModbus client stack (RAM footprint).
+// Each test leaves it disconnected: its next request reconnects to the test's raw server.
+static constexpr uint16_t RAW_SERVER_TEST_PORT = 511;
+static constexpr uint32_t RAW_SERVER_CLIENT_TIMEOUT_MS = 300;
+ModbusHAL::TCP rawServerClientHal(LOOPBACK_IP_STR, RAW_SERVER_TEST_PORT);
+ModbusInterface::TCP rawServerClientIfc(rawServerClientHal, Modbus::CLIENT);
+Modbus::Client rawServerClient(rawServerClientIfc, RAW_SERVER_CLIENT_TIMEOUT_MS);
 
-static void runLateResponseScenario(uint16_t port, ModbusHAL::TCP& hal, ModbusInterface::TCP& ifc,
-                                    Modbus::Client& cli, bool coalesced) {
-    int listenSock = rawListen(port);
+static void beginRawServerClient() {
+    rawServerClientHal.begin(); // No-op (returns false) once running
+    rawServerClientIfc.begin();
+    rawServerClient.begin();
+}
+
+// Close the raw server side & wait for the client HAL to notice it (disconnected)
+static void closeRawServer(int peer, int listenSock) {
+    if (peer >= 0) ::close(peer);
+    if (listenSock >= 0) ::close(listenSock);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (rawServerClientHal.isClientConnected() && Modbus::TIME_MS() - t0 < 2000) vTaskDelay(pdMS_TO_TICKS(5));
+}
+
+static void runLateResponseScenario(bool coalesced) {
+    ModbusInterface::TCP& ifc = rawServerClientIfc;
+    Modbus::Client& cli = rawServerClient;
+    int listenSock = rawListen(RAW_SERVER_TEST_PORT);
     TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0, "raw server listen failed");
-
-    hal.begin();
-    ifc.begin();
-    cli.begin();
-
-    int peer = ::accept(listenSock, nullptr, nullptr);
-    TEST_ASSERT_TRUE_MESSAGE(peer >= 0, "accept() failed");
-    rawSetupPeer(peer);
+    beginRawServerClient();
 
     auto waitTracker = [](volatile Modbus::Client::Result& tracker, uint32_t maxMs) {
         uint32_t t0 = Modbus::TIME_MS();
@@ -1481,12 +1495,16 @@ static void runLateResponseScenario(uint16_t port, ModbusHAL::TCP& hal, ModbusIn
     };
 
     // 1) Request A: received by the server but left unanswered -> client timeout
+    // (it (re)connects the client to the raw server)
     Modbus::Frame respA;
     Modbus::Client::Result trackerA = Modbus::Client::NODATA;
     TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, cli.sendRequest(req, respA, &trackerA));
+    int peer = ::accept(listenSock, nullptr, nullptr);
+    TEST_ASSERT_TRUE_MESSAGE(peer >= 0, "accept() failed");
+    rawSetupPeer(peer);
     TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_REQ_SIZE, rawRecvExact(peer, reqBytes, sizeof(reqBytes)), "request A not received");
     uint16_t tidA = rawTid(reqBytes);
-    waitTracker(trackerA, LATE_RESPONSE_CLIENT_TIMEOUT_MS + 200);
+    waitTracker(trackerA, RAW_SERVER_CLIENT_TIMEOUT_MS + 200);
     TEST_ASSERT_START();
     TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, trackerA, "request A should time out");
 
@@ -1515,9 +1533,8 @@ static void runLateResponseScenario(uint16_t port, ModbusHAL::TCP& hal, ModbusIn
         TEST_ASSERT_TRUE_MESSAGE(rawSendAll(peer, respBytes + RAW_READ_HR_RESP_SIZE, RAW_READ_HR_RESP_SIZE), "send response B failed");
     }
 
-    waitTracker(trackerB, LATE_RESPONSE_CLIENT_TIMEOUT_MS + 200);
-    ::close(peer);
-    ::close(listenSock);
+    waitTracker(trackerB, RAW_SERVER_CLIENT_TIMEOUT_MS + 200);
+    closeRawServer(peer, listenSock);
 
     TEST_ASSERT_START();
     TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, trackerB, "request B should succeed");
@@ -1533,10 +1550,7 @@ static void runLateResponseScenario(uint16_t port, ModbusHAL::TCP& hal, ModbusIn
 void test_late_response_not_matched_to_next_request() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_LATE_RESPONSE_NOT_MATCHED_TO_NEXT_REQUEST");
-    static ModbusHAL::TCP lateHal(LOOPBACK_IP_STR, 511);
-    static ModbusInterface::TCP lateIfc(lateHal, Modbus::CLIENT);
-    static Modbus::Client lateClient(lateIfc, LATE_RESPONSE_CLIENT_TIMEOUT_MS);
-    runLateResponseScenario(511, lateHal, lateIfc, lateClient, false);
+    runLateResponseScenario(false);
     Modbus::Logger::logln("TEST_LATE_RESPONSE_NOT_MATCHED_TO_NEXT_REQUEST - OK");
     Modbus::Logger::logln();
 }
@@ -1547,10 +1561,7 @@ void test_late_response_not_matched_to_next_request() {
 void test_client_rx_coalesced_responses() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_CLIENT_RX_COALESCED_RESPONSES");
-    static ModbusHAL::TCP coalescedHal(LOOPBACK_IP_STR, 512);
-    static ModbusInterface::TCP coalescedIfc(coalescedHal, Modbus::CLIENT);
-    static Modbus::Client coalescedClient(coalescedIfc, LATE_RESPONSE_CLIENT_TIMEOUT_MS);
-    runLateResponseScenario(512, coalescedHal, coalescedIfc, coalescedClient, true);
+    runLateResponseScenario(true);
     Modbus::Logger::logln("TEST_CLIENT_RX_COALESCED_RESPONSES - OK");
     Modbus::Logger::logln();
 }
@@ -1561,26 +1572,19 @@ void test_client_rx_coalesced_responses() {
 // device after the application was told it had failed.
 // A slow connect is obtained by filling the raw server's listen backlog: lwIP
 // then ignores the SYN, and the connection completes on its retransmission (~3 s).
-static constexpr uint16_t LATE_WRITE_TEST_PORT = 516;
-static constexpr uint32_t LATE_WRITE_CLIENT_TIMEOUT_MS = 500;
 
 void test_client_no_late_write_after_reconnect() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_CLIENT_NO_LATE_WRITE_AFTER_RECONNECT");
 
-    // Client started while nothing listens: it stays disconnected
-    static ModbusHAL::TCP lateWriteHal(LOOPBACK_IP_STR, LATE_WRITE_TEST_PORT);
-    static ModbusInterface::TCP lateWriteIfc(lateWriteHal, Modbus::CLIENT);
-    static Modbus::Client lateWriteClient(lateWriteIfc, LATE_WRITE_CLIENT_TIMEOUT_MS);
-    lateWriteHal.begin();
-    lateWriteIfc.begin();
-    lateWriteClient.begin();
-    TEST_ASSERT_FALSE_MESSAGE(lateWriteHal.isClientConnected(), "client should start disconnected");
+    // Shared client, left disconnected by the previous test (nothing listens yet)
+    beginRawServerClient();
+    TEST_ASSERT_FALSE_MESSAGE(rawServerClientHal.isClientConnected(), "client should start disconnected");
 
     // Raw server whose backlog (1) is filled by a connection we don't accept yet
-    int listenSock = rawListen(LATE_WRITE_TEST_PORT);
+    int listenSock = rawListen(RAW_SERVER_TEST_PORT);
     TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0, "raw server listen failed");
-    int filler = rawConnect(LATE_WRITE_TEST_PORT);
+    int filler = rawConnect(RAW_SERVER_TEST_PORT);
     TEST_ASSERT_TRUE_MESSAGE(filler >= 0, "filler connect failed");
 
     // Write request: the client reconnects first, which now takes ~3 s
@@ -1595,9 +1599,9 @@ void test_client_no_late_write_after_reconnect() {
     };
     Modbus::Frame writeResp;
     Modbus::Client::Result tracker = Modbus::Client::NODATA;
-    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, lateWriteClient.sendRequest(writeReq, writeResp, &tracker));
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, rawServerClient.sendRequest(writeReq, writeResp, &tracker));
     uint32_t t0 = Modbus::TIME_MS();
-    while (tracker == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < LATE_WRITE_CLIENT_TIMEOUT_MS + 200) vTaskDelay(pdMS_TO_TICKS(5));
+    while (tracker == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < RAW_SERVER_CLIENT_TIMEOUT_MS + 200) vTaskDelay(pdMS_TO_TICKS(5));
     TEST_ASSERT_START();
     TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, tracker, "write should time out while reconnecting");
 
@@ -1616,10 +1620,9 @@ void test_client_no_late_write_after_reconnect() {
     uint8_t buf[RAW_READ_HR_REQ_SIZE];
     size_t got = rawRecvExact(peer, buf, sizeof(buf));
 
-    ::close(peer);
     ::close(fillerPeer);
     ::close(filler);
-    ::close(listenSock);
+    closeRawServer(peer, listenSock);
 
     TEST_ASSERT_EQUAL_MESSAGE(0, got, "timed-out write request was sent after reconnection");
 
@@ -1660,8 +1663,19 @@ void test_server_rx_fragmented_request() {
     Modbus::Logger::logln();
 }
 
+// Read one ADU (MBAP length-framed), returns its size (0 if none / truncated)
+static size_t rawRecvAdu(int sock, uint8_t* buf, size_t cap) {
+    if (cap < 6 || rawRecvExact(sock, buf, 6) != 6) return 0;
+    size_t len = 6 + ((static_cast<size_t>(buf[4]) << 8) | buf[5]);
+    if (len > cap || rawRecvExact(sock, buf + 6, len - 6) != len - 6) return 0;
+    return len;
+}
+
 // Regression: two requests received in the same segment: the second one was
 // read from the socket and then silently dropped.
+// The second one may be answered with SLAVE_DEVICE_BUSY instead (possibly before the
+// first response) if it's read while the first transaction is open: that's allowed (the
+// client pairs answers by TID), as long as no request goes unanswered.
 void test_server_rx_coalesced_requests() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_SERVER_RX_COALESCED_REQUESTS");
@@ -1674,16 +1688,31 @@ void test_server_rx_coalesced_requests() {
     rawBuildReadHrRequest(reqs + RAW_READ_HR_REQ_SIZE, 0x0A02, 1);
     TEST_ASSERT_TRUE(rawSendAll(sock, reqs, sizeof(reqs)));
 
-    uint8_t resps[2 * RAW_READ_HR_RESP_SIZE];
-    size_t got = rawRecvExact(sock, resps, sizeof(resps));
+    uint8_t answers[2][RAW_READ_HR_RESP_SIZE] = {};
+    size_t lens[2] = {0, 0};
+    for (int i = 0; i < 2; i++) {
+        uint8_t adu[RAW_READ_HR_RESP_SIZE];
+        size_t len = rawRecvAdu(sock, adu, sizeof(adu));
+        if (len == 0) break;
+        int slot = (rawTid(adu) == 0x0A02) ? 1 : 0;
+        memcpy(answers[slot], adu, len);
+        lens[slot] = len;
+    }
     ::close(sock);
 
     TEST_ASSERT_START();
-    TEST_ASSERT_EQUAL_MESSAGE(sizeof(resps), got, "both coalesced requests should get a response");
-    TEST_ASSERT_EQUAL_HEX16(0x0A01, rawTid(resps));
-    TEST_ASSERT_EQUAL_HEX16(MBT_INIT_HOLDING_REGISTER_VALUE(0), rawReadHrRespValue(resps));
-    TEST_ASSERT_EQUAL_HEX16(0x0A02, rawTid(resps + RAW_READ_HR_RESP_SIZE));
-    TEST_ASSERT_EQUAL_HEX16(MBT_INIT_HOLDING_REGISTER_VALUE(1), rawReadHrRespValue(resps + RAW_READ_HR_RESP_SIZE));
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_RESP_SIZE, lens[0], "first coalesced request not answered");
+    TEST_ASSERT_EQUAL_HEX16(0x0A01, rawTid(answers[0]));
+    TEST_ASSERT_EQUAL_HEX16(MBT_INIT_HOLDING_REGISTER_VALUE(0), rawReadHrRespValue(answers[0]));
+    TEST_ASSERT_TRUE_MESSAGE(lens[1] > 0, "second coalesced request not answered");
+    TEST_ASSERT_EQUAL_HEX16(0x0A02, rawTid(answers[1]));
+    if (lens[1] == RAW_READ_HR_RESP_SIZE) {
+        TEST_ASSERT_EQUAL_HEX16(MBT_INIT_HOLDING_REGISTER_VALUE(1), rawReadHrRespValue(answers[1]));
+    } else {
+        TEST_ASSERT_EQUAL_MESSAGE(9, lens[1], "unexpected answer to the second coalesced request");
+        TEST_ASSERT_EQUAL_HEX8(0x83, answers[1][7]);
+        TEST_ASSERT_EQUAL_HEX8(Modbus::SLAVE_DEVICE_BUSY, answers[1][8]);
+    }
 
     Modbus::Logger::logln("TEST_SERVER_RX_COALESCED_REQUESTS - OK");
     Modbus::Logger::logln();
@@ -1852,36 +1881,49 @@ void test_server_malformed_requests_exceptions() {
     Modbus::Logger::logln();
 }
 
+// ===================================================================================
+// ISOLATED SERVER
+// Server tests needing a specific application (no Modbus::Server) share one server
+// interface (RAM footprint): each test sets the application's behaviour.
+// ===================================================================================
+
+static constexpr uint16_t ISOLATED_SERVER_TEST_PORT = 518;
+ModbusHAL::TCP isolatedServerHal(ISOLATED_SERVER_TEST_PORT);
+ModbusInterface::TCP isolatedServerIf(isolatedServerHal, Modbus::SERVER);
+static void (*isolatedServerApp)(const Modbus::Frame& request) = nullptr;
+
+static void beginIsolatedServer(void (*app)(const Modbus::Frame& request)) {
+    isolatedServerApp = app;
+    static bool initialized = false;
+    if (initialized) return;
+    TEST_ASSERT_TRUE(isolatedServerHal.begin());
+    isolatedServerIf.setRcvCallback([](const Modbus::Frame& request, void*) {
+        if (isolatedServerApp) isolatedServerApp(request);
+    }, nullptr);
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, isolatedServerIf.begin());
+    initialized = true;
+}
+
 // Regression: when the application's response couldn't be encoded, nothing was sent and
 // the TCP transaction stayed open: the client got no answer and every other request got
 // SLAVE_DEVICE_BUSY until the 5 s safety timeout. The server must answer SLAVE_DEVICE_FAILURE.
-// Isolated server whose application answers with an unencodable response (register count 0).
-static constexpr uint16_t BAD_RESPONSE_TEST_PORT = 518;
-ModbusHAL::TCP halForBadResponseServer(BAD_RESPONSE_TEST_PORT);
-ModbusInterface::TCP badResponseServerIf(halForBadResponseServer, Modbus::SERVER);
-
+// The application answers with an unencodable response (register count 0).
 void test_server_unencodable_response_exception() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_SERVER_UNENCODABLE_RESPONSE_EXCEPTION");
 
-    static bool initialized = false;
-    if (!initialized) {
-        TEST_ASSERT_TRUE(halForBadResponseServer.begin());
-        badResponseServerIf.setRcvCallback([](const Modbus::Frame& request, void* ctx) {
-            Modbus::Frame response;
-            response.clear();
-            response.type = Modbus::RESPONSE;
-            response.fc = request.fc;
-            response.slaveId = request.slaveId;
-            response.regAddress = request.regAddress;
-            response.regCount = 0; // Invalid: can't be encoded
-            static_cast<ModbusInterface::TCP*>(ctx)->sendFrame(response, nullptr, nullptr);
-        }, &badResponseServerIf);
-        TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, badResponseServerIf.begin());
-        initialized = true;
-    }
+    beginIsolatedServer([](const Modbus::Frame& request) {
+        Modbus::Frame response;
+        response.clear();
+        response.type = Modbus::RESPONSE;
+        response.fc = request.fc;
+        response.slaveId = request.slaveId;
+        response.regAddress = request.regAddress;
+        response.regCount = 0; // Invalid: can't be encoded
+        isolatedServerIf.sendFrame(response, nullptr, nullptr);
+    });
 
-    int sock = rawConnect(BAD_RESPONSE_TEST_PORT);
+    int sock = rawConnect(ISOLATED_SERVER_TEST_PORT);
     TEST_ASSERT_TRUE_MESSAGE(sock >= 0, "raw connect to server failed");
 
     // Two requests in a row: the second one must not get SLAVE_DEVICE_BUSY
@@ -1907,37 +1949,28 @@ void test_server_unencodable_response_exception() {
 
 // Regression: a transaction only remembered the socket number. When client A disconnected
 // while its request was being processed, a new client B could get the same socket number,
-// and received the response meant for A. Isolated server whose application answers slowly.
-static constexpr uint16_t SOCKET_REUSE_TEST_PORT = 519;
+// and received the response meant for A. The application answers slowly.
 static constexpr uint32_t SOCKET_REUSE_HANDLER_DELAY_MS = 500;
-ModbusHAL::TCP halForSocketReuseServer(SOCKET_REUSE_TEST_PORT);
-ModbusInterface::TCP socketReuseServerIf(halForSocketReuseServer, Modbus::SERVER);
 
 void test_server_response_not_sent_to_reused_socket() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_SERVER_RESPONSE_NOT_SENT_TO_REUSED_SOCKET");
 
-    static bool initialized = false;
-    if (!initialized) {
-        TEST_ASSERT_TRUE(halForSocketReuseServer.begin());
-        socketReuseServerIf.setRcvCallback([](const Modbus::Frame& request, void* ctx) {
-            vTaskDelay(pdMS_TO_TICKS(SOCKET_REUSE_HANDLER_DELAY_MS)); // Slow application
-            Modbus::Frame response;
-            response.clear();
-            response.type = Modbus::RESPONSE;
-            response.fc = request.fc;
-            response.slaveId = request.slaveId;
-            response.regAddress = request.regAddress;
-            response.regCount = 1;
-            response.data[0] = 0xAAAA;
-            static_cast<ModbusInterface::TCP*>(ctx)->sendFrame(response, nullptr, nullptr);
-        }, &socketReuseServerIf);
-        TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, socketReuseServerIf.begin());
-        initialized = true;
-    }
+    beginIsolatedServer([](const Modbus::Frame& request) {
+        vTaskDelay(pdMS_TO_TICKS(SOCKET_REUSE_HANDLER_DELAY_MS)); // Slow application
+        Modbus::Frame response;
+        response.clear();
+        response.type = Modbus::RESPONSE;
+        response.fc = request.fc;
+        response.slaveId = request.slaveId;
+        response.regAddress = request.regAddress;
+        response.regCount = 1;
+        response.data[0] = 0xAAAA;
+        isolatedServerIf.sendFrame(response, nullptr, nullptr);
+    });
 
     // Client A: request, then disconnect while the application is processing it
-    int sockA = rawConnect(SOCKET_REUSE_TEST_PORT);
+    int sockA = rawConnect(ISOLATED_SERVER_TEST_PORT);
     TEST_ASSERT_TRUE_MESSAGE(sockA >= 0, "client A connect failed");
     uint8_t req[RAW_READ_HR_REQ_SIZE];
     rawBuildReadHrRequest(req, 0x0A0A, 0);
@@ -1947,7 +1980,7 @@ void test_server_response_not_sent_to_reused_socket() {
     vTaskDelay(pdMS_TO_TICKS(100)); // Let the server HAL notice & free A's socket
 
     // Client B connects meanwhile (typically gets the same socket number on the server side)
-    int sockB = rawConnect(SOCKET_REUSE_TEST_PORT);
+    int sockB = rawConnect(ISOLATED_SERVER_TEST_PORT);
     TEST_ASSERT_TRUE_MESSAGE(sockB >= 0, "client B connect failed");
 
     // B sent nothing: it must receive nothing, in particular not A's response
@@ -1968,8 +2001,12 @@ void test_server_response_not_sent_to_reused_socket() {
 // holding the mutex, and any sendMsg() - which needs the same mutex - blocked
 // forever: the interface task could no longer send, nor drain the queue.
 // HAL-only fixture: nobody consumes the RX queue, as with a busy interface task.
-static constexpr uint16_t HAL_NOTIFY_TEST_PORT = 513;
-ModbusHAL::TCP halForNotifyServer(HAL_NOTIFY_TEST_PORT);
+// HAL-level tests (notifications, keepalive, stop, interface lifecycle) share these spare
+// HALs & interface storage (RAM footprint): each test begins the HALs it needs & stops them.
+static constexpr uint16_t SPARE_HAL_TEST_PORT = 513;
+ModbusHAL::TCP spareServerHal(SPARE_HAL_TEST_PORT);
+ModbusHAL::TCP spareClientHal(LOOPBACK_IP_STR, SPARE_HAL_TEST_PORT);
+alignas(ModbusInterface::TCP) static uint8_t spareIfcStorage[sizeof(ModbusInterface::TCP)];
 
 struct HalSendProbe {
     int sock;
@@ -1982,7 +2019,7 @@ static StackType_t halSendProbeStack[4096];
 static void halSendProbeTask(void* arg) {
     auto* probe = static_cast<HalSendProbe*>(arg);
     const uint8_t byte = 0x00;
-    probe->result = halForNotifyServer.sendMsg(&byte, 1, probe->sock);
+    probe->result = spareServerHal.sendMsg(&byte, 1, probe->sock);
     probe->done = true;
     vTaskDelete(nullptr);
 }
@@ -1991,10 +2028,10 @@ void test_hal_rx_notifications_never_block_send() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_HAL_RX_NOTIFICATIONS_NEVER_BLOCK_SEND");
 
-    TEST_ASSERT_TRUE_MESSAGE(halForNotifyServer.begin(), "HAL server begin failed");
-    QueueHandle_t rxQueue = halForNotifyServer.getRxQueueHandle();
+    TEST_ASSERT_TRUE_MESSAGE(spareServerHal.begin(), "HAL server begin failed");
+    QueueHandle_t rxQueue = spareServerHal.getRxQueueHandle();
 
-    int sock = rawConnect(HAL_NOTIFY_TEST_PORT);
+    int sock = rawConnect(SPARE_HAL_TEST_PORT);
     TEST_ASSERT_TRUE_MESSAGE(sock >= 0, "raw connect to HAL server failed");
 
     // Unread data on the connection: the HAL keeps signaling it until the queue is full
@@ -2029,6 +2066,7 @@ void test_hal_rx_notifications_never_block_send() {
     vTaskDelay(pdMS_TO_TICKS(50));
     int dummy;
     while (xQueueReceive(rxQueue, &dummy, 0) == pdTRUE) {}
+    spareServerHal.stop();
 
     Modbus::Logger::logln("TEST_HAL_RX_NOTIFICATIONS_NEVER_BLOCK_SEND - OK");
     Modbus::Logger::logln();
@@ -2043,9 +2081,6 @@ void test_hal_rx_notifications_never_block_send() {
 // ===================================================================================
 
 static constexpr uint32_t MAX_DEAD_PEER_DETECTION_S = 60;
-static constexpr uint16_t KEEPALIVE_TEST_PORT = 517;
-ModbusHAL::TCP halForKeepAliveServer(KEEPALIVE_TEST_PORT);
-ModbusHAL::TCP halForKeepAliveClient(LOOPBACK_IP_STR, KEEPALIVE_TEST_PORT);
 
 static void assertKeepAlive(int fd, const char* side) {
     int enabled = 0, idle = 0, intvl = 0, cnt = 0;
@@ -2070,14 +2105,14 @@ void test_hal_tcp_keepalive() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_HAL_TCP_KEEPALIVE");
 
-    TEST_ASSERT_TRUE_MESSAGE(halForKeepAliveServer.begin(), "server HAL begin failed");
-    TEST_ASSERT_TRUE_MESSAGE(halForKeepAliveClient.begin(), "client HAL begin failed");
+    TEST_ASSERT_TRUE_MESSAGE(spareServerHal.begin(), "server HAL begin failed");
+    TEST_ASSERT_TRUE_MESSAGE(spareClientHal.begin(), "client HAL begin failed");
 
     // Server side socket: signaled by the server HAL once the client sends something
     const uint8_t byte = 0x00;
-    TEST_ASSERT_TRUE_MESSAGE(halForKeepAliveClient.sendMsg(&byte, 1), "client HAL send failed");
+    TEST_ASSERT_TRUE_MESSAGE(spareClientHal.sendMsg(&byte, 1), "client HAL send failed");
     int serverSock = -1;
-    TEST_ASSERT_EQUAL_MESSAGE(pdTRUE, xQueuePeek(halForKeepAliveServer.getRxQueueHandle(), &serverSock, pdMS_TO_TICKS(500)),
+    TEST_ASSERT_EQUAL_MESSAGE(pdTRUE, xQueuePeek(spareServerHal.getRxQueueHandle(), &serverSock, pdMS_TO_TICKS(500)),
                               "no RX event from server HAL");
 
     // Client side socket: the one whose local port is the server socket's peer port
@@ -2094,8 +2129,8 @@ void test_hal_tcp_keepalive() {
     TEST_ASSERT_TRUE_MESSAGE(clientSock >= 0, "client HAL socket not found");
     assertKeepAlive(clientSock, "client");
 
-    halForKeepAliveClient.stop();
-    halForKeepAliveServer.stop();
+    spareClientHal.stop();
+    spareServerHal.stop();
 
     Modbus::Logger::logln("TEST_HAL_TCP_KEEPALIVE - OK");
     Modbus::Logger::logln();
@@ -2116,9 +2151,6 @@ static UBaseType_t settledTaskCount() {
 // Regression: HAL stop() slept 200 ms instead of waiting for its task (which can
 // sit in select() for up to 1 s), and in client mode the task handle was not even
 // stored, so stop() did not wait at all.
-static constexpr uint16_t HAL_STOP_TEST_PORT = 515;
-ModbusHAL::TCP halForStopServer(HAL_STOP_TEST_PORT);
-ModbusHAL::TCP halForStopClient(LOOPBACK_IP_STR, HAL_STOP_TEST_PORT);
 
 void test_hal_stop_joins_task() {
     Modbus::Logger::logln();
@@ -2127,14 +2159,14 @@ void test_hal_stop_joins_task() {
     const UBaseType_t baseline = settledTaskCount();
 
     for (int round = 0; round < 2; round++) { // Second round: restart after stop()
-        TEST_ASSERT_TRUE_MESSAGE(halForStopServer.begin(), "server HAL begin failed");
-        TEST_ASSERT_TRUE_MESSAGE(halForStopClient.begin(), "client HAL begin failed");
+        TEST_ASSERT_TRUE_MESSAGE(spareServerHal.begin(), "server HAL begin failed");
+        TEST_ASSERT_TRUE_MESSAGE(spareClientHal.begin(), "client HAL begin failed");
         vTaskDelay(pdMS_TO_TICKS(50)); // Both tasks now waiting in select()
         TEST_ASSERT_EQUAL(baseline + 2, uxTaskGetNumberOfTasks());
 
-        halForStopClient.stop();
+        spareClientHal.stop();
         TEST_ASSERT_EQUAL_MESSAGE(baseline + 1, uxTaskGetNumberOfTasks(), "client HAL task still running after stop()");
-        halForStopServer.stop();
+        spareServerHal.stop();
         TEST_ASSERT_EQUAL_MESSAGE(baseline, uxTaskGetNumberOfTasks(), "server HAL task still running after stop()");
     }
 
@@ -2148,24 +2180,20 @@ void test_hal_stop_joins_task() {
 // queue from a set, so the HAL queue kept a reference to the freed set and no
 // other interface could be attached to that HAL.
 // Interfaces live in static storage so that they can be destroyed and recreated.
-static constexpr uint16_t IFC_LIFECYCLE_TEST_PORT = 514;
-ModbusHAL::TCP halForLifecycleServer(IFC_LIFECYCLE_TEST_PORT);
-alignas(ModbusInterface::TCP) static uint8_t lifecycleIfcStorage1[sizeof(ModbusInterface::TCP)];
-alignas(ModbusInterface::TCP) static uint8_t lifecycleIfcStorage2[sizeof(ModbusInterface::TCP)];
 
 void test_interface_destroy_joins_task_and_detaches_queue() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_INTERFACE_DESTROY_JOINS_TASK_AND_DETACHES_QUEUE");
 
     const UBaseType_t baseline = settledTaskCount();
-    TEST_ASSERT_TRUE_MESSAGE(halForLifecycleServer.begin(), "server HAL begin failed");
+    TEST_ASSERT_TRUE_MESSAGE(spareServerHal.begin(), "server HAL begin failed");
 
-    auto* ifc1 = new (lifecycleIfcStorage1) ModbusInterface::TCP(halForLifecycleServer, Modbus::SERVER);
+    auto* ifc1 = new (spareIfcStorage) ModbusInterface::TCP(spareServerHal, Modbus::SERVER);
     TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, ifc1->begin());
     TEST_ASSERT_EQUAL(baseline + 2, uxTaskGetNumberOfTasks());
 
-    int sock1 = rawConnect(IFC_LIFECYCLE_TEST_PORT);
-    int sock2 = rawConnect(IFC_LIFECYCLE_TEST_PORT);
+    int sock1 = rawConnect(SPARE_HAL_TEST_PORT);
+    int sock2 = rawConnect(SPARE_HAL_TEST_PORT);
     TEST_ASSERT_TRUE_MESSAGE(sock1 >= 0 && sock2 >= 0, "raw connect to server failed");
     vTaskDelay(pdMS_TO_TICKS(50)); // Let the HAL accept both connections
 
@@ -2183,7 +2211,7 @@ void test_interface_destroy_joins_task_and_detaches_queue() {
     const UBaseType_t afterDestroy = uxTaskGetNumberOfTasks();
 
     // A new interface must be attachable to the same HAL
-    auto* ifc2 = new (lifecycleIfcStorage2) ModbusInterface::TCP(halForLifecycleServer, Modbus::SERVER);
+    auto* ifc2 = new (spareIfcStorage) ModbusInterface::TCP(spareServerHal, Modbus::SERVER);
     const auto beginRes = ifc2->begin();
 
     TEST_ASSERT_START();
@@ -2193,7 +2221,7 @@ void test_interface_destroy_joins_task_and_detaches_queue() {
     ifc2->~TCP();
     ::close(sock1);
     ::close(sock2);
-    halForLifecycleServer.stop();
+    spareServerHal.stop();
     TEST_ASSERT_EQUAL_MESSAGE(baseline, uxTaskGetNumberOfTasks(), "tasks left after full teardown");
 
     Modbus::Logger::logln("TEST_INTERFACE_DESTROY_JOINS_TASK_AND_DETACHES_QUEUE - OK");
@@ -2203,9 +2231,7 @@ void test_interface_destroy_joins_task_and_detaches_queue() {
 // Interface destruction/re-creation while the HAL keeps signaling RX: once the interface task
 // is gone nobody reads the data, so the HAL re-posts its notification continuously. Detaching
 // the RX queue from the queue set must neither overflow the set (FreeRTOS assert) nor fail.
-// To keep the suite's RAM footprint unchanged, this test reuses the server HAL & interface
-// storage of test_interface_destroy_joins_task_and_detaches_queue(), and the probe task
-// buffers of test_hal_rx_notifications_never_block_send() (all free by now).
+// It reuses the probe task buffers of test_hal_rx_notifications_never_block_send() (free by now).
 static constexpr int DETACH_STRESS_CYCLES = 30;
 static volatile bool detachStressRunning = false;
 
@@ -2230,9 +2256,9 @@ void test_interface_recreate_under_rx_traffic() {
     Modbus::Logger::logln("TEST_INTERFACE_RECREATE_UNDER_RX_TRAFFIC");
 
     const UBaseType_t baseline = settledTaskCount();
-    TEST_ASSERT_TRUE_MESSAGE(halForLifecycleServer.begin(), "server HAL begin failed");
+    TEST_ASSERT_TRUE_MESSAGE(spareServerHal.begin(), "server HAL begin failed");
     static int sock;
-    sock = rawConnect(IFC_LIFECYCLE_TEST_PORT);
+    sock = rawConnect(SPARE_HAL_TEST_PORT);
     TEST_ASSERT_TRUE_MESSAGE(sock >= 0, "raw connect to server failed");
 
     detachStressRunning = true;
@@ -2242,7 +2268,7 @@ void test_interface_recreate_under_rx_traffic() {
 
     int failedCycle = -1;
     for (int i = 0; i < DETACH_STRESS_CYCLES && failedCycle < 0; i++) {
-        auto* ifc = new (lifecycleIfcStorage1) ModbusInterface::TCP(halForLifecycleServer, Modbus::SERVER);
+        auto* ifc = new (spareIfcStorage) ModbusInterface::TCP(spareServerHal, Modbus::SERVER);
         if (ifc->begin() != ModbusInterface::IInterface::SUCCESS) failedCycle = i;
         vTaskDelay(pdMS_TO_TICKS(10 + (i % 7) * 3));
         ifc->~TCP();
@@ -2255,7 +2281,7 @@ void test_interface_recreate_under_rx_traffic() {
     while (!detachStressRunning && Modbus::TIME_MS() - t0 < 500) vTaskDelay(pdMS_TO_TICKS(5));
     vTaskDelete(sender);
     ::close(sock);
-    halForLifecycleServer.stop();
+    spareServerHal.stop();
 
     TEST_ASSERT_START();
     TEST_ASSERT_EQUAL_MESSAGE(-1, failedCycle, "interface begin() failed after a re-creation under RX traffic");
