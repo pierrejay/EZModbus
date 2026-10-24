@@ -104,6 +104,9 @@ public:
      * @note The interfaces call the bridge from their tasks: destroy them first
      */
     ~Bridge() {
+        // The interfaces must not call this object anymore
+        interface1.removeRcvCallbacks(this);
+        interface2.removeRcvCallbacks(this);
         if (!_timer) return;
         xTimerDelete(_timer, portMAX_DELAY);
         // Fence: runs in the timer daemon after the delete command, once no callback can run

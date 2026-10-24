@@ -39,6 +39,13 @@ public:
     
     bool isReady() override { return true; }
 
+    // Number of receive callbacks registered by applications
+    size_t callbackCount() const {
+        size_t n = 0;
+        for (const auto& cb : _rcvCallbacks) if (cb.fn) n++;
+        return n;
+    }
+
     // Method to fetch the last received frame
     bool getReceivedFrame(Modbus::Frame& frame) {
         if (rcvFrames.empty()) {

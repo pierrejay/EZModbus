@@ -474,6 +474,43 @@ void test_bridge_destroyed_with_armed_timer() {
     TEST_ASSERT_FALSE_MESSAGE(answered, "timeout fired after the bridge was destroyed");
 }
 
+// Regression: applications left their receive callbacks registered in the interfaces after
+// their destruction: the next frame received was handed to a destroyed object
+void test_apps_remove_rcv_callbacks_on_destruction() {
+    static ModbusInterface::Dummy slaveSide;
+    static DummyMaster masterSide;
+    static Modbus::StaticWordStore<1> store;
+
+    alignas(Modbus::Client) static uint8_t clientStorage[sizeof(Modbus::Client)];
+    auto* client = new (clientStorage) Modbus::Client(masterSide);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, client->begin());
+    size_t clientRegistered = masterSide.callbackCount();
+    client->~Client();
+    size_t clientLeft = masterSide.callbackCount();
+
+    alignas(Modbus::Server) static uint8_t serverStorage[sizeof(Modbus::Server)];
+    auto* server = new (serverStorage) Modbus::Server(slaveSide, store);
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, server->begin());
+    size_t serverRegistered = slaveSide.callbackCount();
+    server->~Server();
+    size_t serverLeft = slaveSide.callbackCount();
+
+    alignas(Modbus::Bridge) static uint8_t bridgeStorage[sizeof(Modbus::Bridge)];
+    auto* bridge = new (bridgeStorage) Modbus::Bridge(masterSide, slaveSide, LOCAL_BRIDGE_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Bridge::SUCCESS, bridge->begin());
+    size_t bridgeRegistered = masterSide.callbackCount() + slaveSide.callbackCount();
+    bridge->~Bridge();
+    size_t bridgeLeft = masterSide.callbackCount() + slaveSide.callbackCount();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(1, clientRegistered, "client callback not registered");
+    TEST_ASSERT_EQUAL_MESSAGE(0, clientLeft, "client callback left after destruction");
+    TEST_ASSERT_EQUAL_MESSAGE(1, serverRegistered, "server callback not registered");
+    TEST_ASSERT_EQUAL_MESSAGE(0, serverLeft, "server callback left after destruction");
+    TEST_ASSERT_EQUAL_MESSAGE(2, bridgeRegistered, "bridge callbacks not registered");
+    TEST_ASSERT_EQUAL_MESSAGE(0, bridgeLeft, "bridge callbacks left after destruction");
+}
+
 // Regression: if the timer command couldn't be queued, the request was forwarded without
 // any timeout. The bridge must answer instead (the requester can retry).
 void test_bridge_timer_command_failure() {
@@ -581,6 +618,7 @@ void setup() {
     RUN_TEST(test_bridge_late_response_not_forwarded);
     RUN_TEST(test_bridge_malformed_request_exception);
     RUN_TEST(test_bridge_destroyed_with_armed_timer);
+    RUN_TEST(test_apps_remove_rcv_callbacks_on_destruction);
     RUN_TEST(test_bridge_timer_command_failure);
     UNITY_END();
 }

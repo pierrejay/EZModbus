@@ -425,6 +425,8 @@ Client::Client(ModbusInterface::IInterface& interface, uint32_t timeoutMs) :
 {}
 
 Client::~Client() {
+    // The interface must not call this object anymore
+    _interface.removeRcvCallbacks(this);
     // Cleanup any active pending request
     _pendingRequest.clear();
     _isInitialized = false;

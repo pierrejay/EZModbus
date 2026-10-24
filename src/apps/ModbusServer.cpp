@@ -55,6 +55,10 @@ Server::Server(std::initializer_list<ModbusInterface::IInterface*> interfaces, I
 }
 
 Server::~Server() {
+    // The interfaces must not call this object anymore
+    for (size_t i = 0; i < _interfaceCount; i++) {
+        if (_interfaces[i]) _interfaces[i]->removeRcvCallbacks(&_rcvCbContexts[i]);
+    }
     _isInitialized = false;
 }
 

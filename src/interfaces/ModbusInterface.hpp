@@ -173,6 +173,17 @@ namespace ModbusInterface {
             return Error(ERR_TOO_MANY_CALLBACKS);
         }
 
+        /* @brief Remove the callbacks registered with a context (application destruction)
+         * @param ctx The context the callbacks were registered with
+         * @note Waits for a callback being called to return: must not be called from a callback
+         */
+        void removeRcvCallbacks(void* ctx) {
+            Lock guard(_callbackMutex);
+            for (auto& cb : _rcvCallbacks) {
+                if (cb.fn && cb.ctx == ctx) cb = RcvCallback{};
+            }
+        }
+
         /* @brief Notify all callbacks for a spontaneous message
          * @param frame The frame to notify
          * @return The result of the operation
@@ -207,6 +218,7 @@ namespace ModbusInterface {
     protected:
 
         // Callback for spontaneous messages & lock to protect against concurrent access
+        // (derived interfaces only call them through notifyCallbacks(): removeRcvCallbacks() relies on it)
         std::array<RcvCallback, MAX_RCV_CALLBACKS> _rcvCallbacks;
         Mutex _callbackMutex; 
         Modbus::Role _role;
