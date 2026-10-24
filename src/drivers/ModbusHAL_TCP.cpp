@@ -607,14 +607,18 @@ void TCP::closeSocket(int sock) {
 }
 
 /* @brief (Client mode) Make sure the client socket is connected, reconnecting if needed
+ * @param connId If not null, set to the ID of the connection (to bind a later sendMsg() to it)
  * @return True if connected
  * @note May block up to CONNECT_TIMEOUT_SEC while reconnecting (outside the socket mutex)
  */
-bool TCP::ensureClientConnected() {
+bool TCP::ensureClientConnected(uint32_t* connId) {
     if (!_isRunning || _isServer) return false;
     {
         Lock guard(_socketsMutex);
-        if (_clientSocket != -1) return true;
+        if (_clientSocket != -1) {
+            if (connId) *connId = _clientConnId;
+            return true;
+        }
     }
 
     Modbus::Debug::LOG_MSGF("Client disconnected, attempting reconnect to %s:%u", _cfgIP, _cfgPort);
@@ -623,6 +627,9 @@ bool TCP::ensureClientConnected() {
         return false;
     }
     Modbus::Debug::LOG_MSGF("Auto-reconnection successful");
+    Lock guard(_socketsMutex);
+    if (_clientSocket == -1) return false; // Dropped right away
+    if (connId) *connId = _clientConnId;
     return _isRunning;
 }
 
@@ -630,8 +637,8 @@ bool TCP::sendMsg(const uint8_t* payload, const size_t len, const int destSocket
                   uint32_t connId, uint32_t* actualConnId) {
     if (!_isRunning) return false;
 
-    /* 1-2. Reconnect if needed (client mode) */
-    if (!_isServer && destSocket == -1 && !ensureClientConnected()) {
+    /* 1-2. Reconnect if needed (client mode), unless bound to a given connection */
+    if (!_isServer && destSocket == -1 && connId == 0 && !ensureClientConnected()) {
         return false;
     }
 

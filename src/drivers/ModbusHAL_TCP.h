@@ -91,11 +91,12 @@ public:
     // Main API
     // Connection IDs (non-zero) tell apart two successive connections reusing the same socket number:
     // pass the ID of the connection an operation is meant for, 0 to skip the check
+    // (client mode: a send bound to a connection fails instead of reconnecting)
     bool sendMsg(const uint8_t* payload, const size_t len, const int destSocket = -1, int* actualSocket = nullptr,
                  uint32_t connId = 0, uint32_t* actualConnId = nullptr);
     size_t readSocketData(int socketNum, uint8_t* dst, size_t maxLen, uint32_t connId = 0, uint32_t* actualConnId = nullptr);
     void closeConnection(int socketNum, uint32_t connId);
-    bool ensureClientConnected();
+    bool ensureClientConnected(uint32_t* connId = nullptr);
 
     // Monitoring
     size_t getActiveSocketCount();

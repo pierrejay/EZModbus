@@ -2268,6 +2268,53 @@ void test_hal_tcp_keepalive() {
     Modbus::Logger::logln();
 }
 
+// Regression: once the interface had checked that its request was not aborted, sendMsg()
+// could reconnect by itself (the connection having dropped meanwhile) and send the request
+// late on a new connection. Bound to a connection, sendMsg() must fail without reconnecting.
+// Raw server, so that a reconnection shows as a pending connection on the listening socket.
+void test_hal_send_bound_to_connection_no_reconnect() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_HAL_SEND_BOUND_TO_CONNECTION_NO_RECONNECT");
+
+    int listenSock = rawListen(SPARE_HAL_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0, "raw server listen failed");
+    bool begun = spareClientHal.begin(); // Connects
+    int peer = begun ? ::accept(listenSock, nullptr, nullptr) : -1;
+
+    // Connection ID of the current connection, then the server closes it
+    const uint8_t byte = 0x00;
+    uint32_t connId = 0;
+    bool firstSent = peer >= 0 && spareClientHal.sendMsg(&byte, 1, -1, nullptr, 0, &connId);
+    if (peer >= 0) ::close(peer);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (spareClientHal.isClientConnected() && Modbus::TIME_MS() - t0 < 2000) vTaskDelay(pdMS_TO_TICKS(5));
+    bool disconnected = !spareClientHal.isClientConnected();
+
+    // Send bound to the closed connection: must fail, without connecting again
+    bool lateSent = spareClientHal.sendMsg(&byte, 1, -1, nullptr, connId);
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(listenSock, &fds);
+    timeval tv = { .tv_sec = 0, .tv_usec = 300000 };
+    bool reconnected = ::select(listenSock + 1, &fds, nullptr, nullptr, &tv) > 0;
+    if (reconnected) {
+        int peer2 = ::accept(listenSock, nullptr, nullptr);
+        if (peer2 >= 0) ::close(peer2);
+    }
+    spareClientHal.stop();
+    ::close(listenSock);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(begun && peer >= 0, "client HAL didn't connect");
+    TEST_ASSERT_TRUE_MESSAGE(firstSent && connId != 0, "first send failed");
+    TEST_ASSERT_TRUE_MESSAGE(disconnected, "client HAL didn't notice the disconnection");
+    TEST_ASSERT_FALSE_MESSAGE(lateSent, "send bound to a closed connection succeeded");
+    TEST_ASSERT_FALSE_MESSAGE(reconnected, "send bound to a closed connection reconnected");
+
+    Modbus::Logger::logln("TEST_HAL_SEND_BOUND_TO_CONNECTION_NO_RECONNECT - OK");
+    Modbus::Logger::logln();
+}
+
 // ===================================================================================
 // LIFECYCLE: STOP / DESTRUCTION MUST JOIN THE TASKS
 // A task still running after stop() / destruction may access a destroyed object,
@@ -3351,6 +3398,7 @@ void setup() {
     RUN_TEST(test_server_rx_reused_socket_mid_frame);
     RUN_TEST(test_hal_rx_notifications_never_block_send);
     RUN_TEST(test_hal_tcp_keepalive);
+    RUN_TEST(test_hal_send_bound_to_connection_no_reconnect);
     RUN_TEST(test_hal_stop_joins_task);
     RUN_TEST(test_interface_destroy_joins_task_and_detaches_queue);
     RUN_TEST(test_interface_recreate_under_rx_traffic);

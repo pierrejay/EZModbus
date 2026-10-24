@@ -547,15 +547,17 @@ TCP::Result TCP::handleTxRequest() {
         }
 
         // Client: (re)connect first, as it may take long. If the request was aborted
-        // meanwhile (e.g. Client timeout), it must not be sent late.
-        bool connected = (_role != Modbus::CLIENT) || _tcpHAL.ensureClientConnected();
+        // meanwhile (e.g. Client timeout), it must not be sent late: the send is bound to
+        // that connection, so that it can't reconnect again after this check.
+        uint32_t connId = _txCtx.connId;
+        bool connected = (_role != Modbus::CLIENT) || _tcpHAL.ensureClientConnected(&connId);
         aborted = (_role == Modbus::CLIENT) && (_abortCount != _txCtx.abortCount);
 
         // Send the payload via HAL
         if (connected && !aborted) {
             sendMsgRes = _tcpHAL.sendMsg(payload, len, destSock,
                                       (_role == Modbus::CLIENT) ? &actualSock : nullptr,
-                                      _txCtx.connId, &actualConnId);
+                                      connId, &actualConnId);
         }
 
         // Clear TX buffer and metadata whatever happens
