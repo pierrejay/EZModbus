@@ -604,6 +604,39 @@ void test_server_begin_retry_registers_once() {
     TEST_ASSERT_EQUAL_MESSAGE(1, secondAfterRetry, "second interface callback not registered once");
 }
 
+// Regression: begin() validated overlapping words starting its scan strictly after address 0,
+// and jumping from start address to start address: a word at address 0, or two words with the
+// same start address, were never compared. Returns true if the server accepts both words.
+static bool overlapAccepted(Modbus::IWordStore& store, uint16_t start1, uint16_t nbRegs1,
+                            uint16_t start2, uint16_t nbRegs2) {
+    static ModbusInterface::Dummy side;
+    alignas(Modbus::Server) static uint8_t storage[sizeof(Modbus::Server)];
+    auto* server = new (storage) Modbus::Server(side, store);
+    Modbus::Word word;
+    word.type = Modbus::HOLDING_REGISTER;
+    word.readHandler = serverReadHandler;
+    word.writeHandler = serverWriteHandler;
+    word.startAddr = start1;
+    word.nbRegs = nbRegs1;
+    bool added = server->addWord(word) == Modbus::Server::SUCCESS;
+    word.startAddr = start2;
+    word.nbRegs = nbRegs2;
+    added = (server->addWord(word) == Modbus::Server::SUCCESS) && added;
+    bool begun = server->begin() == Modbus::Server::SUCCESS;
+    server->~Server();
+    return added && begun;
+}
+
+void test_server_rejects_overlaps_at_zero_and_same_start() {
+    // Dynamic store: words added before begin() aren't checked one by one (bulk mode)
+    static Modbus::DynamicWordStore dynAtZero(4), dynSameStart(4), dynDisjoint(4);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_FALSE_MESSAGE(overlapAccepted(dynAtZero, 0, 2, 1, 1), "dynamic store: overlap at address 0 accepted");
+    TEST_ASSERT_FALSE_MESSAGE(overlapAccepted(dynSameStart, 5, 2, 5, 1), "dynamic store: words with the same start accepted");
+    TEST_ASSERT_TRUE_MESSAGE(overlapAccepted(dynDisjoint, 0, 1, 1, 1), "disjoint words rejected");
+}
+
 // Regression: if the timer command couldn't be queued, the request was forwarded without
 // any timeout. The bridge must answer instead (the requester can retry).
 void test_bridge_timer_command_failure() {
@@ -714,6 +747,7 @@ void setup() {
     RUN_TEST(test_apps_remove_rcv_callbacks_on_destruction);
     RUN_TEST(test_client_destroyed_while_timeout_runs);
     RUN_TEST(test_server_begin_retry_registers_once);
+    RUN_TEST(test_server_rejects_overlaps_at_zero_and_same_start);
     RUN_TEST(test_bridge_timer_command_failure);
     UNITY_END();
 }

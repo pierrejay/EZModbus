@@ -824,11 +824,15 @@ bool Server::validateNoOverlapsInStore(Modbus::RegisterType type) {
     size_t count = _wordStore.size(type);
     if (count <= 1) return true;  // No overlaps possible with 0 or 1 words
     
-    // Get first word to start iteration
+    // Sorted words: an overlap always shows between consecutive words. findNext() skips the other
+    // words with the same start address, which overlap by definition: they're found by counting.
+    size_t visited = 0;
     Word* prevWord = nullptr;
-    Word* currentWord = _wordStore.findNext(type, 0);  // Find first word
-    
+    Word* currentWord = _wordStore.findExact(type, 0);  // findNext() searches strictly after
+    if (currentWord == nullptr) currentWord = _wordStore.findNext(type, 0);
+
     while (currentWord != nullptr) {
+        visited++;
         if (prevWord != nullptr) {
             // Check if previous word overlaps with current word
             uint32_t prevEnd = prevWord->startAddr + prevWord->nbRegs;
@@ -842,6 +846,10 @@ bool Server::validateNoOverlapsInStore(Modbus::RegisterType type) {
         
         prevWord = currentWord;
         currentWord = _wordStore.findNext(type, currentWord->startAddr);
+    }
+    if (visited != count) {
+        Modbus::Debug::LOG_MSG("Overlap detected: words with the same start address");
+        return false;
     }
     return true;
 }
