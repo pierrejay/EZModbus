@@ -2065,6 +2065,8 @@ void setup() {
     RUN_TEST(test_helper_null_buffer);
     RUN_TEST(test_helper_qty_zero);
     RUN_TEST(test_helper_write_readonly_regtype);
+    RUN_TEST(test_helper_write_oversized_qty);
+    RUN_TEST(test_helper_write_nan_rejected);
 
     // RX robustness tests
     RUN_TEST(test_rx_zero_byte_read_keeps_buffer);

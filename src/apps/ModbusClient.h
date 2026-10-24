@@ -8,6 +8,7 @@
 #include "core/ModbusCore.h"
 #include "interfaces/ModbusInterface.hpp"
 #include "utils/ModbusDebug.hpp"
+#include <cmath>
 
 #ifndef EZMODBUS_CLIENT_REQ_TIMEOUT // Client request timeout (ms)
     #define EZMODBUS_CLIENT_REQ_TIMEOUT 1000
@@ -363,6 +364,7 @@ Client::Result Client::read(uint8_t slaveId, Modbus::RegisterType regType, uint1
  * @return Result code (SUCCESS = transaction succeeded with slave response, check rspExcep for Modbus exceptions)
  * @note For coils: values > 0 are considered as `true` state. For registers: values are clamped to UINT16_MAX if needed.
  * @note If using signed numbers, negative write values will be clamped to 0.
+ * @note Returns ERR_INVALID_FRAME for a quantity above the Modbus maximum, or a NaN value.
  * @note Floating-point types: Values are truncated (not rounded) when converting to uint16_t. E.g., 123.7 → 123
  * @note IMPORTANT: make sure your buffer size is at least equal to `qty`! The method has no way to enforce this.
  */
@@ -379,6 +381,19 @@ Client::Result Client::write(uint8_t slaveId, Modbus::RegisterType regType, uint
     // Only COIL and HOLDING_REGISTER can be written
     if (regType != Modbus::COIL && regType != Modbus::HOLDING_REGISTER) {
         return Error(ERR_INVALID_FRAME, "register type not writable");
+    }
+
+    // Quantity within the Modbus maximum (values are then written straight to the frame)
+    const size_t maxQty = (regType == Modbus::COIL) ? Modbus::MAX_COILS_WRITE : Modbus::MAX_REGISTERS_WRITE;
+    if (qty > maxQty) {
+        return Error(ERR_INVALID_FRAME, "quantity exceeds the Modbus maximum");
+    }
+
+    // NaN has no register or coil value
+    if constexpr (std::is_floating_point<T>::value) {
+        for (uint16_t i = 0; i < qty; i++) {
+            if (std::isnan(src[i])) return Error(ERR_INVALID_FRAME, "NaN value");
+        }
     }
 
     // Thread-safe access to helper buffer
@@ -399,13 +414,10 @@ Client::Result Client::write(uint8_t slaveId, Modbus::RegisterType regType, uint
             _helperBuffer.fc = Modbus::WRITE_MULTIPLE_COILS;
         }
 
-        // Convert T to uint16_t for coils (0 or 1) - no cast, just check != 0
-        uint16_t coilBuf[qty];
+        // Convert T to coil states (0 or 1) - no cast, just check != 0
         for (uint16_t i = 0; i < qty; i++) {
-            coilBuf[i] = src[i] != 0 ? 1 : 0;
-        }
-        if (!_helperBuffer.setCoils(coilBuf, qty)) {
-            return Error(ERR_INVALID_FRAME, "failed to pack coils");
+            const bool coil = src[i] != 0;
+            _helperBuffer.setCoils(&coil, 1, i);
         }
     } else { // HOLDING_REGISTER
         if (qty == 1) {
@@ -415,14 +427,14 @@ Client::Result Client::write(uint8_t slaveId, Modbus::RegisterType regType, uint
         }
 
         // Convert T to uint16_t for registers with clamping
-        uint16_t regBuf[qty];
         for (uint16_t i = 0; i < qty; i++) {
             T val = src[i];
+            uint16_t& reg = _helperBuffer.data[i];
 
             // Clamp negative signed numbers to 0
             if constexpr (std::is_signed<T>::value) {
                 if (val < 0) {
-                    regBuf[i] = 0;
+                    reg = 0;
                     continue;
                 }
             }
@@ -430,15 +442,12 @@ Client::Result Client::write(uint8_t slaveId, Modbus::RegisterType regType, uint
             // Clamp to UINT16_MAX for > 16-bit types
             if constexpr (std::numeric_limits<T>::max() > std::numeric_limits<uint16_t>::max()) {
                 if (val > std::numeric_limits<uint16_t>::max()) {
-                    regBuf[i] = std::numeric_limits<uint16_t>::max();
+                    reg = std::numeric_limits<uint16_t>::max();
                     continue;
                 }
             }
 
-            regBuf[i] = static_cast<uint16_t>(val);
-        }
-        if (!_helperBuffer.setRegisters(regBuf, qty)) {
-            return Error(ERR_INVALID_FRAME, "failed to set registers");
+            reg = static_cast<uint16_t>(val);
         }
     }
 

@@ -340,3 +340,54 @@ void test_helper_write_readonly_regtype() {
     auto res2 = client.write(TEST_SLAVE_ID, Modbus::DISCRETE_INPUT, 100, 5, buf, &excep);
     TEST_ASSERT_EQUAL(Modbus::Client::ERR_INVALID_FRAME, res2);
 }
+
+// Regression: write() sized a stack array by the quantity before checking it (65535 registers ->
+// 128 KB on the stack). From a task with a small stack, quantities above the Modbus maximum must be
+// rejected without reserving anything for them.
+static constexpr size_t OVERSIZED_WRITE_STACK = 8192;
+static StaticTask_t oversizedWriteTcb;
+static StackType_t oversizedWriteStack[OVERSIZED_WRITE_STACK / sizeof(StackType_t)];
+static uint8_t oversizedWriteSrc[2100]; // Above both Modbus maximums (coils: 1968)
+struct OversizedWrite {
+    Modbus::Client::Result regRes;
+    Modbus::Client::Result coilRes;
+    size_t stackUsed;
+    volatile bool done;
+};
+
+static void oversizedWriteTask(void* arg) {
+    auto* w = static_cast<OversizedWrite*>(arg);
+    w->regRes = client.write(TEST_SLAVE_ID, Modbus::HOLDING_REGISTER, 0, sizeof(oversizedWriteSrc), oversizedWriteSrc);
+    w->coilRes = client.write(TEST_SLAVE_ID, Modbus::COIL, 0, sizeof(oversizedWriteSrc), oversizedWriteSrc);
+    w->stackUsed = OVERSIZED_WRITE_STACK - uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t);
+    w->done = true;
+    vTaskDelete(nullptr);
+}
+
+void test_helper_write_oversized_qty() {
+    OversizedWrite w = { Modbus::Client::NODATA, Modbus::Client::NODATA, 0, false };
+    xTaskCreateStatic(oversizedWriteTask, "oversizedWrite", sizeof(oversizedWriteStack) / sizeof(StackType_t),
+                      &w, 1, oversizedWriteStack, &oversizedWriteTcb);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (!w.done && Modbus::TIME_MS() - t0 < 2000) vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelay(pdMS_TO_TICKS(10)); // Let the idle task release the task
+
+    TEST_ASSERT_TRUE_MESSAGE(w.done, "write task didn't return");
+    TEST_ASSERT_EQUAL(Modbus::Client::ERR_INVALID_FRAME, w.regRes);
+    TEST_ASSERT_EQUAL(Modbus::Client::ERR_INVALID_FRAME, w.coilRes);
+    TEST_ASSERT_LESS_THAN_MESSAGE(3000, w.stackUsed, "stack used for an oversized quantity");
+}
+
+// Regression: NaN was cast to uint16_t (undefined behavior) and written. It's rejected now.
+void test_helper_write_nan_rejected() {
+    const float nanValue = std::numeric_limits<float>::quiet_NaN();
+    serverHoldingRegisters[100] = 0x1234;
+    serverCoils[100] = 0;
+    auto regRes = client.write(TEST_SLAVE_ID, Modbus::HOLDING_REGISTER, 100, 1, &nanValue);
+    auto coilRes = client.write(TEST_SLAVE_ID, Modbus::COIL, 100, 1, &nanValue);
+
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_INVALID_FRAME, regRes, "NaN written to a register");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_INVALID_FRAME, coilRes, "NaN written to a coil");
+    TEST_ASSERT_EQUAL_UINT16(0x1234, serverHoldingRegisters[100]);
+    TEST_ASSERT_EQUAL_UINT16(0, serverCoils[100]);
+}
