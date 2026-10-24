@@ -53,10 +53,11 @@ public:
         volatile bool active = false;
         uint32_t startMs = 0;
         int socketNum = -1;
+        uint32_t connId = 0; // HAL connection ID: the socket number alone may be reused by a new connection
         uint16_t tid = 0;
 
-        void set(int socketNum, uint16_t tid) { active=true; startMs=TIME_MS(); this->socketNum=socketNum; this->tid=tid; }
-        void clear() { socketNum=-1; startMs=0; tid=0; active=false; }
+        void set(int socketNum, uint32_t connId, uint16_t tid) { active=true; startMs=TIME_MS(); this->socketNum=socketNum; this->connId=connId; this->tid=tid; }
+        void clear() { socketNum=-1; connId=0; startMs=0; tid=0; active=false; }
     };
 
     /* @brief Stores the current transmission data context
@@ -70,6 +71,7 @@ public:
         TxResultCallback txCallback = nullptr;
         void* ctx = nullptr;
         uint32_t abortCount = 0; // Value of _abortCount when the frame was queued
+        uint32_t connId = 0;     // Server: connection of the transaction being answered
 
         void set(uint16_t tid, int socketNum, bool isBroadcast = false, TxResultCallback txCallback = nullptr, void* ctx = nullptr) { 
             this->tid = tid; 
@@ -85,6 +87,7 @@ public:
             txCallback=nullptr;
             ctx=nullptr;
             abortCount=0; 
+            connId=0;
         }
     };
 
@@ -150,16 +153,16 @@ private:
     void killRxTxTask();
     
     // RX frame processing
-    Result processReceivedFrame(const ByteBuffer& frameBytes, int socketNum);
-    Result handleDecodedFrame(const Modbus::Frame& frame, int socketNum, uint16_t transactionId);
-    Result fetchSocketData(int socketNum, ByteBuffer& rcvBuf, uint16_t& rcvTid);
+    Result processReceivedFrame(const ByteBuffer& frameBytes, int socketNum, uint32_t connId);
+    Result handleDecodedFrame(const Modbus::Frame& frame, int socketNum, uint32_t connId, uint16_t transactionId);
+    Result fetchSocketData(int socketNum, ByteBuffer& rcvBuf, uint16_t& rcvTid, uint32_t& connId);
 
     // TX frame processing
     Result handleTxRequest();
 
     // Transaction management
     uint16_t getNextOutgoingTransactionId();
-    bool beginTransaction(int socketNum, uint16_t transactionId);
+    bool beginTransaction(int socketNum, uint32_t connId, uint16_t transactionId);
     void endTransaction();
 
     // ===================================================================================

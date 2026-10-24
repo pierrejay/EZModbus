@@ -197,6 +197,7 @@ TCP::Result TCP::sendFrame(const Modbus::Frame &frame, TxResultCallback txCallba
                    replacedByException ? nullptr : txCallback,
                    ctx);
         _txCtx.abortCount = _abortCount;
+        _txCtx.connId = (_role == Modbus::SERVER) ? _currentTransaction.connId : 0;
 
         // Signal dans la TX queue (taille 1) pour réveiller rxTxTask
         void* signalPtr = this; // valeur bidon
@@ -313,7 +314,7 @@ void TCP::killRxTxTask() {
  * @return SUCCESS if the frame has been decoded & handled, an error otherwise
  * @note This method is called by the rxTxTask exclusively
  */
-TCP::Result TCP::processReceivedFrame(const ByteBuffer& frameBytes, int socketNum) {
+TCP::Result TCP::processReceivedFrame(const ByteBuffer& frameBytes, int socketNum, uint32_t connId) {
     if (frameBytes.empty()) {
         return Error(ERR_INVALID_FRAME, "empty frame");
     }
@@ -336,7 +337,7 @@ TCP::Result TCP::processReceivedFrame(const ByteBuffer& frameBytes, int socketNu
     // Transaction ID = first 2 bytes of MBAP
     uint16_t tid = (static_cast<uint16_t>(frameBytes[0]) << 8) | frameBytes[1];
 
-    return handleDecodedFrame(decodedFrame, socketNum, tid);
+    return handleDecodedFrame(decodedFrame, socketNum, connId, tid);
 }
 
 /* @brief Handle a decoded frame received from the HAL
@@ -346,12 +347,13 @@ TCP::Result TCP::processReceivedFrame(const ByteBuffer& frameBytes, int socketNu
  * @return SUCCESS if the frame has been handled, an error otherwise
  * @note This method is called by processReceivedFrame() exclusively
  */
-TCP::Result TCP::handleDecodedFrame(const Modbus::Frame& frame, int socketNum, uint16_t transactionId) {
+TCP::Result TCP::handleDecodedFrame(const Modbus::Frame& frame, int socketNum, uint32_t connId, uint16_t transactionId) {
 
     if (_role == Modbus::CLIENT) {
         // For a client, we expect an active transaction and we end it if everything matches
         if (_currentTransaction.active &&
             _currentTransaction.socketNum == socketNum &&
+            _currentTransaction.connId == connId &&
             _currentTransaction.tid == transactionId) {
 
             notifyCallbacks(frame);
@@ -366,7 +368,7 @@ TCP::Result TCP::handleDecodedFrame(const Modbus::Frame& frame, int socketNum, u
     
     if (_role == Modbus::SERVER) {
         // Start a new transaction
-        if (!beginTransaction(socketNum, transactionId)) {
+        if (!beginTransaction(socketNum, connId, transactionId)) {
             // A transaction is already in progress : the server is busy.
             // If the request is not a broadcast, we reply with a "Slave Device Busy" exception.
 
@@ -381,7 +383,7 @@ TCP::Result TCP::handleDecodedFrame(const Modbus::Frame& frame, int socketNum, u
                                                       frame.fc,
                                                       Modbus::SLAVE_DEVICE_BUSY,
                                                       respBuf)) {
-                    _tcpHAL.sendMsg(respBuf.data(), respBuf.size(), socketNum);
+                    _tcpHAL.sendMsg(respBuf.data(), respBuf.size(), socketNum, nullptr, connId);
                 }
                 Modbus::Debug::LOG_MSG("Server busy – replied with Slave Device Busy exception");
             }
@@ -417,7 +419,7 @@ TCP::Result TCP::handleDecodedFrame(const Modbus::Frame& frame, int socketNum, u
  * @note If the frame is not complete within RX_ASSEMBLY_TIMEOUT_MS, or the header is
  *       invalid, the connection is closed: the stream position would otherwise be lost.
  */
-TCP::Result TCP::fetchSocketData(int socketNum, ByteBuffer& rcvBuf, uint16_t& rcvTid) {
+TCP::Result TCP::fetchSocketData(int socketNum, ByteBuffer& rcvBuf, uint16_t& rcvTid, uint32_t& connId) {
     constexpr size_t MBAP_SIZE = ModbusCodec::TCP::MBAP_SIZE;
     constexpr size_t MIN_FRAME_SIZE = ModbusCodec::TCP::MIN_FRAME_SIZE;
     constexpr size_t MAX_FRAME_SIZE = ModbusCodec::TCP::MAX_FRAME_SIZE;
@@ -430,11 +432,17 @@ TCP::Result TCP::fetchSocketData(int socketNum, ByteBuffer& rcvBuf, uint16_t& rc
 
     uint32_t t0 = TIME_MS();
     size_t frameLen = MBAP_SIZE; // Header first, updated once the header is complete
+    connId = 0;
 
     while (true) {
         size_t currentSize = rcvBuf.size();
         rcvBuf.resize(frameLen); // Pre-reserve exactly what is missing
-        size_t n = _tcpHAL.readSocketData(socketNum, rcvBuf.begin() + currentSize, frameLen - currentSize);
+        uint32_t readConnId = 0;
+        size_t n = _tcpHAL.readSocketData(socketNum, rcvBuf.begin() + currentSize, frameLen - currentSize, &readConnId);
+
+        // The whole frame must come from the same connection (the socket number may be reused)
+        if (n != SIZE_MAX && connId != 0 && readConnId != connId) n = SIZE_MAX;
+        if (n != SIZE_MAX) connId = readConnId;
 
         if (n == SIZE_MAX) {
             rcvBuf.clear();
@@ -450,7 +458,7 @@ TCP::Result TCP::fetchSocketData(int socketNum, ByteBuffer& rcvBuf, uint16_t& rc
             }
             if (TIME_MS() - t0 >= RX_ASSEMBLY_TIMEOUT_MS) {
                 rcvBuf.clear();
-                _tcpHAL.closeConnection(socketNum);
+                _tcpHAL.closeConnection(socketNum, connId);
                 return Error(ERR_RX_FAILED, "incomplete frame, connection closed");
             }
             WAIT_MS(1); // Wait for the rest of the frame
@@ -466,7 +474,7 @@ TCP::Result TCP::fetchSocketData(int socketNum, ByteBuffer& rcvBuf, uint16_t& rc
             frameLen = 6 + mbapLen; // Expected total size (MBAP+PDU)
             if (protocolId != 0 || frameLen < MIN_FRAME_SIZE || frameLen > MAX_FRAME_SIZE) {
                 rcvBuf.clear();
-                _tcpHAL.closeConnection(socketNum);
+                _tcpHAL.closeConnection(socketNum, connId);
                 return Error(ERR_RX_FAILED, "invalid MBAP header, connection closed");
             }
             continue;
@@ -486,6 +494,7 @@ TCP::Result TCP::handleTxRequest() {
     void* ctx = nullptr;
 
     int actualSock = -1;
+    uint32_t actualConnId = 0;
     uint16_t tid = 0;
     bool isBroadcast = false;
     bool sendMsgRes = false;
@@ -525,7 +534,8 @@ TCP::Result TCP::handleTxRequest() {
         // Send the payload via HAL
         if (connected && !aborted) {
             sendMsgRes = _tcpHAL.sendMsg(payload, len, destSock,
-                                      (_role == Modbus::CLIENT) ? &actualSock : nullptr);
+                                      (_role == Modbus::CLIENT) ? &actualSock : nullptr,
+                                      _txCtx.connId, &actualConnId);
         }
 
         // Clear TX buffer and metadata whatever happens
@@ -551,7 +561,7 @@ TCP::Result TCP::handleTxRequest() {
             return Error(ERR_SEND_FAILED, "invalid current socket returned by HAL");
         }
         // Start the transaction
-        if (!beginTransaction(actualSock, tid)) {
+        if (!beginTransaction(actualSock, actualConnId, tid)) {
             if (txCallback) txCallback(ERR_BUSY, ctx);
             return Error(ERR_BUSY, "cannot start transaction");
         }
@@ -579,16 +589,17 @@ uint16_t TCP::getNextOutgoingTransactionId() {
 
 /* @brief Mark the _currentTransaction.active flag to true at the beginning of a Modbus transaction.
  * @param socketNum The socket number associated with this transaction.
+ * @param connId The HAL connection ID associated with this transaction.
  * @param transactionId The transaction ID for this transaction.
  * @return True if the transaction was started, false otherwise (e.g., mutex lock failed, already in transaction for a client).
  * @note IMPORTANT: must ONLY be called from rxTxTask context!
  */
-bool TCP::beginTransaction(int socketNum, uint16_t transactionId) {
+bool TCP::beginTransaction(int socketNum, uint32_t connId, uint16_t transactionId) {
     if (_currentTransaction.active) {
         Modbus::Debug::LOG_MSG("Transaction already in progress");
         return false;
     }
-    _currentTransaction.set(socketNum, transactionId);
+    _currentTransaction.set(socketNum, connId, transactionId);
     Modbus::Debug::LOG_MSGF("Transaction started on socket: %d with TID: %d", socketNum, transactionId);
     return true;
 }
@@ -638,10 +649,11 @@ void TCP::rxTxTask(void* tcp) {
                 int sock;
                 if (xQueueReceive(self->_rxEventQueue, &sock, 0) == pdTRUE) {
                     uint16_t rcvTid;
-                    Result fetchRes = self->fetchSocketData(sock, self->_rxBuffer, rcvTid);
+                    uint32_t connId;
+                    Result fetchRes = self->fetchSocketData(sock, self->_rxBuffer, rcvTid, connId);
                     if (fetchRes == SUCCESS) {
                         ByteBuffer frameView(self->_rxBuffer.data(), self->_rxBuffer.size());
-                        self->processReceivedFrame(frameView, sock);
+                        self->processReceivedFrame(frameView, sock, connId);
                         self->_rxBuffer.clear(); // reset for next iteration
                     }
                 }

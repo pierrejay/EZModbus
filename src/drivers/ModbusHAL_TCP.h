@@ -89,9 +89,12 @@ public:
     void stop();
 
     // Main API
-    bool sendMsg(const uint8_t* payload, const size_t len, const int destSocket = -1, int* actualSocket = nullptr);
-    size_t readSocketData(int socketNum, uint8_t* dst, size_t maxLen);
-    void closeConnection(int socketNum);
+    // Connection IDs (non-zero) tell apart two successive connections reusing the same socket number:
+    // pass the ID of the connection an operation is meant for, 0 to skip the check
+    bool sendMsg(const uint8_t* payload, const size_t len, const int destSocket = -1, int* actualSocket = nullptr,
+                 uint32_t connId = 0, uint32_t* actualConnId = nullptr);
+    size_t readSocketData(int socketNum, uint8_t* dst, size_t maxLen, uint32_t* connId = nullptr);
+    void closeConnection(int socketNum, uint32_t connId);
     bool ensureClientConnected();
 
     // Monitoring
@@ -126,6 +129,11 @@ private:
     QueueHandle_t _rxQueue;
     // Fixed-size storage for active sockets (used in server mode)
     int _activeSockets[MAX_ACTIVE_SOCKETS] = {0};
+    uint32_t _activeConnIds[MAX_ACTIVE_SOCKETS] = {0}; // Connection ID of each active socket
+    uint32_t _clientConnId = 0;                         // Connection ID of the client socket
+    uint32_t _lastConnId = 0;
+    uint32_t newConnectionIdLocked();                   // Caller holds _socketsMutex
+    uint32_t connectionIdLocked(int sock) const;        // Caller holds _socketsMutex, 0 if not tracked
     size_t _activeSocketCount = 0; // Current number of active sockets
     int _listenSocket;              // Server listen socket
     int _clientSocket;              // Client mode connected socket

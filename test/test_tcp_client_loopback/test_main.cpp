@@ -1905,6 +1905,63 @@ void test_server_unencodable_response_exception() {
     Modbus::Logger::logln();
 }
 
+// Regression: a transaction only remembered the socket number. When client A disconnected
+// while its request was being processed, a new client B could get the same socket number,
+// and received the response meant for A. Isolated server whose application answers slowly.
+static constexpr uint16_t SOCKET_REUSE_TEST_PORT = 519;
+static constexpr uint32_t SOCKET_REUSE_HANDLER_DELAY_MS = 500;
+ModbusHAL::TCP halForSocketReuseServer(SOCKET_REUSE_TEST_PORT);
+ModbusInterface::TCP socketReuseServerIf(halForSocketReuseServer, Modbus::SERVER);
+
+void test_server_response_not_sent_to_reused_socket() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_SERVER_RESPONSE_NOT_SENT_TO_REUSED_SOCKET");
+
+    static bool initialized = false;
+    if (!initialized) {
+        TEST_ASSERT_TRUE(halForSocketReuseServer.begin());
+        socketReuseServerIf.setRcvCallback([](const Modbus::Frame& request, void* ctx) {
+            vTaskDelay(pdMS_TO_TICKS(SOCKET_REUSE_HANDLER_DELAY_MS)); // Slow application
+            Modbus::Frame response;
+            response.clear();
+            response.type = Modbus::RESPONSE;
+            response.fc = request.fc;
+            response.slaveId = request.slaveId;
+            response.regAddress = request.regAddress;
+            response.regCount = 1;
+            response.data[0] = 0xAAAA;
+            static_cast<ModbusInterface::TCP*>(ctx)->sendFrame(response, nullptr, nullptr);
+        }, &socketReuseServerIf);
+        TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, socketReuseServerIf.begin());
+        initialized = true;
+    }
+
+    // Client A: request, then disconnect while the application is processing it
+    int sockA = rawConnect(SOCKET_REUSE_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sockA >= 0, "client A connect failed");
+    uint8_t req[RAW_READ_HR_REQ_SIZE];
+    rawBuildReadHrRequest(req, 0x0A0A, 0);
+    TEST_ASSERT_TRUE(rawSendAll(sockA, req, sizeof(req)));
+    vTaskDelay(pdMS_TO_TICKS(50));
+    ::close(sockA);
+    vTaskDelay(pdMS_TO_TICKS(100)); // Let the server HAL notice & free A's socket
+
+    // Client B connects meanwhile (typically gets the same socket number on the server side)
+    int sockB = rawConnect(SOCKET_REUSE_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sockB >= 0, "client B connect failed");
+
+    // B sent nothing: it must receive nothing, in particular not A's response
+    uint8_t buf[RAW_READ_HR_RESP_SIZE];
+    size_t got = rawRecvExact(sockB, buf, sizeof(buf)); // 1 s receive timeout
+    ::close(sockB);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(0, got, "client B received the response meant for client A");
+
+    Modbus::Logger::logln("TEST_SERVER_RESPONSE_NOT_SENT_TO_REUSED_SOCKET - OK");
+    Modbus::Logger::logln();
+}
+
 // Regression: the HAL task posts one RX event per select() round while data is
 // unread on a socket, and used to post it with portMAX_DELAY while holding the
 // socket mutex. Once the RX queue was full (consumer busy), the HAL task blocked
@@ -3066,6 +3123,7 @@ void setup() {
     RUN_TEST(test_server_unit_id_255);
     RUN_TEST(test_server_malformed_requests_exceptions);
     RUN_TEST(test_server_unencodable_response_exception);
+    RUN_TEST(test_server_response_not_sent_to_reused_socket);
     RUN_TEST(test_hal_rx_notifications_never_block_send);
     RUN_TEST(test_hal_tcp_keepalive);
     RUN_TEST(test_hal_stop_joins_task);
