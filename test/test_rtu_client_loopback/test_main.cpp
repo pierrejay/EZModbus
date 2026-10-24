@@ -1658,6 +1658,53 @@ void test_callback_timeout() {
 }
 
 // ===================================================================================
+// RX ROBUSTNESS TESTS
+// ===================================================================================
+
+// Regression: a UART data event whose bytes were no longer in the driver (0-byte read) still grew
+// the RX buffer: the stale bytes were counted as received and corrupted the next frame. The server
+// task handles that event on an empty driver buffer, then is held before its frame-gap backstop
+// (next tick) can discard the stale bytes, so that the request's event is handled right after.
+void test_rx_zero_byte_read_keeps_buffer() {
+    TaskHandle_t serverRxTask = mbt.getRxTxTaskHandle();
+    QueueHandle_t serverEvents = mbt_uart.getRegisteredEventQueue();
+    uart_event_t ghost = {};
+    ghost.type = UART_DATA;
+    ghost.size = 5;
+    vTaskDelay(1); // Start of a tick
+    bool injected = xQueueSend(serverEvents, &ghost, 0) == pdTRUE;
+    while (uxQueueMessagesWaiting(serverEvents) > 0) { }
+    delayMicroseconds(100); // Ghost event handled, server task back waiting on its queue
+    vTaskSuspend(serverRxTask);
+
+    serverHoldingRegisters[100] = 0x1234;
+    Modbus::Frame req = {
+        .type = Modbus::REQUEST,
+        .fc = Modbus::READ_HOLDING_REGISTERS,
+        .slaveId = TEST_SLAVE_ID,
+        .regAddress = 100,
+        .regCount = 1,
+        .data = {},
+        .exceptionCode = Modbus::NULL_EXCEPTION
+    };
+    Modbus::Frame resp;
+    Modbus::Client::Result tracker = Modbus::Client::NODATA;
+    auto sendRes = client.sendRequest(req, resp, &tracker);
+    vTaskDelay(pdMS_TO_TICKS(20)); // Request on the wire, queued behind the ghost event
+    vTaskResume(serverRxTask);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (tracker == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS + 500) {
+        vTaskDelay(1);
+    }
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(injected, "ghost event not injected");
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, sendRes);
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, tracker, "request after a 0-byte read not answered");
+    TEST_ASSERT_EQUAL_UINT16(0x1234, resp.data[0]);
+}
+
+// ===================================================================================
 // RUNTIME UART RECONFIGURATION TESTS
 // ===================================================================================
 
@@ -1981,6 +2028,9 @@ void setup() {
     RUN_TEST(test_helper_null_buffer);
     RUN_TEST(test_helper_qty_zero);
     RUN_TEST(test_helper_write_readonly_regtype);
+
+    // RX robustness tests
+    RUN_TEST(test_rx_zero_byte_read_keeps_buffer);
 
     // Runtime reconfiguration tests
     RUN_TEST(test_runtime_uart_reconfig);
