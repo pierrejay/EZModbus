@@ -1469,7 +1469,24 @@ static int rawServerSideSocket(uint16_t serverPort, int clientSock) {
 static constexpr uint16_t RAW_SERVER_TEST_PORT = 511;
 static constexpr uint32_t RAW_SERVER_CLIENT_TIMEOUT_MS = 300;
 ModbusHAL::TCP rawServerClientHal(LOOPBACK_IP_STR, RAW_SERVER_TEST_PORT);
-ModbusInterface::TCP rawServerClientIfc(rawServerClientHal, Modbus::CLIENT);
+
+// The library's TCP interface, whose sendFrame() can be held at its entry (barrier)
+struct HeldTcp : public ModbusInterface::TCP {
+    using ModbusInterface::TCP::TCP;
+    StaticSemaphore_t gateBuf;
+    SemaphoreHandle_t gate = xSemaphoreCreateBinaryStatic(&gateBuf);
+    volatile bool holdNext = false;
+    volatile bool entered = false;
+    Result sendFrame(const Modbus::Frame& frame, TxResultCallback txCallback, void* ctx) override {
+        if (holdNext) {
+            holdNext = false;
+            entered = true;
+            xSemaphoreTake(gate, portMAX_DELAY);
+        }
+        return ModbusInterface::TCP::sendFrame(frame, txCallback, ctx);
+    }
+};
+HeldTcp rawServerClientIfc(rawServerClientHal, Modbus::CLIENT);
 Modbus::Client rawServerClient(rawServerClientIfc, RAW_SERVER_CLIENT_TIMEOUT_MS);
 
 static void beginRawServerClient() {
@@ -1579,6 +1596,166 @@ void test_client_rx_coalesced_responses() {
     Modbus::Logger::logln("TEST_CLIENT_RX_COALESCED_RESPONSES");
     runLateResponseScenario(true);
     Modbus::Logger::logln("TEST_CLIENT_RX_COALESCED_RESPONSES - OK");
+    Modbus::Logger::logln();
+}
+
+// Rule: a client-side transaction belongs to its requester until the requester releases it.
+// A frame carrying A's TID but another slave ID is rejected by A, which keeps waiting: the
+// interface stays A's (a second Client sharing it is refused) until A times out & releases it.
+Modbus::Client rawServerClientB(rawServerClientIfc, RAW_SERVER_CLIENT_TIMEOUT_MS);
+
+void test_transaction_kept_by_owner_until_released() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_TRANSACTION_KEPT_BY_OWNER_UNTIL_RELEASED");
+
+    int listenSock = rawListen(RAW_SERVER_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0, "raw server listen failed");
+    beginRawServerClient();
+    static bool clientBReady = false;
+    if (!clientBReady) clientBReady = rawServerClientB.begin() == Modbus::Client::SUCCESS;
+    TEST_ASSERT_TRUE_MESSAGE(clientBReady, "second client init failed");
+
+    Modbus::Frame req = { .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID,
+                          .regAddress = 0, .regCount = 1, .exceptionCode = Modbus::NULL_EXCEPTION };
+    uint8_t reqBytes[RAW_READ_HR_REQ_SIZE];
+    uint8_t respBytes[RAW_READ_HR_RESP_SIZE];
+
+    // A is sent, the server answers with A's TID but another slave ID
+    Modbus::Frame respA;
+    volatile Modbus::Client::Result trackerA = Modbus::Client::NODATA;
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, rawServerClient.sendRequest(req, respA, (Modbus::Client::Result*)&trackerA));
+    int peer = ::accept(listenSock, nullptr, nullptr);
+    TEST_ASSERT_TRUE_MESSAGE(peer >= 0, "accept() failed");
+    rawSetupPeer(peer);
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_REQ_SIZE, rawRecvExact(peer, reqBytes, sizeof(reqBytes)), "request A not received");
+    rawBuildReadHrResponse(respBytes, rawTid(reqBytes), 0xAAAA);
+    respBytes[6] = TEST_SLAVE_ID + 1; // Unit ID
+    TEST_ASSERT_TRUE(rawSendAll(peer, respBytes, sizeof(respBytes)));
+    vTaskDelay(pdMS_TO_TICKS(50)); // Handled by the interface, rejected by A
+
+    // A still waits: B is refused, and a release by someone else changes nothing
+    Modbus::Frame respB;
+    volatile Modbus::Client::Result trackerB = Modbus::Client::NODATA;
+    const auto startB = rawServerClientB.sendRequest(req, respB, (Modbus::Client::Result*)&trackerB);
+    rawServerClientIfc.releaseTransaction(&rawServerClientB, true);
+    const bool readyAfterForeignRelease = rawServerClientIfc.isReady();
+    const auto stateA = trackerA;
+
+    // A times out & releases the interface: B gets through
+    uint32_t t0 = Modbus::TIME_MS();
+    while (trackerA == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < RAW_SERVER_CLIENT_TIMEOUT_MS + 200) vTaskDelay(pdMS_TO_TICKS(5));
+    t0 = Modbus::TIME_MS();
+    while (!rawServerClientIfc.isReady() && Modbus::TIME_MS() - t0 < 200) vTaskDelay(pdMS_TO_TICKS(1));
+    req.regAddress = 1;
+    trackerB = Modbus::Client::NODATA;
+    const auto startB2 = rawServerClientB.sendRequest(req, respB, (Modbus::Client::Result*)&trackerB);
+    size_t gotB = rawRecvExact(peer, reqBytes, sizeof(reqBytes));
+    if (gotB == RAW_READ_HR_REQ_SIZE) {
+        rawBuildReadHrResponse(respBytes, rawTid(reqBytes), 0xBBBB);
+        rawSendAll(peer, respBytes, sizeof(respBytes));
+    }
+    t0 = Modbus::TIME_MS();
+    while (trackerB == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < RAW_SERVER_CLIENT_TIMEOUT_MS + 200) vTaskDelay(pdMS_TO_TICKS(5));
+    closeRawServer(peer, listenSock);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::NODATA, stateA, "A completed by a frame for another slave");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_BUSY, startB, "B admitted while A still waits");
+    TEST_ASSERT_FALSE_MESSAGE(readyAfterForeignRelease, "released by a requester that doesn't own it");
+    TEST_ASSERT_EQUAL(Modbus::Client::ERR_TIMEOUT, trackerA);
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, startB2, "B refused after A released");
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_REQ_SIZE, gotB, "request B not received");
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, trackerB);
+    TEST_ASSERT_EQUAL_HEX16(0xBBBB, respB.data[0]);
+
+    Modbus::Logger::logln("TEST_TRANSACTION_KEPT_BY_OWNER_UNTIL_RELEASED - OK");
+    Modbus::Logger::logln();
+}
+
+// Rule: A times out after its timer was armed, before its frame is queued; the frame is then sent
+// and claims the transaction. Its late TX result must release it & end the TCP transaction it
+// opened: B goes through right away, not after A's response or the 5 s safety timeout.
+struct LateClaimJob {
+    Modbus::Frame req;
+    Modbus::Frame resp;
+    volatile Modbus::Client::Result tracker;
+    volatile bool done;
+};
+static StaticTask_t lateClaimJobTcb;
+static StackType_t lateClaimJobStack[4096];
+
+void test_late_claim_released_after_timeout_before_send() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_LATE_CLAIM_RELEASED_AFTER_TIMEOUT_BEFORE_SEND");
+
+    int listenSock = rawListen(RAW_SERVER_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0, "raw server listen failed");
+    beginRawServerClient();
+    static bool clientBReady = false;
+    if (!clientBReady) clientBReady = rawServerClientB.begin() == Modbus::Client::SUCCESS;
+    TEST_ASSERT_TRUE_MESSAGE(clientBReady, "second client init failed");
+
+    static LateClaimJob a;
+    a.req = { .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID,
+              .regAddress = 0, .regCount = 1, .exceptionCode = Modbus::NULL_EXCEPTION };
+    a.tracker = Modbus::Client::NODATA;
+    a.done = false;
+    rawServerClientIfc.entered = false;
+    rawServerClientIfc.holdNext = true;
+    xTaskCreateStatic([](void* arg) {
+        auto* job = static_cast<LateClaimJob*>(arg);
+        rawServerClient.sendRequest(job->req, job->resp, (Modbus::Client::Result*)&job->tracker);
+        job->done = true;
+        vTaskDelete(nullptr);
+    }, "lateClaimJob", sizeof(lateClaimJobStack) / sizeof(StackType_t), &a, 2, lateClaimJobStack, &lateClaimJobTcb);
+
+    uint32_t t0 = Modbus::TIME_MS();
+    while (!rawServerClientIfc.entered && Modbus::TIME_MS() - t0 < 500) vTaskDelay(1);
+    vTaskDelay(pdMS_TO_TICKS(RAW_SERVER_CLIENT_TIMEOUT_MS + 50)); // A's timer fires
+    const Modbus::Client::Result aBeforeSend = a.tracker;
+    xSemaphoreGive(rawServerClientIfc.gate); // A's frame is queued, sent, claims the transaction
+
+    // A reaches the server (sent after its timeout: allowed), left unanswered
+    int peer = ::accept(listenSock, nullptr, nullptr);
+    uint8_t reqBytes[RAW_READ_HR_REQ_SIZE];
+    size_t gotA = 0;
+    if (peer >= 0) {
+        rawSetupPeer(peer);
+        gotA = rawRecvExact(peer, reqBytes, sizeof(reqBytes));
+    }
+    t0 = Modbus::TIME_MS();
+    while (!a.done && Modbus::TIME_MS() - t0 < 500) vTaskDelay(1);
+    t0 = Modbus::TIME_MS();
+    while (!rawServerClientIfc.isReady() && Modbus::TIME_MS() - t0 < 2000) vTaskDelay(pdMS_TO_TICKS(1));
+    const uint32_t readyAfterMs = Modbus::TIME_MS() - t0;
+
+    // B goes through & gets its own response
+    Modbus::Frame reqB = a.req;
+    reqB.regAddress = 1;
+    Modbus::Frame respB;
+    volatile Modbus::Client::Result trackerB = Modbus::Client::NODATA;
+    const auto startB = rawServerClientB.sendRequest(reqB, respB, (Modbus::Client::Result*)&trackerB);
+    size_t gotB = (peer >= 0) ? rawRecvExact(peer, reqBytes, sizeof(reqBytes)) : 0;
+    if (gotB == RAW_READ_HR_REQ_SIZE) {
+        uint8_t respBytes[RAW_READ_HR_RESP_SIZE];
+        rawBuildReadHrResponse(respBytes, rawTid(reqBytes), 0xBBBB);
+        rawSendAll(peer, respBytes, sizeof(respBytes));
+    }
+    t0 = Modbus::TIME_MS();
+    while (trackerB == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < RAW_SERVER_CLIENT_TIMEOUT_MS + 200) vTaskDelay(pdMS_TO_TICKS(5));
+    closeRawServer(peer, listenSock);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, aBeforeSend, "A didn't time out before its send");
+    TEST_ASSERT_TRUE_MESSAGE(a.done, "A's send didn't return");
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_REQ_SIZE, gotA, "A not sent");
+    TEST_ASSERT_TRUE_MESSAGE(readyAfterMs < 500, "interface kept busy by the transaction A's late send opened");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, startB, "B refused");
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_REQ_SIZE, gotB, "B not sent");
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, trackerB);
+    TEST_ASSERT_EQUAL_HEX16(0xBBBB, respB.data[0]);
+
+    Modbus::Logger::logln("TEST_LATE_CLAIM_RELEASED_AFTER_TIMEOUT_BEFORE_SEND - OK");
     Modbus::Logger::logln();
 }
 
@@ -1750,6 +1927,7 @@ static TxCallbackProbe runTxCallbackProbe(const Modbus::Frame& frame) {
         uint32_t t0 = Modbus::TIME_MS();
         while (!probe.called && Modbus::TIME_MS() - t0 < 2000) vTaskDelay(pdMS_TO_TICKS(5));
     }
+    rawServerClientIfc.releaseTransaction(&probe, false); // The probe owns the transaction like a Client
     return probe;
 }
 
@@ -3666,6 +3844,8 @@ void setup() {
     RUN_TEST(test_server_safety_timeout_clears_idle);
     RUN_TEST(test_late_response_not_matched_to_next_request);
     RUN_TEST(test_client_rx_coalesced_responses);
+    RUN_TEST(test_transaction_kept_by_owner_until_released);
+    RUN_TEST(test_late_claim_released_after_timeout_before_send);
     RUN_TEST(test_client_no_late_write_after_reconnect);
     RUN_TEST(test_client_destroyed_while_interface_holds_request);
     RUN_TEST(test_client_null_exception_response_rejected);

@@ -1244,6 +1244,363 @@ void test_client_late_tx_result_gates_next() {
     TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, sendBAfter, "request B refused after A's TX result");
 }
 
+// ===================================================================================
+// TRANSACTION OWNER (client side): the requester owns the interface's transaction until it
+// releases it, at the end of its request; a given-up request aborts what's left of it.
+// OwnedMaster tracks the owner like the TCP & RTU interfaces, with barriers: sendFrame() held
+// at its entry, a synchronous send failure, a held TX result (ControlledMaster).
+// ===================================================================================
+
+struct OwnedMaster : public ControlledMaster {
+    OwnedMaster() { _tracksOwner = true; }
+
+    StaticSemaphore_t sendGateBuf;
+    SemaphoreHandle_t sendGate = xSemaphoreCreateBinaryStatic(&sendGateBuf);
+    volatile bool holdBeforeSend = false; // The next sendFrame() waits for sendGate at its entry
+    volatile bool sendEntered = false;
+    volatile bool failNextSend = false;   // The next sendFrame() fails at once, once claimed
+
+    Result sendFrame(const Modbus::Frame& frame, TxResultCallback txCallback, void* ctx) override {
+        if (holdBeforeSend) {
+            holdBeforeSend = false;
+            sendEntered = true;
+            xSemaphoreTake(sendGate, portMAX_DELAY);
+        }
+        if (ownedByOther(ctx)) {
+            if (txCallback) txCallback(ERR_BUSY, ctx);
+            return ERR_BUSY;
+        }
+        const bool claimed = claimTransaction(ctx);
+        if (failNextSend) {
+            failNextSend = false;
+            if (claimed) unclaimTransaction(ctx);
+            if (txCallback) txCallback(ERR_SEND_FAILED, ctx);
+            return ERR_SEND_FAILED;
+        }
+        return ControlledMaster::sendFrame(frame, txCallback, ctx);
+    }
+    bool isReady() override { return !isOwned(); }
+    void* owner() { return currentOwner(); }
+
+    void resetOwned() {
+        reset();
+        holdBeforeSend = false;
+        sendEntered = false;
+        failNextSend = false;
+        xSemaphoreTake(sendGate, 0);
+        Modbus::Lock guard(_ownerMutex);
+        _owner = nullptr;
+    }
+};
+
+static OwnedMaster ownedMaster;
+alignas(Modbus::Client) static uint8_t ownerClientBStorage[sizeof(Modbus::Client)];
+
+static Modbus::Frame localResponse(uint16_t value) {
+    Modbus::Frame response = LOCAL_BRIDGE_REQUEST;
+    response.type = Modbus::RESPONSE;
+    response.data[0] = value;
+    return response;
+}
+
+// B, sharing the interface, sends & gets its own response
+static bool requesterServed(OwnedMaster& master, Modbus::Client& client, uint16_t value) {
+    Modbus::Frame resp;
+    Modbus::Client::Result tracker = Modbus::Client::NODATA;
+    if (client.sendRequest(LOCAL_BRIDGE_REQUEST, resp, &tracker) != Modbus::Client::SUCCESS) return false;
+    master.transmitFrame(localResponse(value));
+    return tracker == Modbus::Client::SUCCESS && resp.data[0] == value;
+}
+
+// Runs a function from its own task (when it blocks at a barrier)
+struct OwnerJob {
+    void (*fn)(OwnerJob&);
+    Modbus::Client* client;
+    bool sync;
+    volatile bool done;
+    Modbus::Client::Result sendResult;
+    volatile Modbus::Client::Result tracker;
+    Modbus::Frame resp;
+};
+static StaticTask_t ownerJobTcb;
+static StackType_t ownerJobStack[4096];
+static void startOwnerJob(OwnerJob& job) {
+    xTaskCreateStatic([](void* arg) {
+        auto* job = static_cast<OwnerJob*>(arg);
+        job->fn(*job);
+        job->done = true;
+        vTaskDelete(nullptr);
+    }, "ownerJob", sizeof(ownerJobStack) / sizeof(StackType_t), &job, 2, ownerJobStack, &ownerJobTcb);
+}
+static void ownerJobSend(OwnerJob& job) {
+    job.sendResult = job.sync ? job.client->sendRequest(LOCAL_BRIDGE_REQUEST, job.resp)
+                              : job.client->sendRequest(LOCAL_BRIDGE_REQUEST, job.resp, (Modbus::Client::Result*)&job.tracker);
+}
+
+// A's timer fires after it was armed, before its frame is queued: A ends without owning the
+// transaction, then its frame claims it. Its TX result (always delivered) must release it.
+static void runTimeoutBeforeSend(bool sync) {
+    ownedMaster.resetOwned();
+    ownedMaster.holdBeforeSend = true;
+    auto* clientA = new (concurrencyClientStorage) Modbus::Client(ownedMaster, LOCAL_CLIENT_TIMEOUT_MS);
+    auto* clientB = new (ownerClientBStorage) Modbus::Client(ownedMaster, LOCAL_CLIENT_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, clientA->begin());
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, clientB->begin());
+
+    static OwnerJob a;
+    a.fn = ownerJobSend;
+    a.client = clientA;
+    a.sync = sync;
+    a.done = false;
+    a.tracker = Modbus::Client::NODATA;
+    startOwnerJob(a);
+    bool held = waitFlag(ownedMaster.sendEntered, 500);
+    vTaskDelay(pdMS_TO_TICKS(LOCAL_CLIENT_TIMEOUT_MS + 50)); // A's timer fires
+    xSemaphoreGive(ownedMaster.sendGate); // A's frame claims the transaction, its TX result follows
+    bool aDone = waitFlag(a.done, 500);
+    Modbus::Client::Result resultA = sync ? a.sendResult : a.tracker;
+    void* ownerAfter = ownedMaster.owner();
+    bool bServed = requesterServed(ownedMaster, *clientB, 0xB0B0);
+    clientB->~Client();
+    clientA->~Client();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(held && aDone, "A not held before its send");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, resultA, "A should time out");
+    TEST_ASSERT_NULL_MESSAGE(ownerAfter, "transaction left claimed by a request that timed out before its send");
+    TEST_ASSERT_TRUE_MESSAGE(bServed, "B not served after A");
+}
+
+void test_owner_timeout_before_send_async() { runTimeoutBeforeSend(false); }
+void test_owner_timeout_before_send_sync() { runTimeoutBeforeSend(true); }
+
+// A owns the transaction, its TX result is held; A times out (released & aborted), B claims the
+// transaction, then A's late TX result comes: it must leave B's transaction alone.
+void test_owner_late_tx_result_spares_next() {
+    ownedMaster.resetOwned();
+    ownedMaster.holdTx = true;
+    auto* clientA = new (concurrencyClientStorage) Modbus::Client(ownedMaster, LOCAL_CLIENT_TIMEOUT_MS);
+    auto* clientB = new (ownerClientBStorage) Modbus::Client(ownedMaster, LOCAL_CLIENT_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, clientA->begin());
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, clientB->begin());
+
+    Modbus::Frame respA;
+    Modbus::Client::Result trackerA = Modbus::Client::NODATA;
+    volatile Modbus::Client::Result& resultA = trackerA; // Written by the timer daemon
+    Modbus::Client::Result sendA = clientA->sendRequest(LOCAL_BRIDGE_REQUEST, respA, &trackerA);
+    void* ownerWhileHeld = ownedMaster.owner();
+    uint32_t t0 = Modbus::TIME_MS();
+    while (resultA == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < LOCAL_CLIENT_TIMEOUT_MS + 100) vTaskDelay(1);
+    uint32_t abortsAfterTimeout = ownedMaster.aborts;
+
+    ownedMaster.holdTx = false;
+    Modbus::Frame respB;
+    Modbus::Client::Result trackerB = Modbus::Client::NODATA;
+    Modbus::Client::Result sendB = clientB->sendRequest(LOCAL_BRIDGE_REQUEST, respB, &trackerB);
+    ownedMaster.deliverTxResult(ModbusInterface::IInterface::SUCCESS); // A's late TX result
+    void* ownerAfterLate = ownedMaster.owner();
+    ownedMaster.transmitFrame(localResponse(0xB0B0));
+    uint32_t abortsAfter = ownedMaster.aborts;
+    clientB->~Client();
+    clientA->~Client();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, sendA);
+    TEST_ASSERT_TRUE_MESSAGE(ownerWhileHeld == clientA, "A doesn't own its transaction");
+    TEST_ASSERT_EQUAL(Modbus::Client::ERR_TIMEOUT, trackerA);
+    TEST_ASSERT_EQUAL_MESSAGE(1, abortsAfterTimeout, "A's timeout didn't abort its transaction");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, sendB, "B refused after A released");
+    TEST_ASSERT_TRUE_MESSAGE(ownerAfterLate == clientB, "A's late TX result released B's transaction");
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, trackerB);
+    TEST_ASSERT_EQUAL_HEX16(0xB0B0, respB.data[0]);
+    TEST_ASSERT_EQUAL_MESSAGE(1, abortsAfter, "B's transaction aborted");
+}
+
+// The send fails at once once claimed: the claim is undone, A ends (TX failure, no abort)
+void test_owner_sync_send_failure_releases() {
+    ownedMaster.resetOwned();
+    ownedMaster.failNextSend = true;
+    auto* clientA = new (concurrencyClientStorage) Modbus::Client(ownedMaster, LOCAL_CLIENT_TIMEOUT_MS);
+    auto* clientB = new (ownerClientBStorage) Modbus::Client(ownedMaster, LOCAL_CLIENT_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, clientA->begin());
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, clientB->begin());
+
+    Modbus::Frame respA;
+    Modbus::Client::Result trackerA = Modbus::Client::NODATA;
+    Modbus::Client::Result sendA = clientA->sendRequest(LOCAL_BRIDGE_REQUEST, respA, &trackerA);
+    void* ownerAfter = ownedMaster.owner();
+    bool bServed = requesterServed(ownedMaster, *clientB, 0xB0B0);
+    uint32_t aborts = ownedMaster.aborts;
+    clientB->~Client();
+    clientA->~Client();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Client::ERR_TX_FAILED, sendA);
+    TEST_ASSERT_EQUAL(Modbus::Client::ERR_TX_FAILED, trackerA);
+    TEST_ASSERT_NULL_MESSAGE(ownerAfter, "transaction left claimed after a failed send");
+    TEST_ASSERT_TRUE_MESSAGE(bServed, "B not served after A");
+    TEST_ASSERT_EQUAL_MESSAGE(0, aborts, "a failed send aborted the transaction");
+}
+
+// A's completion callback runs once the transaction is released (no abort): it can start B,
+// which doesn't get A's response (still being delivered) but its own.
+struct ChainedOwnerCtx {
+    Modbus::Client* clientB;
+    Modbus::Client::Result resultA;
+    bool readyInCallback;
+    Modbus::Client::Result startB;
+    Modbus::Frame respB;
+    Modbus::Client::Result trackerB;
+};
+
+void test_owner_released_before_completion_callback() {
+    ownedMaster.resetOwned();
+    auto* clientA = new (concurrencyClientStorage) Modbus::Client(ownedMaster, LOCAL_CLIENT_TIMEOUT_MS);
+    auto* clientB = new (ownerClientBStorage) Modbus::Client(ownedMaster, LOCAL_CLIENT_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, clientA->begin());
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, clientB->begin());
+
+    static ChainedOwnerCtx ctx;
+    ctx = { clientB, Modbus::Client::NODATA, false, Modbus::Client::NODATA, {}, Modbus::Client::NODATA };
+    Modbus::Client::Result sendA = clientA->sendRequest(LOCAL_BRIDGE_REQUEST,
+        [](Modbus::Client::Result result, const Modbus::Frame*, void* arg) {
+            auto* c = static_cast<ChainedOwnerCtx*>(arg);
+            c->resultA = result;
+            c->readyInCallback = ownedMaster.isReady();
+            c->startB = c->clientB->sendRequest(LOCAL_BRIDGE_REQUEST, c->respB, &c->trackerB);
+        }, &ctx);
+    ownedMaster.transmitFrame(localResponse(0xA0A0));
+    Modbus::Client::Result bAfterA = ctx.trackerB;
+    ownedMaster.transmitFrame(localResponse(0xB0B0));
+    uint32_t aborts = ownedMaster.aborts;
+    clientB->~Client();
+    clientA->~Client();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, sendA);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, ctx.resultA);
+    TEST_ASSERT_TRUE_MESSAGE(ctx.readyInCallback, "interface not released before A's completion callback");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, ctx.startB, "B refused from A's completion callback");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::NODATA, bAfterA, "B took A's response");
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, ctx.trackerB);
+    TEST_ASSERT_EQUAL_HEX16(0xB0B0, ctx.respB.data[0]);
+    TEST_ASSERT_EQUAL_MESSAGE(0, aborts, "a completed request aborted the transaction");
+}
+
+// A response delivered while the active request's TX result isn't back answers an earlier
+// request (e.g. a previous one of the same slave & FC): dropped, the request gets its own.
+void test_owner_response_before_tx_result_dropped() {
+    ownedMaster.resetOwned();
+    ownedMaster.holdTx = true;
+    auto* client = new (concurrencyClientStorage) Modbus::Client(ownedMaster, LOCAL_CLIENT_TIMEOUT_MS * 10);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, client->begin());
+
+    Modbus::Frame resp;
+    Modbus::Client::Result tracker = Modbus::Client::NODATA;
+    Modbus::Client::Result send = client->sendRequest(LOCAL_BRIDGE_REQUEST, resp, &tracker);
+    ownedMaster.transmitFrame(localResponse(0xDEAD)); // Before the TX result
+    Modbus::Client::Result beforeTx = tracker;
+    ownedMaster.deliverTxResult(ModbusInterface::IInterface::SUCCESS);
+    ownedMaster.transmitFrame(localResponse(0xA0A0));
+    client->~Client();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, send);
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::NODATA, beforeTx, "response taken before the request's TX result");
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, tracker);
+    TEST_ASSERT_EQUAL_HEX16(0xA0A0, resp.data[0]);
+}
+
+// Bridge: its timeout closes the request before its frame is queued (gateway exception), then
+// the frame claims the transaction: its TX result must release it, the next request goes through.
+static ModbusInterface::Dummy ownerBridgeSlave;
+alignas(Modbus::Bridge) static uint8_t ownerBridgeStorage[sizeof(Modbus::Bridge)];
+
+void test_owner_bridge_timeout_before_send() {
+    ownedMaster.resetOwned();
+    Modbus::Frame frame;
+    while (ownerBridgeSlave.getReceivedFrame(frame)) {}
+    auto* bridge = new (ownerBridgeStorage) Modbus::Bridge(ownedMaster, ownerBridgeSlave, LOCAL_BRIDGE_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Bridge::SUCCESS, bridge->begin());
+
+    ownedMaster.holdBeforeSend = true;
+    static OwnerJob inject;
+    inject.fn = [](OwnerJob&) { ownerBridgeSlave.transmitFrame(LOCAL_BRIDGE_REQUEST); };
+    inject.done = false;
+    startOwnerJob(inject);
+    bool held = waitFlag(ownedMaster.sendEntered, 500);
+    vTaskDelay(pdMS_TO_TICKS(LOCAL_BRIDGE_TIMEOUT_MS + 50)); // The bridge times out
+    xSemaphoreGive(ownedMaster.sendGate);
+    bool injected = waitFlag(inject.done, 500);
+    void* ownerAfter = ownedMaster.owner();
+    Modbus::Frame exception;
+    bool gotException = ownerBridgeSlave.getReceivedFrame(exception);
+
+    ownerBridgeSlave.transmitFrame(LOCAL_BRIDGE_REQUEST); // Next request
+    ownedMaster.transmitFrame(localResponse(0xB0B0));
+    Modbus::Frame forwarded;
+    bool gotResponse = ownerBridgeSlave.getReceivedFrame(forwarded);
+    void* ownerAtEnd = ownedMaster.owner();
+    bridge->~Bridge();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(held && injected, "request not held before its send");
+    TEST_ASSERT_TRUE_MESSAGE(gotException, "no gateway exception on timeout");
+    TEST_ASSERT_EQUAL_HEX8(Modbus::GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND, exception.exceptionCode);
+    TEST_ASSERT_NULL_MESSAGE(ownerAfter, "transaction left claimed by a request closed before its send");
+    TEST_ASSERT_TRUE_MESSAGE(gotResponse, "next request not answered");
+    TEST_ASSERT_EQUAL_HEX16(0xB0B0, forwarded.data[0]);
+    TEST_ASSERT_NULL_MESSAGE(ownerAtEnd, "transaction not released after the forwarded response");
+}
+
+// Interfaces without owners keep their abort calls: on timeout & on destruction while active
+// only (not after a response, nor on destruction while idle), Client & Bridge alike.
+void test_custom_interface_abort_calls() {
+    controlledMaster.reset();
+    auto* client = new (concurrencyClientStorage) Modbus::Client(controlledMaster, LOCAL_CLIENT_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, client->begin());
+    Modbus::Frame resp;
+    Modbus::Client::Result tracker = Modbus::Client::NODATA;
+    volatile Modbus::Client::Result& result = tracker; // Written by the timer daemon
+
+    client->sendRequest(LOCAL_BRIDGE_REQUEST, resp, &tracker);
+    controlledMaster.transmitFrame(localResponse(1));
+    uint32_t afterResponse = controlledMaster.aborts;
+
+    tracker = Modbus::Client::NODATA;
+    client->sendRequest(LOCAL_BRIDGE_REQUEST, resp, &tracker);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (result == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < LOCAL_CLIENT_TIMEOUT_MS + 100) vTaskDelay(1);
+    uint32_t afterTimeout = controlledMaster.aborts;
+
+    client->~Client(); // Idle
+    uint32_t afterIdleDestroy = controlledMaster.aborts;
+    client = new (concurrencyClientStorage) Modbus::Client(controlledMaster, LOCAL_CLIENT_TIMEOUT_MS);
+    client->begin();
+    client->sendRequest(LOCAL_BRIDGE_REQUEST, resp, &tracker);
+    client->~Client(); // Active
+    uint32_t afterActiveDestroy = controlledMaster.aborts;
+
+    static ModbusInterface::Dummy slaveSide;
+    auto* bridge = new (ownerBridgeStorage) Modbus::Bridge(controlledMaster, slaveSide, LOCAL_BRIDGE_TIMEOUT_MS);
+    bridge->begin();
+    slaveSide.transmitFrame(LOCAL_BRIDGE_REQUEST);
+    controlledMaster.transmitFrame(localResponse(2));
+    uint32_t afterForwarded = controlledMaster.aborts;
+    slaveSide.transmitFrame(LOCAL_BRIDGE_REQUEST);
+    vTaskDelay(pdMS_TO_TICKS(LOCAL_BRIDGE_TIMEOUT_MS + 50));
+    uint32_t afterBridgeTimeout = controlledMaster.aborts;
+    bridge->~Bridge();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(0, afterResponse, "aborted after a response");
+    TEST_ASSERT_EQUAL_MESSAGE(1, afterTimeout, "not aborted on timeout");
+    TEST_ASSERT_EQUAL_MESSAGE(1, afterIdleDestroy, "aborted on destruction while idle");
+    TEST_ASSERT_EQUAL_MESSAGE(2, afterActiveDestroy, "not aborted on destruction while active");
+    TEST_ASSERT_EQUAL_MESSAGE(2, afterForwarded, "bridge aborted after a forwarded response");
+    TEST_ASSERT_EQUAL_MESSAGE(3, afterBridgeTimeout, "bridge didn't abort on timeout");
+}
+
 // The timer can't be re-armed (timer command queue full): the request isn't started, and nothing
 // is published nor delivered.
 static volatile uint32_t rearmFailureCallbacks = 0;
@@ -1500,6 +1857,14 @@ void setup() {
     RUN_TEST(test_client_late_timeout_callback_spares_next);
     RUN_TEST(test_client_sync_fallback_spares_next);
     RUN_TEST(test_client_late_tx_result_gates_next);
+    RUN_TEST(test_owner_timeout_before_send_async);
+    RUN_TEST(test_owner_timeout_before_send_sync);
+    RUN_TEST(test_owner_late_tx_result_spares_next);
+    RUN_TEST(test_owner_sync_send_failure_releases);
+    RUN_TEST(test_owner_released_before_completion_callback);
+    RUN_TEST(test_owner_response_before_tx_result_dropped);
+    RUN_TEST(test_owner_bridge_timeout_before_send);
+    RUN_TEST(test_custom_interface_abort_calls);
     RUN_TEST(test_client_timer_rearm_failure);
     RUN_TEST(test_client_zero_timeout); // Last: crashed (assert) before the fix
     RUN_TEST(test_bridge_timer_command_failure);

@@ -108,7 +108,7 @@ public:
         // interface is aborted (best effort), and its TX result waited for
         interface1.removeRcvCallbacks(this);
         interface2.removeRcvCallbacks(this);
-        if (_pendingActive && masterInterface) masterInterface->abortCurrentTransaction();
+        if (masterInterface) masterInterface->releaseTransaction(this, _pendingActive);
         interface1.waitTxCallbackDone(this);
         interface2.waitTxCallbackDone(this);
         if (!_timer) return;
@@ -282,7 +282,13 @@ private:
         {
             Lock guard(_pendingMutex);
             _txPending = false;
-            if (result == ModbusInterface::IInterface::SUCCESS || !closePendingLocked(ec, exception)) return;
+            if (!_pendingActive) {
+                // Closed before its TX result (e.g. timeout before the frame was queued): the
+                // transaction its frame claimed meanwhile is released here
+                masterInterface->releaseLateClaim(this);
+                return;
+            }
+            if (result == ModbusInterface::IInterface::SUCCESS || !closePendingLocked(ec, exception, false)) return;
         }
         Modbus::Debug::LOG_MSGF("Bridge: replying exception %s", Modbus::toString(ec));
         slaveInterface->sendFrame(exception, nullptr, nullptr);
@@ -303,6 +309,7 @@ private:
                 return;
             }
             _pendingActive = false;
+            masterInterface->releaseTransaction(this, false);
         }
         // The timer isn't stopped: its callback finds no expired request (stopping it here could
         // cancel the timer of a request forwarded meanwhile)
@@ -317,10 +324,10 @@ private:
 
     /* @brief Close the pending request (if any) by replying an exception to the slave side
      * @param onTimeout Called by the timer: only close the request if its timeout has elapsed (a
-     *        late timer event must not expire a newer request), and abort it on the master side
+     *        late timer event must not expire a newer request)
      * @return True if a pending request was closed
-     * @note The abort is posted under the mutex: before a newer request can be forwarded, so that
-     *       it can't cancel it
+     * @note The master side is released (what's left aborted) under the mutex: before a newer
+     *       request can be forwarded
      */
     bool closePendingWithException(Modbus::ExceptionCode ec, bool onTimeout = false) {
         Modbus::Frame exception;
@@ -328,8 +335,7 @@ private:
             Lock guard(_pendingMutex);
             if (!_pendingActive) return false; // Already answered
             if (onTimeout && TIME_MS() - _pendingStartMs < _timeoutMs) return false;
-            if (onTimeout) masterInterface->abortCurrentTransaction(); // Non-blocking
-            closePendingLocked(ec, exception);
+            closePendingLocked(ec, exception, onTimeout); // Releases the transaction (aborted on timeout)
         }
         Modbus::Debug::LOG_MSGF("Bridge: replying exception %s", Modbus::toString(ec));
         slaveInterface->sendFrame(exception, nullptr, nullptr);
@@ -337,12 +343,14 @@ private:
     }
 
     /* @brief Close the pending request (if any) & build its exception response
+     * @param abort True if the request is given up (timeout): what's left of it is aborted
      * @note Caller holds _pendingMutex, and sends the exception after releasing it
      * @return True if a pending request was closed
      */
-    bool closePendingLocked(Modbus::ExceptionCode ec, Modbus::Frame& exception) {
+    bool closePendingLocked(Modbus::ExceptionCode ec, Modbus::Frame& exception, bool abort) {
         if (!_pendingActive) return false;
         _pendingActive = false;
+        masterInterface->releaseTransaction(this, abort); // Non-blocking
         exception.clear();
         exception.type = Modbus::RESPONSE;
         exception.fc = _pending.fc;

@@ -21,6 +21,7 @@ RTU::RTU(ModbusHAL::UART& uart, Modbus::Role role)
       _rxTxTaskHandle(nullptr)
 {
     this->_role = role; 
+    _tracksOwner = true;
 }
 
 RTU::~RTU() {
@@ -197,6 +198,12 @@ RTU::Result RTU::sendFrame(const Modbus::Frame& frame, TxResultCallback txCallba
             if (txCallback) txCallback(ERR_NOT_INITIALIZED, ctx);
             return Error(ERR_NOT_INITIALIZED, "RTU interface not initialized");
         }
+
+        // Master: the bus belongs to the requester awaiting its response
+        if (_role == Modbus::MASTER && ownedByOther(ctx)) {
+            if (txCallback) txCallback(ERR_BUSY, ctx);
+            return Error(ERR_BUSY, "bus owned by another requester");
+        }
         
         _txResultCallback = txCallback; // Store the callback for rxTxTask
         _txCallbackCtx = ctx; // Store the context for rxTxTask
@@ -228,11 +235,15 @@ RTU::Result RTU::sendFrame(const Modbus::Frame& frame, TxResultCallback txCallba
             _rtt.start(&_rtt.storeUs); // Start RTT for master request (using stored start time)
         }
 
+        // The requester owns the bus from now on, until it releases it
+        const bool claimed = (_role == Modbus::MASTER) && claimTransaction(ctx);
+
         // Signal to rxTxTask that a frame is ready in _txBuffer
         if (!postTaskEvent(TASK_TX_REQUEST)) {
             _txBuffer.clear();
             _txResultCallback = nullptr;
             _txCallbackCtx = nullptr;
+            if (claimed) unclaimTransaction(ctx);
             if (txCallback) txCallback(ERR_BUSY, ctx);
             return Error(ERR_BUSY, "UART event queue full, cannot signal the TX request");
         }
@@ -252,7 +263,7 @@ bool RTU::isReady() {
     if (!_isInitialized) return false;
     Lock guard(_txMutex, 0); // try-lock no wait
     if (!guard.isLocked() || _txBuffer.size() > 0) return false;
-    return true;
+    return _role != Modbus::MASTER || !isOwned(); // Master: the bus is busy until its owner releases it
 }
 
 /* @brief Wait until no TX result callback registered with a context is pending or running

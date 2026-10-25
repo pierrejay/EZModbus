@@ -20,6 +20,7 @@ TCP::TCP(ModbusHAL::TCP& hal, Modbus::Role role)
 {
     _role = role;
     _extendedSlaveIds = true; // TCP Unit IDs: 1-255
+    _tracksOwner = true;
 
     if (role == Modbus::CLIENT) {
         Modbus::Debug::LOG_MSG("ModbusInterface::TCP (Client) created – connect HAL before calling begin()");
@@ -181,6 +182,11 @@ TCP::Result TCP::sendFrame(const Modbus::Frame &frame, TxResultCallback txCallba
             return Error(ERR_NOT_INITIALIZED, "TCP interface not initialized");
         }
 
+        if (_role == Modbus::CLIENT && ownedByOther(ctx)) {
+            if (txCallback) txCallback(ERR_BUSY, ctx);
+            return Error(ERR_BUSY, "transaction owned by another requester");
+        }
+
         if (_role == Modbus::SERVER && (!_currentTransaction.active || _currentTransaction.socketNum == -1)) {
             if (txCallback) txCallback(ERR_SEND_FAILED, ctx);
             return Error(ERR_SEND_FAILED, "Server not in transaction");
@@ -212,11 +218,15 @@ TCP::Result TCP::sendFrame(const Modbus::Frame &frame, TxResultCallback txCallba
         _txCtx.abortCount = _abortCount;
         _txCtx.connId = (_role == Modbus::SERVER) ? _currentTransaction.connId : 0;
 
+        // The requester owns the transaction from now on, until it releases it
+        const bool claimed = (_role == Modbus::CLIENT) && claimTransaction(ctx);
+
         // Signal dans la TX queue (taille 1) pour réveiller rxTxTask
         void* signalPtr = this; // valeur bidon
         if(xQueueSend(_txRequestQueue, &signalPtr, 0) != pdTRUE) {
             _txBuffer.clear();
             _txCtx.clear();
+            if (claimed) unclaimTransaction(ctx);
             if (txCallback) txCallback(ERR_BUSY, ctx);
             return Error(ERR_BUSY, "TX queue full");
         }
@@ -238,9 +248,9 @@ bool TCP::isReady() {
     Lock guard(_txMutex, 0); // try-lock no wait
     if (!guard.isLocked() || _txBuffer.size() > 0) return false;
 
-    // If the transaction is active, the interface is busy ONLY for a client
+    // If the transaction is active or owned, the interface is busy ONLY for a client
     // (a server still accepts responses to pending client requests)
-    if (_role == Modbus::CLIENT && _currentTransaction.active) return false;
+    if (_role == Modbus::CLIENT && (_currentTransaction.active || isOwned())) return false;
 
     return _tcpHAL.isReady();
 }
