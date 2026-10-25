@@ -236,7 +236,8 @@ namespace ModbusInterface {
         virtual ~IInterface() = default;
 
         virtual Result begin() = 0;
-        // Calls txCallback exactly once per call, whatever the result
+        // Calls txCallback exactly once per call, whatever the result,
+        // and before delivering the response to the receive callbacks
         virtual Result sendFrame(const Modbus::Frame& frame,
                                  TxResultCallback txCallback = nullptr,
                                  void* ctx = nullptr) = 0;
