@@ -187,6 +187,12 @@ TCP::Result TCP::sendFrame(const Modbus::Frame &frame, TxResultCallback txCallba
             return Error(ERR_BUSY, "transaction owned by another requester");
         }
 
+        // Client: one transaction at a time, whoever sends (it would be sent, then fail to begin)
+        if (_role == Modbus::CLIENT && _currentTransaction.active) {
+            if (txCallback) txCallback(ERR_BUSY, ctx);
+            return Error(ERR_BUSY, "transaction in progress");
+        }
+
         if (_role == Modbus::SERVER && (!_currentTransaction.active || _currentTransaction.socketNum == -1)) {
             if (txCallback) txCallback(ERR_SEND_FAILED, ctx);
             return Error(ERR_SEND_FAILED, "Server not in transaction");

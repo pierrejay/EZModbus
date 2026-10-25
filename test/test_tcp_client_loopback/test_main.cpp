@@ -1759,6 +1759,65 @@ void test_late_claim_released_after_timeout_before_send() {
     Modbus::Logger::logln();
 }
 
+// Rule: a client-side interface sends nothing while a transaction is active, whoever sends (direct
+// API, same requester included): refused at once, its TX callback reports it, nothing reaches the
+// server. It used to be sent, then reported ERR_BUSY.
+static volatile uint32_t directSendCallbacks = 0;
+static volatile ModbusInterface::IInterface::Result directSendLastResult = ModbusInterface::IInterface::NODATA;
+
+void test_direct_send_refused_during_transaction() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_DIRECT_SEND_REFUSED_DURING_TRANSACTION");
+
+    int listenSock = rawListen(RAW_SERVER_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0, "raw server listen failed");
+    beginRawServerClient();
+    static int requester;
+    directSendCallbacks = 0;
+    auto txCallback = [](ModbusInterface::IInterface::Result result, void*) {
+        directSendLastResult = result;
+        directSendCallbacks = directSendCallbacks + 1;
+    };
+
+    // First frame: sent, left unanswered (transaction active)
+    Modbus::Frame req = { .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID,
+                          .regAddress = 0, .regCount = 1, .exceptionCode = Modbus::NULL_EXCEPTION };
+    const auto first = rawServerClientIfc.sendFrame(req, txCallback, &requester);
+    int peer = ::accept(listenSock, nullptr, nullptr);
+    uint8_t reqBytes[RAW_READ_HR_REQ_SIZE];
+    size_t gotFirst = 0;
+    if (peer >= 0) {
+        rawSetupPeer(peer);
+        gotFirst = rawRecvExact(peer, reqBytes, sizeof(reqBytes));
+    }
+    uint32_t t0 = Modbus::TIME_MS();
+    while (directSendCallbacks == 0 && Modbus::TIME_MS() - t0 < 500) vTaskDelay(1);
+    const uint32_t callbacksAfterFirst = directSendCallbacks;
+
+    // Second frame from the same requester
+    req.regAddress = 1;
+    const auto second = rawServerClientIfc.sendFrame(req, txCallback, &requester);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    const uint32_t secondCallbacks = directSendCallbacks - callbacksAfterFirst;
+    const auto secondResult = directSendLastResult;
+    size_t gotSecond = (peer >= 0) ? rawRecvExact(peer, reqBytes, sizeof(reqBytes)) : 0;
+
+    rawServerClientIfc.releaseTransaction(&requester, true);
+    closeRawServer(peer, listenSock);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, first);
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_REQ_SIZE, gotFirst, "first frame not sent");
+    TEST_ASSERT_EQUAL_MESSAGE(1, callbacksAfterFirst, "first frame: TX callback not called once");
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusInterface::IInterface::ERR_BUSY, second, "second frame accepted during the transaction");
+    TEST_ASSERT_EQUAL_MESSAGE(1, secondCallbacks, "second frame: TX callback not called once");
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::ERR_BUSY, secondResult);
+    TEST_ASSERT_EQUAL_MESSAGE(0, gotSecond, "second frame sent during the transaction");
+
+    Modbus::Logger::logln("TEST_DIRECT_SEND_REFUSED_DURING_TRANSACTION - OK");
+    Modbus::Logger::logln();
+}
+
 // Regression: when the client was disconnected, the request was handed to the HAL
 // which reconnected (up to 5 s) and then sent it, even if the Client had already
 // reported ERR_TIMEOUT to the application meanwhile: a write could reach the
@@ -3846,6 +3905,7 @@ void setup() {
     RUN_TEST(test_client_rx_coalesced_responses);
     RUN_TEST(test_transaction_kept_by_owner_until_released);
     RUN_TEST(test_late_claim_released_after_timeout_before_send);
+    RUN_TEST(test_direct_send_refused_during_transaction);
     RUN_TEST(test_client_no_late_write_after_reconnect);
     RUN_TEST(test_client_destroyed_while_interface_holds_request);
     RUN_TEST(test_client_null_exception_response_rejected);
