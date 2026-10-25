@@ -1281,6 +1281,7 @@ struct OwnedMaster : public ControlledMaster {
     }
     bool isReady() override { return !isOwned(); }
     void* owner() { return currentOwner(); }
+    Modbus::Mutex& ownerMutex() { return _ownerMutex; } // Held by a test: releases wait for it
 
     void resetOwned() {
         reset();
@@ -1551,6 +1552,52 @@ void test_owner_bridge_timeout_before_send() {
     TEST_ASSERT_TRUE_MESSAGE(gotResponse, "next request not answered");
     TEST_ASSERT_EQUAL_HEX16(0xB0B0, forwarded.data[0]);
     TEST_ASSERT_NULL_MESSAGE(ownerAtEnd, "transaction not released after the forwarded response");
+}
+
+// Regression: the destructor read the pending request without the bridge's mutex. The timer had
+// just closed it and waited to release the transaction with an abort: the destructor released it
+// first, without abort, and the timer's abort found no owner (what was left of the request, e.g. a
+// frame not sent yet, wasn't aborted). The owner mutex holds the timer while the bridge is destroyed.
+struct BridgeDestroyer {
+    Modbus::Bridge* bridge;
+    volatile bool done;
+};
+static StaticTask_t bridgeDestroyerTcb;
+static StackType_t bridgeDestroyerStack[4096];
+
+void test_owner_bridge_destroyed_while_timeout_releases() {
+    ownedMaster.resetOwned();
+    Modbus::Frame frame;
+    while (ownerBridgeSlave.getReceivedFrame(frame)) {}
+    auto* bridge = new (ownerBridgeStorage) Modbus::Bridge(ownedMaster, ownerBridgeSlave, LOCAL_BRIDGE_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Bridge::SUCCESS, bridge->begin());
+
+    ownerBridgeSlave.transmitFrame(LOCAL_BRIDGE_REQUEST); // Forwarded: the bridge owns the transaction
+    bool owned = (ownedMaster.owner() == bridge);
+
+    // The timer closes the request, then waits for the owner mutex to release the transaction
+    ownedMaster.ownerMutex().lock();
+    vTaskDelay(pdMS_TO_TICKS(LOCAL_BRIDGE_TIMEOUT_MS + 50));
+
+    // Destroy the bridge meanwhile, from a task above the timer daemon (first to get the mutex)
+    static BridgeDestroyer destroyer;
+    destroyer = { bridge, false };
+    xTaskCreateStatic([](void* arg) {
+        auto* d = static_cast<BridgeDestroyer*>(arg);
+        d->bridge->~Bridge();
+        d->done = true;
+        vTaskDelete(nullptr);
+    }, "bridgeDestroyer", sizeof(bridgeDestroyerStack) / sizeof(StackType_t), &destroyer,
+       uxTaskPriorityGet(xTimerGetTimerDaemonTaskHandle()) + 1, bridgeDestroyerStack, &bridgeDestroyerTcb);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    ownedMaster.ownerMutex().unlock();
+    bool destroyed = waitFlag(destroyer.done, 1000);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(owned, "bridge doesn't own its transaction");
+    TEST_ASSERT_TRUE_MESSAGE(destroyed, "bridge destructor didn't return");
+    TEST_ASSERT_EQUAL_MESSAGE(1, ownedMaster.aborts, "timeout's abort lost during the destruction");
+    TEST_ASSERT_NULL_MESSAGE(ownedMaster.owner(), "transaction left claimed");
 }
 
 // The bridge timeout must stay below the TCP server's transaction safety timeout: otherwise the
@@ -1884,6 +1931,7 @@ void setup() {
     RUN_TEST(test_owner_released_before_completion_callback);
     RUN_TEST(test_owner_response_before_tx_result_dropped);
     RUN_TEST(test_owner_bridge_timeout_before_send);
+    RUN_TEST(test_owner_bridge_destroyed_while_timeout_releases);
     RUN_TEST(test_bridge_timeout_below_tcp_safety_timeout);
     RUN_TEST(test_custom_interface_abort_calls);
     RUN_TEST(test_client_timer_rearm_failure);

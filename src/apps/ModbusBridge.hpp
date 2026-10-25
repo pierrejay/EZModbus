@@ -112,7 +112,12 @@ public:
         // interface is aborted (best effort), and its TX result waited for
         interface1.removeRcvCallbacks(this);
         interface2.removeRcvCallbacks(this);
-        if (masterInterface) masterInterface->releaseTransaction(this, _pendingActive);
+        if (masterInterface) {
+            // Under the mutex: a timer closing the request meanwhile releases (aborts) it first
+            Lock guard(_pendingMutex);
+            masterInterface->releaseTransaction(this, _pendingActive);
+            _pendingActive = false;
+        }
         interface1.waitTxCallbackDone(this);
         interface2.waitTxCallbackDone(this);
         if (!_timer) return;
