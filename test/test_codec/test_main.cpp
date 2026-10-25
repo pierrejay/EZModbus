@@ -1973,7 +1973,7 @@ void test_codec_pdu_encoder_bounds_reg_count() {
 }
 
 // Regression: a read-only ByteBuffer (const source, slice) could still be written through
-// write_at() & pop_front()
+// write_at(), pop_front(), push_back() & a growing resize()
 void test_bytebuffer_read_only_not_writable() {
     using Modbus::ByteBuffer;
     uint8_t _src[4] = {1, 2, 3, 4};
@@ -1982,8 +1982,16 @@ void test_bytebuffer_read_only_not_writable() {
     TEST_ASSERT_FALSE_MESSAGE(ro.write_at(0, 9), "byte written to a read-only buffer");
     TEST_ASSERT_FALSE_MESSAGE(ro.write_at(0, two, 2), "bytes written to a read-only buffer");
     TEST_ASSERT_FALSE_MESSAGE(ro.pop_front(1), "read-only buffer shifted");
+    TEST_ASSERT_TRUE(ro.trim(2)); // Size changes that write nothing stay allowed
+    TEST_ASSERT_TRUE(ro.resize(1));
+    ro.clear();
+    TEST_ASSERT_FALSE_MESSAGE(ro.push_back(9), "byte appended to a read-only buffer");
+    TEST_ASSERT_FALSE_MESSAGE(ro.push_back(two, 2), "bytes appended to a read-only buffer");
+    TEST_ASSERT_FALSE_MESSAGE(ro.resize(4), "read-only buffer grown (zero-filled)");
     TEST_ASSERT_EQUAL_UINT8(1, _src[0]);
     TEST_ASSERT_EQUAL_UINT8(2, _src[1]);
+    TEST_ASSERT_EQUAL_UINT8(3, _src[2]);
+    TEST_ASSERT_EQUAL_UINT8(4, _src[3]);
 
     uint8_t _rw[4];
     ByteBuffer rw(_rw, sizeof(_rw));
