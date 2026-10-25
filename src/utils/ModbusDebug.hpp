@@ -30,6 +30,7 @@ struct CallCtx {
 
 /* @brief Maximum size for a formatted debug message (including null terminator) */
 constexpr size_t MAX_DEBUG_MSG_SIZE = (size_t)EZMODBUS_MAX_DEBUG_MSG_SIZE;
+static_assert(MAX_DEBUG_MSG_SIZE >= 32, "EZMODBUS_MAX_DEBUG_MSG_SIZE too small");
 
 } // namespace Debug
 } // namespace Modbus
@@ -152,7 +153,8 @@ inline void LOG_FRAME(const Modbus::Frame& frame, const char* desc = nullptr, Ca
         char dataStr[bufSize];
         strcpy(dataStr, "> Data           : ");
         
-        for (int i = 0; i < frame.regCount; i++) {
+        const size_t count = std::min<size_t>(frame.regCount, Modbus::FRAME_DATASIZE); // Coils: regCount > data size
+        for (size_t i = 0; i < count; i++) {
             char buffer[10];
             int written = snprintf(buffer, sizeof(buffer), "0x%04X ", frame.data[i]);
 

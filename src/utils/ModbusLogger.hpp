@@ -11,7 +11,6 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
-#include <freertos/event_groups.h>
 #include <string.h>
 #include <stdarg.h>
 #include <cstdio>
@@ -84,9 +83,7 @@ public:
     static constexpr uint32_t STACK_SIZE = (uint32_t)EZMODBUS_LOG_TASK_STACK_SIZE;
     static constexpr BaseType_t TASK_CORE = (BaseType_t)EZMODBUS_LOG_TASK_CORE;
     static constexpr uint32_t CHECK_INTERVAL_MS = 100;
-    
-    // Event bits for queue status
-    static constexpr EventBits_t QUEUE_EMPTY_BIT = BIT0;
+    static_assert(MAX_MSG_SIZE >= 16, "EZMODBUS_LOG_MAX_MSG_SIZE too small");
 
     struct LogMessage {
         char msg[MAX_MSG_SIZE];
@@ -100,14 +97,12 @@ public:
             return;
         }
 
-        // Create the message queue & the event group for queue status, before the task using them
+        // Create the message queue, before the task using it
         logQueue = xQueueCreate(QUEUE_SIZE, sizeof(LogMessage));
-        queueEventGroup = xEventGroupCreate();
-        if (!logQueue || !queueEventGroup) {
+        if (!logQueue) {
             releaseResources();
             return;
         }
-        xEventGroupSetBits(queueEventGroup, QUEUE_EMPTY_BIT); // Initially queue is empty
 
         // Create the logging task
         BaseType_t taskCreated = xTaskCreatePinnedToCore(
@@ -142,6 +137,7 @@ public:
     static void logf(const char* format, Args&&... args) {
         char buffer[MAX_MSG_SIZE];
         int len = snprintf(buffer, sizeof(buffer), format, std::forward<Args>(args)...);
+        if (len < 0) return; // Encoding error
         
         // Ensure we don't exceed buffer bounds, add ellipsis if truncated
         if (len >= MAX_MSG_SIZE) {
@@ -181,14 +177,8 @@ public:
     static void waitQueueFlushed() {
         if (state != STATE_READY) return; // Consider empty if not initialized
         
-        // Wait for the queue to be empty
-        EventBits_t bits = xEventGroupWaitBits(
-            queueEventGroup,
-            QUEUE_EMPTY_BIT,
-            pdFALSE,  // Don't clear the bit
-            pdTRUE,   // Wait for all bits (only one here)
-            portMAX_DELAY
-        );
+        // Wait for every message queued so far to be written
+        while (pending != 0) vTaskDelay(1);
 
         EZMODBUS_LOG_FLUSH(); // Flush the UART buffer
         return;
@@ -199,14 +189,12 @@ private:
     inline static std::atomic<uint32_t> state{STATE_UNINIT};
     inline static QueueHandle_t logQueue = nullptr;
     inline static TaskHandle_t logTaskHandle = nullptr;
-    inline static EventGroupHandle_t queueEventGroup = nullptr;
+    inline static std::atomic<uint32_t> pending{0}; // Messages queued & not written yet
 
     // Initialization failed: release what was created, a later log retries
     static void releaseResources() {
         if (logQueue) vQueueDelete(logQueue);
-        if (queueEventGroup) vEventGroupDelete(queueEventGroup);
         logQueue = nullptr;
-        queueEventGroup = nullptr;
         state = STATE_UNINIT;
     }
 
@@ -219,9 +207,9 @@ private:
         strncpy(msg.msg, message, MAX_MSG_SIZE - 1);
         msg.msg[MAX_MSG_SIZE - 1] = '\0';
         
-        // Clear empty bit when adding message
-        xEventGroupClearBits(queueEventGroup, QUEUE_EMPTY_BIT);
-        xQueueSend(logQueue, &msg, 0); // Send without waiting if queue is full
+        // Counted until written (see waitQueueFlushed())
+        pending++;
+        if (xQueueSend(logQueue, &msg, 0) != pdTRUE) pending--; // Send without waiting if queue is full
     }
     
     // Task that reads the queue and writes the logs
@@ -230,11 +218,7 @@ private:
         while (true) {
             if (xQueueReceive(logQueue, &msg, CHECK_INTERVAL_MS) == pdTRUE) {
                 writeOutput(msg.msg, strlen(msg.msg));
-                
-                // Check if queue is now empty and set bit accordingly
-                if (uxQueueMessagesWaiting(logQueue) == 0) {
-                    xEventGroupSetBits(queueEventGroup, QUEUE_EMPTY_BIT);
-                }
+                pending--;
             }
             vTaskDelay(pdMS_TO_TICKS(5));
         }
