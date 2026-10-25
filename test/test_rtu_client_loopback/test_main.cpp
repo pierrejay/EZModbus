@@ -1439,35 +1439,21 @@ void test_broadcast() {
 
 
 // TEST_CONCURRENT_CALLS DATA STRUCTURES & TASKS
+// Two tasks (one per core when there are two) send a synchronous request at the same time: the
+// client has a single request slot, so one gets SUCCESS and the other ERR_BUSY.
 
-// Second task's core affinity: on single-core targets (e.g. ESP32-C6) there is no core 1,
-// so both tasks run on core 0 (pinning to 1 would trip a configASSERT).
-#ifdef CONFIG_FREERTOS_UNICORE
-    #define TEST_SECOND_CORE 0
-#else
-    #define TEST_SECOND_CORE 1
-#endif
-
-// Synchronization data structure
 struct SyncData {
     SemaphoreHandle_t startSignal;
     SemaphoreHandle_t resultsMutex;
-    SemaphoreHandle_t doneSignal;
-    int nextSlot;                        // Next result slot to claim (0 then 1), by task not by core
-    Modbus::Client::Result core0Result;  // Result of the 1st task (slot 0)
-    Modbus::Client::Result core1Result;  // Result of the 2nd task (slot 1)
+    SemaphoreHandle_t doneSignal;  // Counting: given once by each task
+    int nextSlot;                  // Next result slot to claim (per task, not per core)
+    Modbus::Client::Result results[2];
 };
 
-// Task executed by each concurrent worker (may share a core on single-core targets)
-auto concurrentTask = [](void* pv) {
+static void concurrentTask(void* pv) {
     auto sd = static_cast<SyncData*>(pv);
-    int core = xPortGetCoreID();
-    Modbus::Logger::logf("[Core %d] Ready, waiting for start\n", core);
-
-    // Wait for the start signal
     xSemaphoreTake(sd->startSignal, portMAX_DELAY);
 
-    // Build the Modbus request
     Modbus::Frame req {
         .type         = Modbus::REQUEST,
         .fc           = Modbus::READ_HOLDING_REGISTERS,
@@ -1478,75 +1464,54 @@ auto concurrentTask = [](void* pv) {
         .exceptionCode= Modbus::NULL_EXCEPTION
     };
     Modbus::Frame resp;
+    auto result = client.sendRequest(req, resp, nullptr);
 
-    // In blocking mode for simplicity
-    auto result = client.sendRequest(req, resp, nullptr); // Corrected: removed 'true', third arg is tracker*
-    Modbus::Logger::logf("[Core %d] sendRequest -> %s\n", core,
-            result == Modbus::Client::SUCCESS ? "SUCCESS" : 
-            (result == Modbus::Client::ERR_BUSY ? "ERR_BUSY" : Modbus::Client::toString(result)) ); // More detailed error
-
-    // Store the result in the next free slot (claimed atomically). Slots are per-task, not
-    // per-core, so this stays correct when both tasks share core 0 on single-core targets.
     xSemaphoreTake(sd->resultsMutex, portMAX_DELAY);
-    if (sd->nextSlot++ == 0) sd->core0Result = result;
-    else                     sd->core1Result = result;
+    sd->results[sd->nextSlot++] = result;
     xSemaphoreGive(sd->resultsMutex);
-
-    // Signal the end
     xSemaphoreGive(sd->doneSignal);
     vTaskDelete(NULL);
-};
+}
 
 void test_concurrent_calls() {
     Modbus::Logger::logln();
-    Modbus::Logger::logln("TEST_CONCURRENT_CALLS: STRICT THREAD SAFETY WITH 2 SYNCHRONIZED CALLS");
+    Modbus::Logger::logln("TEST_CONCURRENT_CALLS: 2 SYNCHRONIZED CALLS, ONE GETS ERR_BUSY");
 
     static SyncData sync = {};
-    sync.startSignal   = xSemaphoreCreateCounting(2, 0);
-    sync.resultsMutex  = xSemaphoreCreateMutex();
-    sync.doneSignal    = xSemaphoreCreateCounting(2, 0);
-    sync.nextSlot      = 0;
-    sync.core0Result   = Modbus::Client::ERR_BUSY;
-    sync.core1Result   = Modbus::Client::ERR_BUSY;
+    sync.startSignal  = xSemaphoreCreateCounting(2, 0);
+    sync.resultsMutex = xSemaphoreCreateMutex();
+    sync.doneSignal   = xSemaphoreCreateCounting(2, 0);
+    sync.nextSlot     = 0;
+    sync.results[0]   = Modbus::Client::NODATA;
+    sync.results[1]   = Modbus::Client::NODATA;
+    TEST_ASSERT_NOT_NULL(sync.startSignal);
+    TEST_ASSERT_NOT_NULL(sync.resultsMutex);
+    TEST_ASSERT_NOT_NULL(sync.doneSignal);
 
-    // Launch the first task on core 0
-    xTaskCreatePinnedToCore(
-        [](void* p){ concurrentTask(p); },
-        "Task0", 8192, &sync, 5, nullptr, 0
-    );
-    // … and the second on core 1 (or core 0 on single-core targets like the ESP32-C6)
-    xTaskCreatePinnedToCore(
-        [](void* p){ concurrentTask(p); },
-        "Task1", 8192, &sync, 5, nullptr, TEST_SECOND_CORE
-    );
+    const BaseType_t secondCore = (portNUM_PROCESSORS > 1) ? 1 : 0;
+    int started = 0;
+    started += xTaskCreatePinnedToCore(concurrentTask, "Task0", 4096, &sync, 5, nullptr, 0) == pdPASS;
+    started += xTaskCreatePinnedToCore(concurrentTask, "Task1", 4096, &sync, 5, nullptr, secondCore) == pdPASS;
+    vTaskDelay(pdMS_TO_TICKS(100)); // Both tasks waiting for the start signal
 
-    // Small delay to ensure the tasks are ready
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    // Launch the two tasks simultaneously
-    xSemaphoreGive(sync.startSignal);
-    xSemaphoreGive(sync.startSignal);
-
-    // Wait for the two tasks to finish
-    xSemaphoreTake(sync.doneSignal, portMAX_DELAY);
-    xSemaphoreTake(sync.doneSignal, portMAX_DELAY);
-
-    // Check the results
-    Modbus::Logger::logln("=== TEST_CONCURRENT_CALLS Results ===");
-    Modbus::Logger::logf("Task 0: %s\n", sync.core0Result == Modbus::Client::SUCCESS ? "SUCCESS" : "ERR_BUSY");
-    Modbus::Logger::logf("Task 1: %s\n", sync.core1Result == Modbus::Client::SUCCESS ? "SUCCESS" : "ERR_BUSY");
+    for (int i = 0; i < started; i++) xSemaphoreGive(sync.startSignal);
+    int done = 0;
+    for (int i = 0; i < started; i++) {
+        done += xSemaphoreTake(sync.doneSignal, pdMS_TO_TICKS(3 * Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS)) == pdTRUE;
+    }
+    Modbus::Logger::logf("Results: %s / %s\n", Modbus::Client::toString(sync.results[0]),
+                         Modbus::Client::toString(sync.results[1]));
 
     TEST_ASSERT_START();
-    TEST_ASSERT_TRUE(
-        (sync.core0Result == Modbus::Client::SUCCESS && sync.core1Result == Modbus::Client::ERR_BUSY) ||
-        (sync.core0Result == Modbus::Client::ERR_BUSY  && sync.core1Result == Modbus::Client::SUCCESS)
-    );
+    TEST_ASSERT_EQUAL_MESSAGE(2, started, "concurrent task creation failed");
+    TEST_ASSERT_EQUAL_MESSAGE(2, done, "concurrent task didn't return");
+    bool oneEach = (sync.results[0] == Modbus::Client::SUCCESS && sync.results[1] == Modbus::Client::ERR_BUSY) ||
+                   (sync.results[0] == Modbus::Client::ERR_BUSY && sync.results[1] == Modbus::Client::SUCCESS);
+    TEST_ASSERT_TRUE_MESSAGE(oneEach, "expected one SUCCESS and one ERR_BUSY");
 
-    // Cleanup
     vSemaphoreDelete(sync.startSignal);
     vSemaphoreDelete(sync.resultsMutex);
     vSemaphoreDelete(sync.doneSignal);
-
     vTaskDelay(pdMS_TO_TICKS(50));
 }
 
@@ -2042,7 +2007,7 @@ void setup() {
     RUN_TEST(test_broadcast);
     RUN_TEST(test_callback_success);
     RUN_TEST(test_callback_timeout);
-    // RUN_TEST(test_concurrent_calls);
+    RUN_TEST(test_concurrent_calls);
 
     // Helper template tests
     RUN_TEST(test_helper_read_uint16_holding_registers);
