@@ -1972,6 +1972,27 @@ void test_codec_pdu_encoder_bounds_reg_count() {
     TEST_ASSERT_EQUAL(0, buf.size());
 }
 
+// Regression: a read-only ByteBuffer (const source, slice) could still be written through
+// write_at() & pop_front()
+void test_bytebuffer_read_only_not_writable() {
+    using Modbus::ByteBuffer;
+    uint8_t _src[4] = {1, 2, 3, 4};
+    ByteBuffer ro(static_cast<const uint8_t*>(_src), sizeof(_src));
+    const uint8_t two[2] = {9, 9};
+    TEST_ASSERT_FALSE_MESSAGE(ro.write_at(0, 9), "byte written to a read-only buffer");
+    TEST_ASSERT_FALSE_MESSAGE(ro.write_at(0, two, 2), "bytes written to a read-only buffer");
+    TEST_ASSERT_FALSE_MESSAGE(ro.pop_front(1), "read-only buffer shifted");
+    TEST_ASSERT_EQUAL_UINT8(1, _src[0]);
+    TEST_ASSERT_EQUAL_UINT8(2, _src[1]);
+
+    uint8_t _rw[4];
+    ByteBuffer rw(_rw, sizeof(_rw));
+    TEST_ASSERT_TRUE(rw.push_back(two, 2));
+    ByteBuffer view = rw.slice(0, 2);
+    TEST_ASSERT_FALSE_MESSAGE(view.write_at(0, 7), "slice wrote to its source buffer");
+    TEST_ASSERT_EQUAL_UINT8(9, rw[0]);
+}
+
 // Regression: bound checks written as "index + length > limit" wrapped around for huge values and
 // let the access through. Before the fix the first two cases failed, the next ones crashed (huge
 // copy), hence this test runs last.
@@ -2040,6 +2061,7 @@ int main(void) {
     RUN_TEST(test_conversion_insufficient_data);
     RUN_TEST(test_conversion_mixed_with_raw_api);
     RUN_TEST(test_codec_pdu_encoder_bounds_reg_count);
+    RUN_TEST(test_bytebuffer_read_only_not_writable);
     RUN_TEST(test_bounds_checks_dont_wrap); // Last: crashed before the fix
     UNITY_END();
 }
