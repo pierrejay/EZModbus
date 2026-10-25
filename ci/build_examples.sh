@@ -2,11 +2,12 @@
 #
 # EZModbus — ESP-IDF example compile check
 # ----------------------------------------
-# Builds every example under examples/esp-idf against THIS working copy of the
-# library (not the published registry version), across one or more chip targets.
-# Compile-only: nothing is flashed or run. Catches divergence between the
-# Arduino/PlatformIO build path and the ESP-IDF build path, and target-specific
-# breakage (Xtensa vs RISC-V, missing peripherals).
+# Builds every example under examples/esp-idf, plus the ci/smoke app (also in a
+# debug variant), against THIS working copy of the library (not the published
+# registry version), across one or more chip targets.
+# Compile-only: nothing is flashed or run (ci/smoke.sh runs the smoke app).
+# Catches divergence between the Arduino/PlatformIO build path and the ESP-IDF
+# build path, and target-specific breakage (Xtensa vs RISC-V, missing peripherals).
 #
 # Runs identically:
 #   - locally  (sources ESP-IDF from IDF_EXPORT if idf.py isn't already on PATH)
@@ -27,6 +28,7 @@
 # Env overrides:
 #   IDF_EXPORT  path to esp-idf export.sh used only if idf.py isn't on PATH
 #               (default: ~/esp/v5.5.1/esp-idf/export.sh; ignored in CI)
+#   WORK_DIR    build dirs (default: ci/.work), LOG_DIR logs (default: ci/.logs)
 
 set -u
 set -o pipefail
@@ -36,8 +38,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)"
 [[ -z "$REPO_ROOT" ]] && REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 EXAMPLES_DIR="$REPO_ROOT/examples/esp-idf"
-WORK_DIR="$SCRIPT_DIR/.work"
-LOG_DIR="$SCRIPT_DIR/.logs"
+WORK_DIR="${WORK_DIR:-$SCRIPT_DIR/.work}"
+LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/.logs}"
 IDF_EXPORT="${IDF_EXPORT:-$HOME/esp/v5.5.1/esp-idf/export.sh}"
 
 # --- Per-example target support rules --------------------------------------
@@ -47,6 +49,9 @@ NO_WIFI_TARGETS=" esp32h2 esp32p4 "
 # Examples wiring two on-chip UARTs (use UART_NUM_2): only chips with a 3rd UART.
 DUAL_UART_EXAMPLES=" rtu-client-server-loopback "
 DUAL_UART_TARGETS=" esp32 esp32s3 esp32p4 "
+# CI apps (under ci/): two UARTs wired together (LP-UART on the C6), also built with EZMODBUS_DEBUG.
+CI_APPS=" smoke "
+CI_APP_TARGETS=" esp32 esp32s3 esp32c6 esp32p4 "
 
 KNOWN_TARGETS=" esp32 esp32s2 esp32s3 esp32c2 esp32c3 esp32c5 esp32c6 esp32c61 esp32h2 esp32p4 "
 
@@ -102,6 +107,7 @@ else
     for d in "$EXAMPLES_DIR"/*/; do
         [[ -f "$d/CMakeLists.txt" ]] && EXAMPLES+=("$(basename "$d")")
     done
+    for app in $CI_APPS; do EXAMPLES+=("$app"); done
 fi
 
 # --- Build loop ------------------------------------------------------------
@@ -111,6 +117,7 @@ OVERALL=0
 for target in "${TARGETS[@]}"; do
   for ex in "${EXAMPLES[@]}"; do
     src="$EXAMPLES_DIR/$ex"
+    [[ "$CI_APPS" == *" $ex "* ]] && src="$SCRIPT_DIR/$ex"
     dst="$WORK_DIR/$target/$ex"
     log="$LOG_DIR/$target-$ex.log"
 
@@ -132,6 +139,12 @@ for target in "${TARGETS[@]}"; do
         continue
     fi
 
+    if [[ "$CI_APPS" == *" $ex "* && "$CI_APP_TARGETS" != *" $target "* ]]; then
+        echo ">> [$target] skip '$ex' (no pin map for this target)"
+        RESULTS+=("SKIP  $target/$ex (no pin map)")
+        continue
+    fi
+
     echo "=================================================================="
     echo ">> [$target] Building example: $ex"
     echo "=================================================================="
@@ -144,7 +157,7 @@ for target in "${TARGETS[@]}"; do
     # Portable equivalent of "rsync --delete --exclude ..." using only coreutils,
     # since the espressif/idf container ships no rsync.
     find "$dst" -mindepth 1 -maxdepth 1 \
-        ! -name build ! -name managed_components ! -name components \
+        ! -name build ! -name build-debug ! -name managed_components ! -name components \
         ! -name dependencies.lock ! -name 'sdkconfig*' \
         -exec rm -rf {} +
     cp -a "$src/." "$dst/"
@@ -164,6 +177,22 @@ for target in "${TARGETS[@]}"; do
         tail -n 25 "$log" | sed 's/^/   | /'
         RESULTS+=("FAIL  $target/$ex  -> $log")
         OVERALL=1
+    fi
+
+    # CI apps: same sources with the library debug traces on, in their own build dir
+    if [[ "$CI_APPS" == *" $ex "* ]]; then
+        dlog="$LOG_DIR/$target-$ex-debug.log"
+        echo ">> [$target] Building $ex with EZMODBUS_DEBUG"
+        if idf.py -C "$dst" -B "$dst/build-debug" -DEZMODBUS_DEBUG=1 set-target "$target" build >"$dlog" 2>&1; then
+            echo "   PASS"
+            RESULTS+=("PASS  $target/$ex (debug)")
+        else
+            echo "   FAIL  (see $dlog)"
+            echo "   --- last 25 lines ---"
+            tail -n 25 "$dlog" | sed 's/^/   | /'
+            RESULTS+=("FAIL  $target/$ex (debug)  -> $dlog")
+            OVERALL=1
+        fi
     fi
     echo
   done

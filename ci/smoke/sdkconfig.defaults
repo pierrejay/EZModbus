@@ -1,0 +1,2 @@
+# Room for the Frames the scenarios keep on the stack
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

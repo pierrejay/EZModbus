@@ -1,0 +1,2 @@
+# Console on the USB-Serial-JTAG port: the UART pins are wired to the bus
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
