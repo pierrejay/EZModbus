@@ -44,6 +44,7 @@ Each test category ensures key functionality works as expected:
 
 * Round-trip operation, gateway exceptions, lifecycle
 * Client request engine concurrency (timeouts, TX results, synchronous fallback)
+* Server corner cases on dummy interfaces (busy server, Word store), Logger first use
 * ~20 test cases
 
 For more details on the testing methodology, see the `test/` directory of the lib.
