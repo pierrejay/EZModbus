@@ -164,14 +164,12 @@ protected:
         auto it = std::upper_bound(begin, end, address, [](uint16_t addr, const Word& w){
             return addr < w.startAddr;
         });
-        // Candidate may be just before upper_bound
+        // Words of a type don't overlap: only the closest one of that type before upper_bound can
+        // hold the address (Words of other types are interleaved, skip them)
         while (it != begin) {
             --it;
-            if (it->type == type && address >= it->startAddr && address < (it->startAddr + it->nbRegs)) {
-                return &(*it);
-            }
-            // If startAddr differs we can break (because sorted) when address >= it->startAddr + nbRegs
-            if (address >= it->startAddr + it->nbRegs) break;
+            if (it->type != type) continue;
+            return (address < (it->startAddr + it->nbRegs)) ? &(*it) : nullptr;
         }
         return nullptr;
     }
@@ -294,10 +292,8 @@ protected:
             [](uint16_t addr, const Word& w){ return addr < w.startAddr; });
         while (it != _words.begin()) {
             --it;
-            if (it->type == type && address >= it->startAddr && address < (it->startAddr + it->nbRegs)) {
-                return &(*it);
-            }
-            if (address >= it->startAddr + it->nbRegs) break;
+            if (it->type != type) continue;
+            return (address < (it->startAddr + it->nbRegs)) ? &(*it) : nullptr;
         }
         return nullptr;
     }

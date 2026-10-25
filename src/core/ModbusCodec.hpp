@@ -362,7 +362,10 @@ class PDU {
                     uint8_t byteCount = bytes[1];
                     if (bytes.size() != byteCount + 2) return HandleError(pdu, ERR_INVALID_LEN);
                     if (byteCount % 2 != 0) return HandleError(pdu, ERR_INVALID_BYTE_COUNT);
-                    
+                    // Bound against the data buffer (byteCount can reach 254 = 127 registers)
+                    if ((size_t)byteCount / 2 > Modbus::MAX_REGISTERS_READ) return HandleError(pdu, ERR_INVALID_BYTE_COUNT);
+                    static_assert(Modbus::MAX_REGISTERS_READ <= Modbus::FRAME_DATASIZE, "register response must fit in Frame::data");
+
                     pdu.clearData(false);
                     for (uint8_t i = 0; i < byteCount; i += 2) {
                         uint16_t value = (bytes[2 + i] << 8) | bytes[2 + i + 1];
@@ -463,6 +466,7 @@ class PDU {
         if (pos != SIZE_MAX) {
             if (!bytes.resize(pos)) return Error(ERR_BUFFER_OVERFLOW);
         }
+        const size_t pduStart = bytes.size();
 
         // Flip FC bit 7 if exception code is not NULL
         uint8_t fc = (uint8_t)pdu.fc;
@@ -478,6 +482,10 @@ class PDU {
 
         // Otherwise, build the rest of the frame, doing further checks on register count & data size
         else {
+            // The data loops follow regCount: bounded first (the TCP & RTU encoders check it too)
+            if (isValidFunctionCode((uint8_t)pdu.fc) && !isValidRegisterCount((uint16_t)pdu.regCount, (uint8_t)pdu.fc, type)) {
+                return HandleError(bytes, ERR_INVALID_REG_COUNT);
+            }
             switch (pdu.fc) {
                 case Modbus::READ_COILS:
                 case Modbus::READ_DISCRETE_INPUTS:
@@ -597,6 +605,11 @@ class PDU {
                 default:
                     return HandleError(bytes, ERR_INVALID_FC);
             }
+        }
+
+        // Bytes that didn't fit in the buffer were dropped
+        if (bytes.size() - pduStart != computePduLength(pdu, type)) {
+            return HandleError(bytes, ERR_BUFFER_OVERFLOW, "buffer too small for the PDU");
         }
 
         return Success();

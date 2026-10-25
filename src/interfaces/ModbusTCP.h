@@ -50,14 +50,14 @@ public:
 
     /* @brief Stores the current transaction context */
     struct TransactionCtx {
-        volatile bool active = false;
+        std::atomic<uint32_t> active{0}; // Also read by other tasks (isReady())
         uint32_t startMs = 0;
         int socketNum = -1;
         uint32_t connId = 0; // HAL connection ID: the socket number alone may be reused by a new connection
         uint16_t tid = 0;
 
-        void set(int socketNum, uint32_t connId, uint16_t tid) { active=true; startMs=TIME_MS(); this->socketNum=socketNum; this->connId=connId; this->tid=tid; }
-        void clear() { socketNum=-1; connId=0; startMs=0; tid=0; active=false; }
+        void set(int socketNum, uint32_t connId, uint16_t tid) { startMs=TIME_MS(); this->socketNum=socketNum; this->connId=connId; this->tid=tid; active=1; }
+        void clear() { active=0; socketNum=-1; connId=0; startMs=0; tid=0; }
     };
 
     /* @brief Stores the current transmission data context
@@ -112,7 +112,7 @@ private:
 
     // TCP communication
     ModbusHAL::TCP& _tcpHAL;
-    bool _isInitialized = false; // Added initialization flag
+    std::atomic<uint32_t> _isInitialized{0}; // Read by the rxTxTask & the API callers
 
     // Data buffers & protection
     std::array<uint8_t, ModbusCodec::TCP::MAX_FRAME_SIZE> _rxBuf;

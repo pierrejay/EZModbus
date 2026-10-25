@@ -604,6 +604,22 @@ void test_server_begin_retry_registers_once() {
     TEST_ASSERT_EQUAL_MESSAGE(1, secondAfterRetry, "second interface callback not registered once");
 }
 
+// Regression: begin() only checked the first interface pointer: a null one further in the list
+// was dereferenced (crash).
+void test_server_begin_rejects_null_interface() {
+    static ModbusInterface::Dummy side;
+    static Modbus::StaticWordStore<1> store;
+    alignas(Modbus::Server) static uint8_t storage[sizeof(Modbus::Server)];
+    auto* server = new (storage) Modbus::Server({&side, nullptr}, store);
+    Modbus::Server::Result res = server->begin();
+    size_t callbacksLeft = side.callbackCount();
+    server->~Server();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Server::ERR_INIT_FAILED, res, "begin() accepted a null interface");
+    TEST_ASSERT_EQUAL_MESSAGE(0, callbacksLeft, "callback left on the valid interface");
+}
+
 // Regression: begin() validated overlapping words starting its scan strictly after address 0,
 // and jumping from start address to start address: a word at address 0, or two words with the
 // same start address, were never compared. Returns true if the server accepts both words.
@@ -635,6 +651,261 @@ void test_server_rejects_overlaps_at_zero_and_same_start() {
     TEST_ASSERT_FALSE_MESSAGE(overlapAccepted(dynAtZero, 0, 2, 1, 1), "dynamic store: overlap at address 0 accepted");
     TEST_ASSERT_FALSE_MESSAGE(overlapAccepted(dynSameStart, 5, 2, 5, 1), "dynamic store: words with the same start accepted");
     TEST_ASSERT_TRUE_MESSAGE(overlapAccepted(dynDisjoint, 0, 1, 1, 1), "disjoint words rejected");
+}
+
+// Regression: a busy server answered SLAVE_DEVICE_BUSY before checking the slave ID: on a shared
+// RTU bus, it answered requests addressed to another device. A first request received on another
+// interface (requests of a same interface are handled one by one) is held in its Word handler.
+struct HeldHandler {
+    StaticSemaphore_t releaseBuf;
+    SemaphoreHandle_t release = xSemaphoreCreateBinaryStatic(&releaseBuf);
+    volatile bool entered = false;
+};
+struct HeldRequest {
+    ModbusInterface::Dummy* side;
+    Modbus::Frame request;
+    volatile bool done;
+};
+static StaticTask_t heldRequestTcb;
+static StackType_t heldRequestStack[4096];
+
+static void heldRequestTask(void* arg) {
+    auto* held = static_cast<HeldRequest*>(arg);
+    held->side->transmitFrame(held->request);
+    held->done = true;
+    vTaskDelete(nullptr);
+}
+
+void test_server_busy_ignores_other_slave_ids() {
+    static ModbusInterface::Dummy busySide, side;
+    static Modbus::StaticWordStore<1> store;
+    static HeldHandler handler;
+    alignas(Modbus::Server) static uint8_t storage[sizeof(Modbus::Server)];
+    auto* server = new (storage) Modbus::Server({&busySide, &side}, store, 1, true, 10);
+    Modbus::Word word;
+    word.type = Modbus::HOLDING_REGISTER;
+    word.nbRegs = 1;
+    word.readHandler = [](const Modbus::Word&, uint16_t* outVals, void* userCtx) -> Modbus::ExceptionCode {
+        auto* held = static_cast<HeldHandler*>(userCtx);
+        held->entered = true;
+        xSemaphoreTake(held->release, portMAX_DELAY);
+        outVals[0] = 0;
+        return Modbus::NULL_EXCEPTION;
+    };
+    word.writeHandler = serverWriteHandler;
+    word.userCtx = &handler;
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, server->addWord(word));
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, server->begin());
+
+    Modbus::Frame request = {
+        .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = 1,
+        .regAddress = 0, .regCount = 1, .data = {}
+    };
+    HeldRequest held = { &busySide, request, false };
+    xTaskCreateStatic(heldRequestTask, "heldRequest", sizeof(heldRequestStack) / sizeof(StackType_t),
+                      &held, 1, heldRequestStack, &heldRequestTcb);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (!handler.entered && Modbus::TIME_MS() - t0 < 500) vTaskDelay(1);
+    bool busy = handler.entered;
+
+    // While busy: silent for another slave ID, SLAVE_DEVICE_BUSY for our own
+    Modbus::Frame frame;
+    request.slaveId = 2;
+    side.transmitFrame(request);
+    bool otherAnswered = side.getReceivedFrame(frame);
+    request.slaveId = 1;
+    side.transmitFrame(request);
+    bool ownBusy = side.getReceivedFrame(frame) && frame.exceptionCode == Modbus::SLAVE_DEVICE_BUSY;
+
+    xSemaphoreGive(handler.release);
+    t0 = Modbus::TIME_MS();
+    while (!held.done && Modbus::TIME_MS() - t0 < 1000) vTaskDelay(1);
+    bool heldAnswered = held.done && busySide.getReceivedFrame(frame) && frame.exceptionCode == Modbus::NULL_EXCEPTION;
+    if (held.done) server->~Server();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(busy, "first request not held in its handler");
+    TEST_ASSERT_FALSE_MESSAGE(otherAnswered, "busy server answered a request for another slave ID");
+    TEST_ASSERT_TRUE_MESSAGE(ownBusy, "busy server didn't answer SLAVE_DEVICE_BUSY to its own slave ID");
+    TEST_ASSERT_TRUE_MESSAGE(heldAnswered, "held request not answered once released");
+}
+
+// Regression: the slave ID was only checked before taking the mutex: a request waiting for it
+// with the old ID was handled after setSlaveId() returned. A first request (other interface) holds
+// the mutex; setSlaveId(), from a higher priority task, takes it before the waiting request.
+struct SlaveIdSetter {
+    Modbus::Server* server;
+    volatile bool done;
+};
+static StaticTask_t waitingRequestTcb, slaveIdSetterTcb;
+static StackType_t waitingRequestStack[4096], slaveIdSetterStack[4096];
+
+static void slaveIdSetterTask(void* arg) {
+    auto* setter = static_cast<SlaveIdSetter*>(arg);
+    setter->server->setSlaveId(2);
+    setter->done = true;
+    vTaskDelete(nullptr);
+}
+
+static bool waitBlocked(TaskHandle_t task) {
+    uint32_t t0 = Modbus::TIME_MS();
+    while (eTaskGetState(task) != eBlocked && Modbus::TIME_MS() - t0 < 500) vTaskDelay(1);
+    return eTaskGetState(task) == eBlocked;
+}
+
+void test_server_slave_id_change_spares_waiting_request() {
+    static ModbusInterface::Dummy busySide, side;
+    static Modbus::StaticWordStore<1> store;
+    static HeldHandler handler;
+    alignas(Modbus::Server) static uint8_t storage[sizeof(Modbus::Server)];
+    auto* server = new (storage) Modbus::Server({&busySide, &side}, store, 1, true, 2000);
+    Modbus::Word word;
+    word.type = Modbus::HOLDING_REGISTER;
+    word.nbRegs = 1;
+    word.readHandler = [](const Modbus::Word&, uint16_t* outVals, void* userCtx) -> Modbus::ExceptionCode {
+        auto* held = static_cast<HeldHandler*>(userCtx);
+        if (!held->entered) { // Only the first request is held
+            held->entered = true;
+            xSemaphoreTake(held->release, portMAX_DELAY);
+        }
+        outVals[0] = 0;
+        return Modbus::NULL_EXCEPTION;
+    };
+    word.writeHandler = serverWriteHandler;
+    word.userCtx = &handler;
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, server->addWord(word));
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, server->begin());
+
+    Modbus::Frame request = {
+        .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = 1,
+        .regAddress = 0, .regCount = 1, .data = {}
+    };
+    // First request holds the mutex
+    HeldRequest held = { &busySide, request, false };
+    xTaskCreateStatic(heldRequestTask, "heldRequest", sizeof(heldRequestStack) / sizeof(StackType_t),
+                      &held, 1, heldRequestStack, &heldRequestTcb);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (!handler.entered && Modbus::TIME_MS() - t0 < 500) vTaskDelay(1);
+    bool busy = handler.entered;
+
+    // Request for slave 1 waiting for the mutex, then setSlaveId(2) waiting with a higher priority
+    HeldRequest waiting = { &side, request, false };
+    TaskHandle_t waitingTask = xTaskCreateStatic(heldRequestTask, "waitingRequest",
+        sizeof(waitingRequestStack) / sizeof(StackType_t), &waiting, 1, waitingRequestStack, &waitingRequestTcb);
+    bool waitingBlocked = waitBlocked(waitingTask);
+    SlaveIdSetter setter = { server, false };
+    TaskHandle_t setterTask = xTaskCreateStatic(slaveIdSetterTask, "slaveIdSetter",
+        sizeof(slaveIdSetterStack) / sizeof(StackType_t), &setter, 3, slaveIdSetterStack, &slaveIdSetterTcb);
+    bool setterBlocked = waitBlocked(setterTask);
+
+    xSemaphoreGive(handler.release);
+    t0 = Modbus::TIME_MS();
+    while (!(held.done && waiting.done && setter.done) && Modbus::TIME_MS() - t0 < 3000) vTaskDelay(1);
+    Modbus::Frame frame;
+    bool waitingAnswered = side.getReceivedFrame(frame);
+    bool allDone = held.done && waiting.done && setter.done;
+    if (allDone) server->~Server();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(busy && waitingBlocked && setterBlocked, "requests / setSlaveId() not waiting for the mutex");
+    TEST_ASSERT_TRUE_MESSAGE(allDone, "a task didn't return");
+    TEST_ASSERT_FALSE_MESSAGE(waitingAnswered, "request for the old slave ID answered after setSlaveId() returned");
+}
+
+// Regression: with rejectUndefined = false, a request starting inside a multi-register Word was
+// handled as a gap (zeros read, write dropped) instead of a partial Word access. And looking up the
+// Word holding an address gave up on the first Word of another type before it (the store keeps all
+// types sorted together), so such a Word was missed. Returns the exception answered, -1 if none.
+static int serverException(ModbusInterface::Dummy& side, Modbus::FunctionCode fc, uint16_t addr) {
+    Modbus::Frame request = {
+        .type = Modbus::REQUEST, .fc = fc, .slaveId = 1,
+        .regAddress = addr, .regCount = 1, .data = {}
+    };
+    Modbus::Frame response;
+    side.transmitFrame(request);
+    return side.getReceivedFrame(response) ? (int)response.exceptionCode : -1;
+}
+
+static void checkStartInsideWordRejected(Modbus::IWordStore& store, const char* storeName) {
+    static ModbusInterface::Dummy side;
+    alignas(Modbus::Server) static uint8_t storage[sizeof(Modbus::Server)];
+    auto* server = new (storage) Modbus::Server(side, store, 1, false);
+    Modbus::Word words[2];
+    words[0].type = Modbus::HOLDING_REGISTER; // Registers 10-13
+    words[0].startAddr = 10;
+    words[0].nbRegs = 4;
+    words[1].type = Modbus::COIL;             // Coil 12, in between in the store
+    words[1].startAddr = 12;
+    words[1].nbRegs = 1;
+    for (auto& word : words) {
+        word.readHandler = serverReadHandler;
+        word.writeHandler = serverWriteHandler;
+    }
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, server->addWords(words, 2));
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, server->begin());
+
+    Modbus::Word found = server->getWord(Modbus::HOLDING_REGISTER, 13);
+    int readInside = serverException(side, Modbus::READ_HOLDING_REGISTERS, 11);
+    int readBehindCoil = serverException(side, Modbus::READ_HOLDING_REGISTERS, 13);
+    int writeInside = serverException(side, Modbus::WRITE_REGISTER, 11);
+    server->~Server();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(found.type == Modbus::HOLDING_REGISTER && found.startAddr == 10, storeName);
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::ILLEGAL_DATA_ADDRESS, readInside, storeName);
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::ILLEGAL_DATA_ADDRESS, readBehindCoil, storeName);
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::ILLEGAL_DATA_ADDRESS, writeInside, storeName);
+}
+
+void test_server_rejects_start_inside_word() {
+    static Modbus::StaticWordStore<2> staticStore;
+    static Modbus::DynamicWordStore dynamicStore(2);
+    checkStartInsideWordRejected(staticStore, "static store");
+    checkStartInsideWordRejected(dynamicStore, "dynamic store");
+}
+
+// Regression: addWords() wasn't all-or-nothing. Before begin(), the static store rejected an
+// overlapping Word while inserting it, after the previous ones of the batch (reported as a capacity
+// overflow); after begin(), the vector overload's in-batch check wrapped the end address of a Word
+// ending at 65535, letting the store reject it in the same way.
+static Modbus::Word handledWord(uint16_t startAddr, uint16_t nbRegs) {
+    Modbus::Word word;
+    word.type = Modbus::HOLDING_REGISTER;
+    word.startAddr = startAddr;
+    word.nbRegs = nbRegs;
+    word.readHandler = serverReadHandler;
+    word.writeHandler = serverWriteHandler;
+    return word;
+}
+
+void test_server_add_words_all_or_nothing() {
+    static ModbusInterface::Dummy side;
+    static Modbus::StaticWordStore<4> store;
+    alignas(Modbus::Server) static uint8_t storage[sizeof(Modbus::Server)];
+    auto* server = new (storage) Modbus::Server(side, store);
+
+    // Before begin(): overlap inside the batch, then the valid batch
+    const Modbus::Word overlapping[] = { handledWord(10, 1), handledWord(11, 1), handledWord(10, 1) };
+    auto overlapRes = server->addWords(overlapping, 3);
+    bool leftover = (bool)server->getWord(Modbus::HOLDING_REGISTER, 10);
+    auto retryRes = server->addWords(overlapping, 2);
+    auto singleRes = server->addWord(handledWord(11, 1)); // Overlaps a Word already added
+    auto begun = server->begin();
+
+    // After begin(): vector batch with a Word ending at 65535
+    std::vector<Modbus::Word> lastAddr = { handledWord(65530, 6), handledWord(65532, 1) };
+    auto lastAddrRes = server->addWords(lastAddr);
+    bool lastAddrLeftover = (bool)server->getWord(Modbus::HOLDING_REGISTER, 65530);
+    server->~Server();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Server::ERR_WORD_OVERLAP, overlapRes, "overlapping batch not reported as such");
+    TEST_ASSERT_FALSE_MESSAGE(leftover, "overlapping batch partly added");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Server::SUCCESS, retryRes, "valid batch rejected after a failed one");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Server::ERR_WORD_OVERLAP, singleRes, "overlapping Word not reported as such");
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, begun);
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Server::ERR_WORD_OVERLAP, lastAddrRes, "overlap ending at 65535 not reported as such");
+    TEST_ASSERT_FALSE_MESSAGE(lastAddrLeftover, "batch ending at 65535 partly added");
 }
 
 // Regression: when Bridge::begin() couldn't register its slave callback, the master one stayed
@@ -1031,6 +1302,59 @@ void test_bridge_timer_command_failure() {
     TEST_ASSERT_EQUAL(Modbus::SLAVE_DEVICE_BUSY, answer.exceptionCode);
 }
 
+// Regression: the TX result of a request that already timed out closed the request forwarded
+// meanwhile (it closed "the pending request", whichever it was): B was sent, then answered
+// GATEWAY_PATH_UNAVAILABLE because of A, and B's response was dropped. A request arriving while
+// the previous TX result is missing is now answered SLAVE_DEVICE_BUSY, like a requester the
+// bridge can't serve yet.
+void test_bridge_late_tx_result_spares_next() {
+    static ModbusInterface::Dummy slaveSide;
+    controlledMaster.reset();
+    Modbus::Frame frame;
+    while (controlledMaster.getReceivedFrame(frame)) {} // Frames left by the previous tests
+    alignas(Modbus::Bridge) static uint8_t storage[sizeof(Modbus::Bridge)];
+    auto* bridge = new (storage) Modbus::Bridge(controlledMaster, slaveSide, LOCAL_BRIDGE_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Bridge::SUCCESS, bridge->begin());
+
+    // A forwarded, its TX result held, then it times out
+    controlledMaster.holdTx = true;
+    slaveSide.transmitFrame(LOCAL_BRIDGE_REQUEST);
+    vTaskDelay(pdMS_TO_TICKS(LOCAL_BRIDGE_TIMEOUT_MS + 50));
+    bool aTimedOut = slaveSide.getReceivedFrame(frame) && frame.exceptionCode == Modbus::GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND;
+
+    // B (another address) while A's TX result is missing
+    controlledMaster.holdTx = false;
+    Modbus::Frame requestB = LOCAL_BRIDGE_REQUEST;
+    requestB.regAddress = LOCAL_BRIDGE_REQUEST.regAddress + 1;
+    slaveSide.transmitFrame(requestB);
+    bool bForwardedEarly = controlledMaster.getReceivedFrame(frame);
+    bool bBusy = slaveSide.getReceivedFrame(frame) && frame.exceptionCode == Modbus::SLAVE_DEVICE_BUSY;
+
+    // A's late TX failure: nothing left to close
+    controlledMaster.deliverTxResult(ModbusInterface::IInterface::ERR_SEND_FAILED);
+    bool lateAnswer = slaveSide.getReceivedFrame(frame);
+
+    // B again: forwarded & answered
+    slaveSide.transmitFrame(requestB);
+    bool bForwarded = controlledMaster.getReceivedFrame(frame);
+    Modbus::Frame responseB = requestB;
+    responseB.type = Modbus::RESPONSE;
+    responseB.data[0] = 0x1234;
+    controlledMaster.transmitFrame(responseB);
+    bool bAnswered = slaveSide.getReceivedFrame(frame) && frame.exceptionCode == Modbus::NULL_EXCEPTION && frame.data[0] == 0x1234;
+
+    bridge->~Bridge();
+    controlledMaster.reset();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(aTimedOut, "A didn't time out");
+    TEST_ASSERT_FALSE_MESSAGE(bForwardedEarly, "B forwarded while A's TX result was missing");
+    TEST_ASSERT_TRUE_MESSAGE(bBusy, "B not answered SLAVE_DEVICE_BUSY");
+    TEST_ASSERT_FALSE_MESSAGE(lateAnswer, "A's late TX result answered the slave side");
+    TEST_ASSERT_TRUE_MESSAGE(bForwarded, "B not forwarded once A's TX result came back");
+    TEST_ASSERT_TRUE_MESSAGE(bAnswered, "B's response not forwarded");
+}
+
 void setUp() {
     // Clear both RX buffers before each test
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -1046,11 +1370,54 @@ void tearDown() {
     Serial.flush(); // Make sure all Unity logs are printed
 }
 
+// Regression: the Logger's first use wasn't serialized: two tasks logging for the first time at
+// once could both initialize it (two log tasks, a leaked queue). Probed at the start of setup(),
+// before anything logs: two tasks, one per core, log at the same time.
+static int loggerTasksCreated = -1;
+static StaticEventGroup_t loggerRaceStartBuf;
+static EventGroupHandle_t loggerRaceStart;
+static StaticTask_t loggerRacerTcb[2];
+static StackType_t loggerRacerStack[2][4096];
+static volatile bool loggerRacerDone[2];
+
+static void loggerRacer(void* arg) {
+    int idx = (int)(intptr_t)arg;
+    xEventGroupWaitBits(loggerRaceStart, BIT0, pdFALSE, pdTRUE, portMAX_DELAY);
+    Modbus::Logger::logln("[setup] Logger first use");
+    loggerRacerDone[idx] = true;
+    vTaskDelete(nullptr);
+}
+
+static void probeLoggerFirstUse() {
+    loggerRaceStart = xEventGroupCreateStatic(&loggerRaceStartBuf);
+    UBaseType_t tasksBefore = uxTaskGetNumberOfTasks();
+    for (int i = 0; i < 2; i++) {
+        xTaskCreateStaticPinnedToCore(loggerRacer, "loggerRacer", sizeof(loggerRacerStack[i]) / sizeof(StackType_t),
+                                      (void*)(intptr_t)i, 2, loggerRacerStack[i], &loggerRacerTcb[i],
+                                      i < portNUM_PROCESSORS ? i : tskNO_AFFINITY); // Single core: no race
+    }
+    vTaskDelay(pdMS_TO_TICKS(10)); // Both racers waiting
+    xEventGroupSetBits(loggerRaceStart, BIT0);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (!(loggerRacerDone[0] && loggerRacerDone[1]) && Modbus::TIME_MS() - t0 < 1000) vTaskDelay(1);
+    vTaskDelay(pdMS_TO_TICKS(50)); // Racers deleted
+    loggerTasksCreated = (int)uxTaskGetNumberOfTasks() - (int)tasksBefore;
+}
+
+void test_logger_first_use_starts_one_task() {
+#ifdef EZMODBUS_DEBUG
+    TEST_IGNORE_MESSAGE("debug build: the library logs before setup(), the probe doesn't see the first use");
+#endif
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(1, loggerTasksCreated, "tasks created by the Logger's first use");
+}
+
 void setup() {
     // Debug port
     Serial.setTxBufferSize(2048);
     Serial.setRxBufferSize(2048);
     Serial.begin(115200);
+    probeLoggerFirstUse(); // Before anything logs
     
     // Initialize UART HAL objects first (like in working RTU client/server code)
     Modbus::Logger::logln("[setup] Initializing EZModbus UART HAL...");
@@ -1101,6 +1468,7 @@ void setup() {
     // Run tests
     UNITY_BEGIN();
     
+    RUN_TEST(test_logger_first_use_starts_one_task);
     RUN_TEST(test_read_holding_register);
     RUN_TEST(test_write_holding_register);
     RUN_TEST(test_bridge_silent_slave_gateway_exception);
@@ -1111,7 +1479,12 @@ void setup() {
     RUN_TEST(test_apps_remove_rcv_callbacks_on_destruction);
     RUN_TEST(test_client_destroyed_while_timeout_runs);
     RUN_TEST(test_server_begin_retry_registers_once);
+    RUN_TEST(test_server_begin_rejects_null_interface);
     RUN_TEST(test_server_rejects_overlaps_at_zero_and_same_start);
+    RUN_TEST(test_server_busy_ignores_other_slave_ids);
+    RUN_TEST(test_server_slave_id_change_spares_waiting_request);
+    RUN_TEST(test_server_rejects_start_inside_word);
+    RUN_TEST(test_server_add_words_all_or_nothing);
     RUN_TEST(test_bridge_begin_registers_once);
     RUN_TEST(test_bridge_answered_request_timer_spares_next);
     RUN_TEST(test_client_sync_send_failure_applied_once);
@@ -1121,6 +1494,7 @@ void setup() {
     RUN_TEST(test_client_timer_rearm_failure);
     RUN_TEST(test_client_zero_timeout); // Last: crashed (assert) before the fix
     RUN_TEST(test_bridge_timer_command_failure);
+    RUN_TEST(test_bridge_late_tx_result_spares_next);
     UNITY_END();
 }
 

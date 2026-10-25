@@ -2458,6 +2458,64 @@ void test_hal_send_bound_to_connection_no_reconnect() {
     Modbus::Logger::logln();
 }
 
+// Regression: beginServer() / beginClient() called directly (HAL built without a config) didn't
+// store the mode, IP & port: an interface on that HAL failed to begin, and a client had no target
+// to reconnect to. The spare HALs are rebuilt without a config for this test, then restored.
+void test_hal_direct_begin_stores_config() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_HAL_DIRECT_BEGIN_STORES_CONFIG");
+    spareServerHal.~TCP();
+    new (&spareServerHal) ModbusHAL::TCP();
+    spareClientHal.~TCP();
+    new (&spareClientHal) ModbusHAL::TCP();
+
+    // Server: an interface begins on it
+    bool serverBegun = spareServerHal.beginServer(SPARE_HAL_TEST_PORT);
+    auto* serverIfc = new (spareIfcStorage) ModbusInterface::TCP(spareServerHal, Modbus::SERVER);
+    auto serverIfcRes = serverIfc->begin();
+    serverIfc->~TCP();
+    spareServerHal.stop();
+
+    // Client: an interface begins on it, and it reconnects once the server closed the connection
+    int listenSock = rawListen(SPARE_HAL_TEST_PORT);
+    bool clientBegun = spareClientHal.beginClient(LOOPBACK_IP_STR, SPARE_HAL_TEST_PORT);
+    int peer = (listenSock >= 0 && clientBegun) ? ::accept(listenSock, nullptr, nullptr) : -1;
+    auto* clientIfc = new (spareIfcStorage) ModbusInterface::TCP(spareClientHal, Modbus::CLIENT);
+    auto clientIfcRes = clientIfc->begin();
+    clientIfc->~TCP();
+    if (peer >= 0) ::close(peer);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (spareClientHal.isClientConnected() && Modbus::TIME_MS() - t0 < 2000) vTaskDelay(pdMS_TO_TICKS(5));
+    const uint8_t byte = 0x00;
+    spareClientHal.sendMsg(&byte, 1); // Reconnects
+    int peer2 = -1;
+    if (listenSock >= 0) {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(listenSock, &fds);
+        timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+        if (::select(listenSock + 1, &fds, nullptr, nullptr, &tv) > 0) peer2 = ::accept(listenSock, nullptr, nullptr);
+    }
+    if (peer2 >= 0) ::close(peer2);
+    spareClientHal.stop();
+    if (listenSock >= 0) ::close(listenSock);
+
+    spareServerHal.~TCP();
+    new (&spareServerHal) ModbusHAL::TCP(SPARE_HAL_TEST_PORT);
+    spareClientHal.~TCP();
+    new (&spareClientHal) ModbusHAL::TCP(LOOPBACK_IP_STR, SPARE_HAL_TEST_PORT);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(serverBegun, "beginServer() failed");
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusInterface::TCP::SUCCESS, serverIfcRes, "server interface didn't begin");
+    TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0 && clientBegun && peer >= 0, "beginClient() didn't connect");
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusInterface::TCP::SUCCESS, clientIfcRes, "client interface didn't begin");
+    TEST_ASSERT_TRUE_MESSAGE(peer2 >= 0, "client HAL didn't reconnect");
+
+    Modbus::Logger::logln("TEST_HAL_DIRECT_BEGIN_STORES_CONFIG - OK");
+    Modbus::Logger::logln();
+}
+
 // ===================================================================================
 // LIFECYCLE: STOP / DESTRUCTION MUST JOIN THE TASKS
 // A task still running after stop() / destruction may access a destroyed object,
@@ -2896,26 +2954,21 @@ void test_broadcast() {
 
 
 // TEST_CONCURRENT_CALLS DATA STRUCTURES & TASKS
+// Two tasks (one per core when there are two) send a synchronous request at the same time: the
+// client has a single request slot, so one gets SUCCESS and the other ERR_BUSY.
 
-// Synchronization data structure
 struct SyncData {
     SemaphoreHandle_t startSignal;
     SemaphoreHandle_t resultsMutex;
-    SemaphoreHandle_t doneSignal;
-    Modbus::Client::Result core0Result;
-    Modbus::Client::Result core1Result;
+    SemaphoreHandle_t doneSignal;  // Counting: given once by each task
+    int nextSlot;                  // Next result slot to claim (per task, not per core)
+    Modbus::Client::Result results[2];
 };
 
-// Task executed on each core
-auto concurrentTask = [](void* pv) {
+static void concurrentTask(void* pv) {
     auto sd = static_cast<SyncData*>(pv);
-    int core = xPortGetCoreID();
-    Modbus::Logger::logf("[Core %d] Ready, waiting for start\n", core);
-
-    // Wait for the start signal
     xSemaphoreTake(sd->startSignal, portMAX_DELAY);
 
-    // Build the Modbus request
     Modbus::Frame req {
         .type         = Modbus::REQUEST,
         .fc           = Modbus::READ_HOLDING_REGISTERS,
@@ -2926,73 +2979,54 @@ auto concurrentTask = [](void* pv) {
         .exceptionCode= Modbus::NULL_EXCEPTION
     };
     Modbus::Frame resp;
+    auto result = client.sendRequest(req, resp, nullptr);
 
-    // In blocking mode for simplicity
-    auto result = client.sendRequest(req, resp, nullptr); // Corrected: removed 'true', third arg is tracker*
-    Modbus::Logger::logf("[Core %d] sendRequest -> %s\n", core,
-            result == Modbus::Client::SUCCESS ? "SUCCESS" : 
-            (result == Modbus::Client::ERR_BUSY ? "ERR_BUSY" : Modbus::Client::toString(result)) ); // More detailed error
-
-    // Store the result
     xSemaphoreTake(sd->resultsMutex, portMAX_DELAY);
-    if (core == 0) sd->core0Result = result;
-    else           sd->core1Result = result;
+    sd->results[sd->nextSlot++] = result;
     xSemaphoreGive(sd->resultsMutex);
-
-    // Signal the end
     xSemaphoreGive(sd->doneSignal);
     vTaskDelete(NULL);
-};
+}
 
 void test_concurrent_calls() {
     Modbus::Logger::logln();
-    Modbus::Logger::logln("TEST_CONCURRENT_CALLS: STRICT THREAD SAFETY WITH 2 SYNCHRONIZED CALLS");
+    Modbus::Logger::logln("TEST_CONCURRENT_CALLS: 2 SYNCHRONIZED CALLS, ONE GETS ERR_BUSY");
 
     static SyncData sync = {};
-    sync.startSignal   = xSemaphoreCreateCounting(2, 0);
-    sync.resultsMutex  = xSemaphoreCreateMutex();
-    sync.doneSignal    = xSemaphoreCreateCounting(2, 0);
-    sync.core0Result   = Modbus::Client::ERR_BUSY;
-    sync.core1Result   = Modbus::Client::ERR_BUSY;
+    sync.startSignal  = xSemaphoreCreateCounting(2, 0);
+    sync.resultsMutex = xSemaphoreCreateMutex();
+    sync.doneSignal   = xSemaphoreCreateCounting(2, 0);
+    sync.nextSlot     = 0;
+    sync.results[0]   = Modbus::Client::NODATA;
+    sync.results[1]   = Modbus::Client::NODATA;
+    TEST_ASSERT_NOT_NULL(sync.startSignal);
+    TEST_ASSERT_NOT_NULL(sync.resultsMutex);
+    TEST_ASSERT_NOT_NULL(sync.doneSignal);
 
-    // Launch the task on core 0
-    xTaskCreatePinnedToCore(
-        [](void* p){ concurrentTask(p); },
-        "Task0", 8192, &sync, 5, nullptr, 0
-    );
-    // … and on core 1
-    xTaskCreatePinnedToCore(
-        [](void* p){ concurrentTask(p); },
-        "Task1", 8192, &sync, 5, nullptr, 1
-    );
+    const BaseType_t secondCore = (portNUM_PROCESSORS > 1) ? 1 : 0;
+    int started = 0;
+    started += xTaskCreatePinnedToCore(concurrentTask, "Task0", 4096, &sync, 5, nullptr, 0) == pdPASS;
+    started += xTaskCreatePinnedToCore(concurrentTask, "Task1", 4096, &sync, 5, nullptr, secondCore) == pdPASS;
+    vTaskDelay(pdMS_TO_TICKS(100)); // Both tasks waiting for the start signal
 
-    // Small delay to ensure the tasks are ready
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    // Launch the two tasks simultaneously
-    xSemaphoreGive(sync.startSignal);
-    xSemaphoreGive(sync.startSignal);
-
-    // Wait for the two tasks to finish
-    xSemaphoreTake(sync.doneSignal, portMAX_DELAY);
-    xSemaphoreTake(sync.doneSignal, portMAX_DELAY);
-
-    // Check the results
-    Modbus::Logger::logln("=== TEST_CONCURRENT_CALLS Results ===");
-    Modbus::Logger::logf("Core 0: %s\n", sync.core0Result == Modbus::Client::SUCCESS ? "SUCCESS" : "ERR_BUSY");
-    Modbus::Logger::logf("Core 1: %s\n", sync.core1Result == Modbus::Client::SUCCESS ? "SUCCESS" : "ERR_BUSY");
+    for (int i = 0; i < started; i++) xSemaphoreGive(sync.startSignal);
+    int done = 0;
+    for (int i = 0; i < started; i++) {
+        done += xSemaphoreTake(sync.doneSignal, pdMS_TO_TICKS(3 * Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS)) == pdTRUE;
+    }
+    Modbus::Logger::logf("Results: %s / %s\n", Modbus::Client::toString(sync.results[0]),
+                         Modbus::Client::toString(sync.results[1]));
 
     TEST_ASSERT_START();
-    TEST_ASSERT_TRUE(
-        (sync.core0Result == Modbus::Client::SUCCESS && sync.core1Result == Modbus::Client::ERR_BUSY) ||
-        (sync.core0Result == Modbus::Client::ERR_BUSY  && sync.core1Result == Modbus::Client::SUCCESS)
-    );
+    TEST_ASSERT_EQUAL_MESSAGE(2, started, "concurrent task creation failed");
+    TEST_ASSERT_EQUAL_MESSAGE(2, done, "concurrent task didn't return");
+    bool oneEach = (sync.results[0] == Modbus::Client::SUCCESS && sync.results[1] == Modbus::Client::ERR_BUSY) ||
+                   (sync.results[0] == Modbus::Client::ERR_BUSY && sync.results[1] == Modbus::Client::SUCCESS);
+    TEST_ASSERT_TRUE_MESSAGE(oneEach, "expected one SUCCESS and one ERR_BUSY");
 
-    // Cleanup
     vSemaphoreDelete(sync.startSignal);
     vSemaphoreDelete(sync.resultsMutex);
     vSemaphoreDelete(sync.doneSignal);
-
     vTaskDelay(pdMS_TO_TICKS(50));
 }
 
@@ -3544,6 +3578,7 @@ void setup() {
     RUN_TEST(test_hal_rx_notifications_never_block_send);
     RUN_TEST(test_hal_tcp_keepalive);
     RUN_TEST(test_hal_send_bound_to_connection_no_reconnect);
+    RUN_TEST(test_hal_direct_begin_stores_config);
     RUN_TEST(test_hal_stop_joins_task);
     RUN_TEST(test_interface_destroy_joins_task_and_detaches_queue);
     RUN_TEST(test_interface_recreate_under_rx_traffic);
@@ -3551,7 +3586,7 @@ void setup() {
     RUN_TEST(test_invalid_parameters);
     RUN_TEST(test_broadcast_read_rejected);
     RUN_TEST(test_broadcast);
-    // RUN_TEST(test_concurrent_calls);
+    RUN_TEST(test_concurrent_calls);
     RUN_TEST(test_server_busy_exception);
     RUN_TEST(test_client_reconnect_on_first_request);
 

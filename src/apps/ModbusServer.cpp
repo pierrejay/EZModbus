@@ -78,8 +78,11 @@ Server::Result Server::begin() {
     // Validate that we have at least one interface, otherwise it means
     // the ctor aborted filling the _interfaces array because the user
     // provided more interfaces than authorized by MAX_INTERFACES
-    if (_interfaceCount == 0 || !_interfaces[0]) {
+    if (_interfaceCount == 0) {
         return Error(Server::ERR_INIT_FAILED, "no valid interface (or more than MAX_INTERFACES provided in ctor)");
+    }
+    for (size_t i = 0; i < _interfaceCount; i++) {
+        if (!_interfaces[i]) return Error(Server::ERR_INIT_FAILED, "null interface");
     }
 
     // Initialize all interfaces with proper context routing
@@ -157,7 +160,8 @@ Server::Result Server::clearAllWords() {
 /* @brief Change the server's Slave/Unit ID at runtime
  * @param id New Slave/Unit ID
  * @note Thread-safe: acquires the server mutex to prevent concurrent access
- *       with request processing. Blocks until any in-flight request completes.
+ *       with request processing. Blocks until any in-flight request completes;
+ *       once it returns, requests for the old ID are ignored.
  *       -> Do NOT call inside a handler or it will deadlock!
  */
 void Server::setSlaveId(uint8_t id) {
@@ -194,6 +198,16 @@ Server::Result Server::handleRequest(const Modbus::Frame& request,
     Server::Result finalRes = SUCCESS;
     const bool isBroadcast = Modbus::isBroadcastId(request.slaveId);
 
+    // Filter before taking the mutex: a busy server stays silent for frames it would ignore
+    // (on a shared RTU bus, requests addressed to other devices)
+    if (!isAddressedToUs(request, sourceInterface)) {
+        return Error(Server::ERR_RCV_WRONG_SLAVE_ID);
+    }
+    // Ignore unsolicited responses from clients
+    if (request.type != Modbus::REQUEST) {
+        return Error(Server::ERR_RCV_INVALID_TYPE);
+    }
+
     { // Scope for mutex protection of WordStore access
         TickType_t timeout = (_reqMutexTimeoutMs == UINT32_MAX)
                              ? portMAX_DELAY 
@@ -203,6 +217,13 @@ Server::Result Server::handleRequest(const Modbus::Frame& request,
         // Single while(0) loop: check all guard clauses and exit at each step if needed
         // Set finalRes with Error() helper to log the exact location where it failed
         do {
+            // Checked again: setSlaveId() may have changed the ID while we waited for the mutex
+            // (before the busy exception too: a request for the old ID gets no answer at all)
+            if (!isAddressedToUs(request, sourceInterface)) {
+                finalRes = Error(Server::ERR_RCV_WRONG_SLAVE_ID);
+                break;
+            }
+
             // Send busy exception if we couldn't lock the mutex
             if (!guard.isLocked()) {
                 finalRes = Error(Server::ERR_RCV_BUSY, "server busy");
@@ -210,19 +231,6 @@ Server::Result Server::handleRequest(const Modbus::Frame& request,
                     Modbus::makeException(request, response, Modbus::SLAVE_DEVICE_BUSY);
                     shouldReply = true;
                 }
-                break;
-            }
-
-            // Ignore requests not addressed to us
-            const bool catchAll = Modbus::isBroadcastId(_serverId) || sourceInterface.checkCatchAllSlaveIds();
-            if (!catchAll && (request.slaveId != _serverId) && !isBroadcast) {
-                finalRes = Error(Server::ERR_RCV_WRONG_SLAVE_ID);
-                break;
-            }
-
-            // Ignore unsolicited responses from clients
-            if (request.type != Modbus::REQUEST) {
-                finalRes = Error(Server::ERR_RCV_INVALID_TYPE);
                 break;
             }
 
@@ -314,6 +322,11 @@ Server::Result Server::handleRead(const Modbus::Frame& request, Modbus::Frame& r
                 response.exceptionCode = Modbus::ILLEGAL_DATA_ADDRESS;
                 return Error(Server::ERR_RCV_ILLEGAL_DATA_ADDRESS, "no word found at address");
             } else {
+                // A gap can't start inside a Word (only the request start can)
+                if (_wordStore.findContaining(regType, currentAddr)) {
+                    response.exceptionCode = Modbus::ILLEGAL_DATA_ADDRESS;
+                    return Error(Server::ERR_RCV_ILLEGAL_DATA_ADDRESS, "Partial Word access not allowed");
+                }
                 // Handle gap: find next Word and skip gap
                 Word* nextWord = _wordStore.findNext(regType, currentAddr);
                 uint32_t gapEnd = (nextWord && nextWord->startAddr < endAddr) ? 
@@ -472,6 +485,11 @@ Server::Result Server::handleWrite(const Modbus::Frame& request, Modbus::Frame& 
                 response.exceptionCode = Modbus::ILLEGAL_DATA_ADDRESS;
                 return Error(Server::ERR_RCV_ILLEGAL_DATA_ADDRESS, "No Word found at address during validation");
             } else {
+                // A gap can't start inside a Word (only the request start can)
+                if (_wordStore.findContaining(regType, scanAddr)) {
+                    response.exceptionCode = Modbus::ILLEGAL_DATA_ADDRESS;
+                    return Error(Server::ERR_RCV_ILLEGAL_DATA_ADDRESS, "Partial Word access not allowed during validation");
+                }
                 // Handle gap: find next Word and skip gap
                 Word* nextWord = _wordStore.findNext(regType, scanAddr);
                 uint32_t gapEnd = (nextWord && nextWord->startAddr < endAddr) ? 
@@ -590,6 +608,18 @@ Server::Result Server::sendResponse(const Modbus::Frame& response, ModbusInterfa
 }
 
 
+/* @brief Check if a request is addressed to this server (own ID, broadcast, or catch-all)
+ * @param request The request to check
+ * @param sourceInterface The interface the request came from
+ * @return true if the server must handle the request
+ */
+bool Server::isAddressedToUs(const Modbus::Frame& request, ModbusInterface::IInterface& sourceInterface) const {
+    const uint32_t serverId = _serverId;
+    if (Modbus::isBroadcastId(request.slaveId)) return true;
+    if (Modbus::isBroadcastId(serverId) || sourceInterface.checkCatchAllSlaveIds()) return true;
+    return request.slaveId == serverId;
+}
+
 /* @brief Check if a function code is a write request
  * @param fc The function code to check
  * @return true if the function code is a write request, false otherwise
@@ -647,75 +677,16 @@ Server::Result Server::addWord(const Word& word) {
  * @note Atomic operation: all words will be added or none!
  */
 Server::Result Server::addWords(const std::vector<Word>& words) {
-    Lock guard(_serverMutex, 0);  // Try-lock global mutex
-    if (!guard.isLocked()) return Error(Server::ERR_WORD_BUSY);
-
-    // Quick capacity check (atomicity guarantee)
-    if ((_wordStore.totalCapacity() - _wordStore.totalSize()) < words.size()) {
-        return Error(Server::ERR_WORD_OVERFLOW, "WordStore capacity exceeded");
-    }
-
-    // Check validity of each word (basic validation only)
-    for (const auto& word : words) {
-        Server::Result res = isValidWordEntry(word);
-        if (res != Server::SUCCESS) {
-            Modbus::Debug::LOG_MSGF("Error (%s) : %s %d-%d", toString(res), Modbus::toString(word.type), 
-                                    word.startAddr, word.startAddr + word.nbRegs - 1);
-            return Error(res, "failed to add word");
-        }
-    }
-
-    // FAST PATH: Skip expensive overlap checks for bulk insertion
-    // Overlaps will be validated once in begin() after sorting
-    if (_isInitialized) {
-        // Only do overlap checks if server is already running (runtime additions)
-        for (const auto& word : words) {
-            if (wordOverlaps(word)) {
-                Modbus::Debug::LOG_MSGF("Error (%s) : %s %d-%d", toString(ERR_WORD_OVERLAP), Modbus::toString(word.type), 
-                                        word.startAddr, word.startAddr + word.nbRegs - 1);
-                return Error(Server::ERR_WORD_OVERLAP, "word overlaps with existing word");
-            }
-        }
-
-        // Check for overlaps within the batch itself
-        for (size_t i = 0; i < words.size(); ++i) {
-            for (size_t j = i + 1; j < words.size(); ++j) {
-                const auto& word1 = words[i];
-                const auto& word2 = words[j];
-                
-                // Only check words of the same type
-                if (word1.type == word2.type) {
-                    uint16_t word1End = word1.startAddr + word1.nbRegs;
-                    uint16_t word2End = word2.startAddr + word2.nbRegs;
-                    
-                    // Check for overlap
-                    if ((word1.startAddr < word2End) && (word2.startAddr < word1End)) {
-                        Modbus::Debug::LOG_MSGF("Error (%s) : %s %d-%d overlaps with %d-%d", toString(ERR_WORD_OVERLAP), 
-                                                Modbus::toString(word1.type), word1.startAddr, word1.startAddr + word1.nbRegs - 1,
-                                                word2.startAddr, word2.startAddr + word2.nbRegs - 1);
-                        return Error(Server::ERR_WORD_OVERLAP, "words overlap within batch");
-                    }
-                }
-            }
-        }
-    }
-
-    // Add each word to the store
-    for (const auto& word : words) {
-        Result res = addWordInternal(word);
-        if (res != SUCCESS) {
-            return res;  // Return first error encountered
-        }
-    }
-    
-    return Success();
+    if (words.empty()) return Success();
+    return addWords(words.data(), words.size());
 }
 
 /* @brief Add a set of words to the server
  * @param words Pointer to the Word buffer
  * @param count Number of words to add
  * @return Result::SUCCESS if the words were added successfully
- * @note Atomic operation: all words will be added or none!
+ * @note Atomic operation: all words will be added or none! The whole batch is checked
+ *       (O(n^2), meant for initialization) before inserting anything.
  */
 Server::Result Server::addWords(const Word* words, size_t count) {
     if (!words || count == 0) {
@@ -730,37 +701,38 @@ Server::Result Server::addWords(const Word* words, size_t count) {
         return Error(Server::ERR_WORD_OVERFLOW, "WordStore capacity exceeded");
     }
 
-    // 1) Validate each word
     for (size_t i = 0; i < count; ++i) {
-        Result res = isValidWordEntry(words[i]);
+        const Word& word = words[i];
+        // Validate each word
+        Result res = isValidWordEntry(word);
         if (res != SUCCESS) {
+            Modbus::Debug::LOG_MSGF("Error (%s) : %s %d-%d", toString(res), Modbus::toString(word.type),
+                                    word.startAddr, word.startAddr + word.nbRegs - 1);
             return Error(res, "failed to add word");
         }
-    }
 
-    // 2) Overlap checks if server already running
-    if (_isInitialized) {
-        for (size_t i = 0; i < count; ++i) {
-            if (wordOverlaps(words[i])) {
-                return Error(ERR_WORD_OVERLAP, "word overlaps with existing word");
-            }
+        // Overlap with the words already added
+        if (wordOverlaps(word)) {
+            Modbus::Debug::LOG_MSGF("Error (%s) : %s %d-%d", toString(ERR_WORD_OVERLAP), Modbus::toString(word.type),
+                                    word.startAddr, word.startAddr + word.nbRegs - 1);
+            return Error(ERR_WORD_OVERLAP, "word overlaps with existing word");
         }
 
-        // intra-batch overlap check (same logic as vector version)
-        for (size_t i = 0; i + 1 < count; ++i) {
-            for (size_t j = i + 1; j < count; ++j) {
-                if (words[i].type == words[j].type) {
-                    uint32_t endI = words[i].startAddr + words[i].nbRegs;
-                    uint32_t endJ = words[j].startAddr + words[j].nbRegs;
-                    if (words[i].startAddr < endJ && words[j].startAddr < endI) {
-                        return Error(ERR_WORD_OVERLAP, "words overlap within batch");
-                    }
-                }
+        // Overlap with the next words of the batch
+        uint32_t end = (uint32_t)word.startAddr + word.nbRegs;
+        for (size_t j = i + 1; j < count; ++j) {
+            const Word& other = words[j];
+            uint32_t otherEnd = (uint32_t)other.startAddr + other.nbRegs;
+            if (word.type == other.type && word.startAddr < otherEnd && other.startAddr < end) {
+                Modbus::Debug::LOG_MSGF("Error (%s) : %s %d-%d overlaps with %d-%d", toString(ERR_WORD_OVERLAP),
+                                        Modbus::toString(word.type), word.startAddr, word.startAddr + word.nbRegs - 1,
+                                        other.startAddr, other.startAddr + other.nbRegs - 1);
+                return Error(ERR_WORD_OVERLAP, "words overlap within batch");
             }
         }
     }
 
-    // 3) Insert each word
+    // Insert each word (can't fail anymore)
     for (size_t i = 0; i < count; ++i) {
         Result res = addWordInternal(words[i]);
         if (res != SUCCESS) return res;
@@ -771,11 +743,13 @@ Server::Result Server::addWords(const Word* words, size_t count) {
 
 /* @brief Get a word from the server
  * @param type The type of word to get
- * @param startAddr The starting address of the word to get
+ * @param address Any address of the word to get (not only its start address)
  * @return The copy of the word if found, otherwise an empty word
+ * @note Not synchronized with addWord() / addWords() / clearAllWords() (store entries move on a
+ *       sorted insertion): when changing the store at runtime, call them from the same task
  */
-Word Server::getWord(Modbus::RegisterType type, uint16_t startAddr) {
-    auto word = findWordEntry(type, startAddr);
+Word Server::getWord(Modbus::RegisterType type, uint16_t address) {
+    auto word = findWordEntry(type, address);
     if (!word) return Word();
     return *word;
 }
@@ -861,6 +835,8 @@ bool Server::validateNoOverlapsInStore(Modbus::RegisterType type) {
 Server::Result Server::addWordInternal(const Word& word) {
     // Use WordStore (unified API)
     if (!_wordStore.insert(word)) {
+        // A sorted store also rejects an overlapping word
+        if (_wordStore.hasCapacity(word.type)) return Error(Server::ERR_WORD_OVERLAP, "word overlaps with existing word");
         return Error(Server::ERR_WORD_OVERFLOW, "WordStore insert failed - capacity exceeded");
     }
     return Success("Word added to WordStore");

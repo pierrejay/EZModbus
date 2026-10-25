@@ -33,8 +33,13 @@ UART::UART(uart_port_t uart_num,
             _config_valid = false;
             Modbus::Debug::LOG_MSGF("Invalid UART port %d, interface will fail to begin()", (int)_uart_num);
         }
-        // Initialize _current_hw_config with the provided parameters
-        decode_config_flags(_config_flags, _current_hw_config.data_bits, _current_hw_config.parity, _current_hw_config.stop_bits);
+        // Initialize _current_hw_config with the provided parameters (an invalid config fails begin() too)
+        if (isValidConfig(_config_flags)) {
+            decode_config_flags(_config_flags, _current_hw_config.data_bits, _current_hw_config.parity, _current_hw_config.stop_bits);
+        } else {
+            _config_valid = false;
+            Modbus::Debug::LOG_MSGF("Invalid UART config 0x%X, interface will fail to begin()", (unsigned int)_config_flags);
+        }
         _current_hw_config.baud_rate = _baud_rate;
         _current_hw_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
         // Use LP source clock for UART_LP ports
@@ -105,7 +110,7 @@ UART::~UART() {
 esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
     Lock guard(_driver_mutex);
     if (!_config_valid) {
-        Modbus::Debug::LOG_MSGF("Port %d invalid (unrecognized Serial or out-of-range port), cannot begin", (int)_uart_num);
+        Modbus::Debug::LOG_MSGF("Port %d invalid (unrecognized Serial, out-of-range port or invalid config), cannot begin", (int)_uart_num);
         return ESP_ERR_INVALID_ARG;
     }
     if (_is_driver_installed) {
@@ -116,11 +121,12 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
     // DE pin management:
     //  - HP UART -> hardware RS485 half-duplex mode
     //  - LP UART -> soft GPIO toggling (RS485 mode unavailable)
+    // A failed begin() leaves the object as it was: the members change once everything succeeded
     const bool has_de = (_pin_rts_de != GPIO_NUM_NC);
-    _soft_de = false;
+    bool soft_de = false;
     #if (SOC_UART_LP_NUM >= 1)
     if (has_de && (int)_uart_num >= SOC_UART_HP_NUM) {
-        _soft_de = true;
+        soft_de = true;
     }
     #endif
 
@@ -130,7 +136,7 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
         return err;
     }
 
-    int rts_pin_to_set = (has_de && !_soft_de) ? (int)_pin_rts_de : UART_PIN_NO_CHANGE;
+    int rts_pin_to_set = (has_de && !soft_de) ? (int)_pin_rts_de : UART_PIN_NO_CHANGE;
     err = uart_set_pin(_uart_num, _pin_tx, _pin_rx, rts_pin_to_set, UART_PIN_NO_CHANGE /*CTS*/);
     if (err != ESP_OK) {
         Modbus::Debug::LOG_MSGF("Error: uart_set_pin FAILED for port %d with TX:%d RX:%d RTS:%d Error: %s", _uart_num, _pin_tx, _pin_rx, rts_pin_to_set, esp_err_to_name(err));
@@ -147,24 +153,30 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
         return err;
     }
     
+    // From here, a failure uninstalls the driver
+    auto failInstalled = [this](esp_err_t e) {
+        uart_driver_delete(_uart_num);
+        _internal_event_queue_handle = nullptr;
+        return e;
+    };
+
     if (!_internal_event_queue_handle && DRIVER_EVENT_QUEUE_SIZE > 0) {
          Modbus::Debug::LOG_MSGF("Error: uart_driver_install succeeded but queue handle is null for port %d", _uart_num);
-         return ESP_FAIL;
+         return failInstalled(ESP_FAIL);
     }
 
     if (has_de) {
-        err = _soft_de ? setupSoftDEUnsafe() : setRS485ModeUnsafe(true);
+        err = soft_de ? setupSoftDEUnsafe() : setRS485ModeUnsafe(true);
         if (err != ESP_OK) {
             Modbus::Debug::LOG_MSGF("Error: Failed to set up RS485 direction control for port %d: %s", _uart_num, esp_err_to_name(err));
-            uart_driver_delete(_uart_num);
-            _internal_event_queue_handle = nullptr;
-            _is_driver_installed = false;
-            return err;
+            return failInstalled(err);
         }
-        Modbus::Debug::LOG_MSGF("Port %d configured for RS485 Half-Duplex with %s DE on pin %d", _uart_num, _soft_de ? "soft" : "hw", (int)_pin_rts_de);
+        Modbus::Debug::LOG_MSGF("Port %d configured for RS485 Half-Duplex with %s DE on pin %d", _uart_num, soft_de ? "soft" : "hw", (int)_pin_rts_de);
     }
 
+    _soft_de = soft_de;
     _is_driver_installed = true;
+    if (out_event_queue) *out_event_queue = _internal_event_queue_handle;
 
     // Guarantee an RX idle-timeout event at the end of every frame, even one that ends exactly
     // on a FIFO-full boundary (required for LP-UART)
@@ -271,49 +283,55 @@ esp_err_t UART::flush_input(){
 }
 
 /* @brief Set the baud rate of the UART driver
- * @param baud_rate: The baud rate to set
- * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is not installed
+ * @param baud_rate: The baud rate to set (MIN_BAUD_RATE .. MAX_BAUD_RATE)
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG out of range, or the driver's error
+ * @note A refused baud rate leaves the previous one in place
  */
 esp_err_t UART::setBaudrate(uint32_t baud_rate) {
+    if (baud_rate < MIN_BAUD_RATE || baud_rate > MAX_BAUD_RATE) return ESP_ERR_INVALID_ARG;
     Lock guard(_driver_mutex);
-    _baud_rate = baud_rate; 
-    _current_hw_config.baud_rate = baud_rate; 
+    uart_config_t cfg = _current_hw_config;
+    cfg.baud_rate = baud_rate;
 
-    if (!_is_driver_installed) {
-        Modbus::Debug::LOG_MSGF("Info: Port %d baudrate set to %d (will be applied at begin())", _uart_num, (int)_baud_rate);
-        return ESP_OK;
+    if (_is_driver_installed) {
+        esp_err_t err = applyRuntimeConfig(cfg);
+        if (err != ESP_OK) {
+            Modbus::Debug::LOG_MSGF("Error: Port %d failed to reconfigure baudrate to %d: %s", _uart_num, (int)baud_rate, esp_err_to_name(err));
+            return err;
+        }
     }
-    esp_err_t err = applyRuntimeConfig();
-    if (err == ESP_OK) {
-        Modbus::Debug::LOG_MSGF("Info: Port %d baudrate reconfigured to %d", _uart_num, (int)_baud_rate);
-    } else {
-        Modbus::Debug::LOG_MSGF("Error: Port %d failed to reconfigure baudrate to %d: %s", _uart_num, (int)baud_rate, esp_err_to_name(err));
-    }
-    return err;
+    _baud_rate = baud_rate;
+    _current_hw_config = cfg;
+    Modbus::Debug::LOG_MSGF("Info: Port %d baudrate set to %d%s", _uart_num, (int)_baud_rate,
+                            _is_driver_installed ? "" : " (will be applied at begin())");
+    return ESP_OK;
 }
 
 /* @brief Set the serial config (data bits, parity, stop bits) of the UART driver
  * @param config_flags: Packed config flags (use CONFIG_xxx constants, e.g. CONFIG_8N1)
- * @return ESP_OK on success
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG for an invalid config, or the driver's error
  * @note If the driver is already running, the new config is applied immediately
  *       via targeted IDF setters without requiring a restart.
+ * @note A refused config leaves the previous one in place
  */
 esp_err_t UART::setConfig(uint32_t config_flags) {
+    if (!isValidConfig(config_flags)) return ESP_ERR_INVALID_ARG;
     Lock guard(_driver_mutex);
-    _config_flags = config_flags;
-    decode_config_flags(_config_flags, _current_hw_config.data_bits, _current_hw_config.parity, _current_hw_config.stop_bits);
+    uart_config_t cfg = _current_hw_config;
+    decode_config_flags(config_flags, cfg.data_bits, cfg.parity, cfg.stop_bits);
 
-    if (!_is_driver_installed) {
-        Modbus::Debug::LOG_MSGF("Info: Port %d config set to 0x%X (will be applied at begin())", _uart_num, (unsigned int)_config_flags);
-        return ESP_OK;
+    if (_is_driver_installed) {
+        esp_err_t err = applyRuntimeConfig(cfg);
+        if (err != ESP_OK) {
+            Modbus::Debug::LOG_MSGF("Error: Port %d failed to reconfigure config to 0x%X: %s", _uart_num, (unsigned int)config_flags, esp_err_to_name(err));
+            return err;
+        }
     }
-    esp_err_t err = applyRuntimeConfig();
-    if (err == ESP_OK) {
-        Modbus::Debug::LOG_MSGF("Info: Port %d config reconfigured to 0x%X", _uart_num, (unsigned int)_config_flags);
-    } else {
-        Modbus::Debug::LOG_MSGF("Error: Port %d failed to reconfigure config to 0x%X: %s", _uart_num, (unsigned int)config_flags, esp_err_to_name(err));
-    }
-    return err;
+    _config_flags = config_flags;
+    _current_hw_config = cfg;
+    Modbus::Debug::LOG_MSGF("Info: Port %d config set to 0x%X%s", _uart_num, (unsigned int)_config_flags,
+                            _is_driver_installed ? "" : " (will be applied at begin())");
+    return ESP_OK;
 }
 
 /* @brief Set only the parity of the UART driver
@@ -411,15 +429,6 @@ esp_err_t UART::disablePatternDetection() {
     return uart_disable_pattern_det_intr(_uart_num);
 }
 
-/* @brief Flush the TX FIFO of the UART driver
- * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is not installed
- */
-esp_err_t UART::flushTxFifo() {
-    Lock guard(_driver_mutex);
-    if (!_is_driver_installed) return ESP_ERR_INVALID_STATE;
-    return uart_flush(_uart_num);
-}
-
 /* @brief Enable RS485 mode on UART driver
  * @return ESP_OK on success, ESP_ERR_INVALID_ARG on parameter error
  * @note _driver_mutex must be held to call this function!
@@ -464,12 +473,11 @@ esp_err_t UART::setTimeoutMicroseconds(uint64_t timeout_us) {
     uint64_t usPerUartSymbol = (static_cast<uint64_t>(bitsPerUartSymbol) * 1000000ULL) / _baud_rate;
     if (usPerUartSymbol == 0) return ESP_ERR_INVALID_ARG;
 
-    // Calculate the threshold in number of UART symbols
-    uint8_t threshold = static_cast<uint8_t>((timeout_us + usPerUartSymbol - 1) / usPerUartSymbol);
-    
-    // Apply limits
-    if (threshold == 0) threshold = 1;
-    if (threshold >= MAX_TOUT_THRESH) threshold = MAX_TOUT_THRESH - 1;
+    // Calculate the threshold in number of UART symbols, limited before narrowing it
+    uint64_t symbols = (timeout_us + usPerUartSymbol - 1) / usPerUartSymbol;
+    if (symbols == 0) symbols = 1;
+    if (symbols >= MAX_TOUT_THRESH) symbols = MAX_TOUT_THRESH - 1;
+    uint8_t threshold = static_cast<uint8_t>(symbols);
 
     // Configure the timeout
     esp_err_t err = setTimeoutThreshold(threshold);
@@ -500,7 +508,7 @@ uint64_t UART::getRxFrameGapTimeoutUs() const {
     return (uint64_t)(fifoLen + rxTimeoutSym + RX_FRAME_GAP_MARGIN_SYMBOLS) * usPerSymbol;
 }
 
-esp_err_t UART::applyRuntimeConfig() {
+esp_err_t UART::applyRuntimeConfig(const uart_config_t& cfg) {
     if (!_is_driver_installed) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -510,16 +518,17 @@ esp_err_t UART::applyRuntimeConfig() {
         return err;
     }
 
-    err = uart_set_baudrate(_uart_num, _current_hw_config.baud_rate);
+    // Only the baud rate can be refused (the fields are validated): first, nothing changed yet
+    err = uart_set_baudrate(_uart_num, cfg.baud_rate);
     if (err != ESP_OK) return err;
 
-    err = uart_set_word_length(_uart_num, _current_hw_config.data_bits);
+    err = uart_set_word_length(_uart_num, cfg.data_bits);
     if (err != ESP_OK) return err;
 
-    err = uart_set_parity(_uart_num, _current_hw_config.parity);
+    err = uart_set_parity(_uart_num, cfg.parity);
     if (err != ESP_OK) return err;
 
-    err = uart_set_stop_bits(_uart_num, _current_hw_config.stop_bits);
+    err = uart_set_stop_bits(_uart_num, cfg.stop_bits);
     if (err != ESP_OK) return err;
 
     // Re-assert hardware RS485 mode after a reconfig 
@@ -531,6 +540,20 @@ esp_err_t UART::applyRuntimeConfig() {
 
     restoreRxTimeout();
     return ESP_OK;
+}
+
+/* @brief Check packed config flags against the IDF values
+ * @param flags: Packed config flags (see CONFIG_xxx constants)
+ * @return true if data bits, parity & stop bits are all valid
+ */
+bool UART::isValidConfig(uint32_t flags) {
+    // Checked as integers: an out of range value can't be converted to the IDF enums
+    const uint32_t dataBits = flags & 0xFF;
+    const uint32_t parity = (flags >> 8) & 0xFF;
+    const uint32_t stopBits = (flags >> 16) & 0xFF;
+    return dataBits <= (uint32_t)UART_DATA_8_BITS &&
+           (parity == (uint32_t)UART_PARITY_DISABLE || parity == (uint32_t)UART_PARITY_EVEN || parity == (uint32_t)UART_PARITY_ODD) &&
+           stopBits >= (uint32_t)UART_STOP_BITS_1 && stopBits <= (uint32_t)UART_STOP_BITS_2;
 }
 
 void UART::restoreRxTimeout() {

@@ -211,6 +211,7 @@ private:
     uint32_t _timeoutMs;
     Mutex _pendingMutex;           // Protects the pending request (accessed by both interfaces' tasks & the timer)
     bool _pendingActive = false;
+    bool _txPending = false;       // TX result of the last forwarded request not back yet
     Modbus::FrameMeta _pending;
     uint32_t _pendingStartMs = 0;
     TimerHandle_t _timer = nullptr;
@@ -241,24 +242,50 @@ private:
             return;
         }
 
+        // One request at a time: none while a request waits for its response, nor until the TX
+        // result of the previous one came back (a late TX failure would close the newer request)
+        bool admitted = false;
         {
             Lock guard(_pendingMutex);
-            _pending = Modbus::FrameMeta(request);
-            _pendingStartMs = TIME_MS();
-            _pendingActive = true;
+            if (!_pendingActive && !_txPending) {
+                _pending = Modbus::FrameMeta(request);
+                _pendingStartMs = TIME_MS();
+                _pendingActive = true;
+                _txPending = true;
+                admitted = true;
+            }
         }
-        if (xTimerReset(_timer, TIMER_CMD_TOUT_TICKS) != pdPASS) {
-            // No timeout guarantee: don't forward, the requester can retry
-            closePendingWithException(Modbus::SLAVE_DEVICE_BUSY);
+        if (!admitted) {
+            Modbus::Frame exception;
+            Modbus::makeException(request, exception, Modbus::SLAVE_DEVICE_BUSY);
+            slaveInterface->sendFrame(exception, nullptr, nullptr);
             return;
         }
 
-        // A TX failure is reported through the callback (synchronously or not)
+        if (xTimerReset(_timer, TIMER_CMD_TOUT_TICKS) != pdPASS) {
+            // No timeout guarantee: don't forward, the requester can retry
+            onTxResult(ModbusInterface::IInterface::ERR_BUSY, Modbus::SLAVE_DEVICE_BUSY);
+            return;
+        }
+
+        // The TX result comes through the callback, once per sendFrame() (synchronously or not)
         masterInterface->sendFrame(request, [](ModbusInterface::IInterface::Result result, void* ctx) {
-            if (result != ModbusInterface::IInterface::SUCCESS) {
-                static_cast<Bridge*>(ctx)->closePendingWithException(Modbus::GATEWAY_PATH_UNAVAILABLE);
-            }
+            static_cast<Bridge*>(ctx)->onTxResult(result, Modbus::GATEWAY_PATH_UNAVAILABLE);
         }, this);
+    }
+
+    /* @brief TX result of the forwarded request: a failure closes it with an exception
+     * @note No request is admitted until it came back: the pending request, if any, is its own
+     */
+    void onTxResult(ModbusInterface::IInterface::Result result, Modbus::ExceptionCode ec) {
+        Modbus::Frame exception;
+        {
+            Lock guard(_pendingMutex);
+            _txPending = false;
+            if (result == ModbusInterface::IInterface::SUCCESS || !closePendingLocked(ec, exception)) return;
+        }
+        Modbus::Debug::LOG_MSGF("Bridge: replying exception %s", Modbus::toString(ec));
+        slaveInterface->sendFrame(exception, nullptr, nullptr);
     }
 
     /* @brief Forward a response from the master side to the slave side
@@ -300,17 +327,27 @@ private:
             if (!_pendingActive) return false; // Already answered
             if (onTimeout && TIME_MS() - _pendingStartMs < _timeoutMs) return false;
             if (onTimeout) masterInterface->abortCurrentTransaction(); // Non-blocking
-            _pendingActive = false;
-            exception.clear();
-            exception.type = Modbus::RESPONSE;
-            exception.fc = _pending.fc;
-            exception.slaveId = _pending.slaveId;
-            exception.regAddress = _pending.regAddress;
-            exception.regCount = _pending.regCount;
-            exception.exceptionCode = ec;
+            closePendingLocked(ec, exception);
         }
         Modbus::Debug::LOG_MSGF("Bridge: replying exception %s", Modbus::toString(ec));
         slaveInterface->sendFrame(exception, nullptr, nullptr);
+        return true;
+    }
+
+    /* @brief Close the pending request (if any) & build its exception response
+     * @note Caller holds _pendingMutex, and sends the exception after releasing it
+     * @return True if a pending request was closed
+     */
+    bool closePendingLocked(Modbus::ExceptionCode ec, Modbus::Frame& exception) {
+        if (!_pendingActive) return false;
+        _pendingActive = false;
+        exception.clear();
+        exception.type = Modbus::RESPONSE;
+        exception.fc = _pending.fc;
+        exception.slaveId = _pending.slaveId;
+        exception.regAddress = _pending.regAddress;
+        exception.regCount = _pending.regCount;
+        exception.exceptionCode = ec;
         return true;
     }
 

@@ -28,7 +28,6 @@ TCP::TCP()
       _listenSocket(-1),
       _clientSocket(-1),
       _isServer(false),
-      _isRunning(false),
       _cfgMode(CfgMode::UNINIT),
       _cfgPort(0) {
     _activeSocketCount = 0;
@@ -302,6 +301,8 @@ bool TCP::beginServer(uint16_t port, uint32_t ip) {
     }
     Modbus::Debug::LOG_MSGF("Beginning server on port %u", port);
     _isServer = true;
+    _cfgMode = CfgMode::SERVER; // Config stored when called directly (see interface begin())
+    _cfgPort = port;
 
     if (!setupServerSocket(port, ip)) {
         return false; // Error logged in setupServerSocket
@@ -343,6 +344,13 @@ bool TCP::beginClient(const char* serverIP, uint16_t port) {
     }
     Modbus::Debug::LOG_MSGF("Beginning client to %s:%u", serverIP, port);
     _isServer = false;
+    // Config stored when called directly: checked by the interface, target of the reconnections
+    _cfgMode = CfgMode::CLIENT;
+    if (serverIP != _cfgIP) { // begin() passes the stored IP
+        strncpy(_cfgIP, serverIP ? serverIP : "", sizeof(_cfgIP) - 1);
+        _cfgIP[sizeof(_cfgIP) - 1] = '\0';
+    }
+    _cfgPort = port;
 
     if (!setupClientSocket(serverIP, port)) {
         Modbus::Debug::LOG_MSGF("WARNING: Initial connection to %s:%u failed, will retry on first sendMsg", serverIP, port);

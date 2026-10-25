@@ -11,11 +11,11 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
-#include <freertos/event_groups.h>
 #include <string.h>
 #include <stdarg.h>
 #include <cstdio>
 #include <cstdarg>
+#include <atomic>
 
 // Driver includes for log output
 #ifdef ARDUINO
@@ -83,40 +83,42 @@ public:
     static constexpr uint32_t STACK_SIZE = (uint32_t)EZMODBUS_LOG_TASK_STACK_SIZE;
     static constexpr BaseType_t TASK_CORE = (BaseType_t)EZMODBUS_LOG_TASK_CORE;
     static constexpr uint32_t CHECK_INTERVAL_MS = 100;
-    
-    // Event bits for queue status
-    static constexpr EventBits_t QUEUE_EMPTY_BIT = BIT0;
+    static_assert(MAX_MSG_SIZE >= 16, "EZMODBUS_LOG_MAX_MSG_SIZE too small");
 
     struct LogMessage {
         char msg[MAX_MSG_SIZE];
     };
 
-    // Automatic initialization
+    // Automatic initialization: the first caller does it, concurrent ones wait for it
     static void begin() {
-        if (!initialized) {
-            // Create the message queue
-            logQueue = xQueueCreate(QUEUE_SIZE, sizeof(LogMessage));
-            
-            // Create event group for queue status
-            queueEventGroup = xEventGroupCreate();
-            
-            // Create the logging task
-            BaseType_t taskCreated = xTaskCreatePinnedToCore(
-                logTask,
-                "LogTask",
-                STACK_SIZE,
-                NULL,
-                TASK_PRIORITY,
-                &logTaskHandle,
-                TASK_CORE
-            );
-            
-            if (logQueue && queueEventGroup && taskCreated == pdPASS) {
-                // Initially queue is empty
-                xEventGroupSetBits(queueEventGroup, QUEUE_EMPTY_BIT);
-                initialized = true;
-            }
+        uint32_t expected = STATE_UNINIT;
+        if (!state.compare_exchange_strong(expected, STATE_INITIALIZING)) {
+            while (state == STATE_INITIALIZING) vTaskDelay(1);
+            return;
         }
+
+        // Create the message queue, before the task using it
+        logQueue = xQueueCreate(QUEUE_SIZE, sizeof(LogMessage));
+        if (!logQueue) {
+            releaseResources();
+            return;
+        }
+
+        // Create the logging task
+        BaseType_t taskCreated = xTaskCreatePinnedToCore(
+            logTask,
+            "LogTask",
+            STACK_SIZE,
+            NULL,
+            TASK_PRIORITY,
+            &logTaskHandle,
+            TASK_CORE
+        );
+        if (taskCreated != pdPASS) {
+            releaseResources();
+            return;
+        }
+        state = STATE_READY;
     }
 
     // Simple logging methods
@@ -135,6 +137,7 @@ public:
     static void logf(const char* format, Args&&... args) {
         char buffer[MAX_MSG_SIZE];
         int len = snprintf(buffer, sizeof(buffer), format, std::forward<Args>(args)...);
+        if (len < 0) return; // Encoding error
         
         // Ensure we don't exceed buffer bounds, add ellipsis if truncated
         if (len >= MAX_MSG_SIZE) {
@@ -172,39 +175,41 @@ public:
     
     // Wait for all messages to be flushed from the queue
     static void waitQueueFlushed() {
-        if (!initialized) return; // Consider empty if not initialized
+        if (state != STATE_READY) return; // Consider empty if not initialized
         
-        // Wait for the queue to be empty
-        EventBits_t bits = xEventGroupWaitBits(
-            queueEventGroup,
-            QUEUE_EMPTY_BIT,
-            pdFALSE,  // Don't clear the bit
-            pdTRUE,   // Wait for all bits (only one here)
-            portMAX_DELAY
-        );
+        // Wait for every message queued so far to be written
+        while (pending != 0) vTaskDelay(1);
 
         EZMODBUS_LOG_FLUSH(); // Flush the UART buffer
         return;
     }
 
 private:
-    inline static bool initialized = false;
+    static constexpr uint32_t STATE_UNINIT = 0, STATE_INITIALIZING = 1, STATE_READY = 2;
+    inline static std::atomic<uint32_t> state{STATE_UNINIT};
     inline static QueueHandle_t logQueue = nullptr;
     inline static TaskHandle_t logTaskHandle = nullptr;
-    inline static EventGroupHandle_t queueEventGroup = nullptr;
+    inline static std::atomic<uint32_t> pending{0}; // Messages queued & not written yet
+
+    // Initialization failed: release what was created, a later log retries
+    static void releaseResources() {
+        if (logQueue) vQueueDelete(logQueue);
+        logQueue = nullptr;
+        state = STATE_UNINIT;
+    }
 
     // Send a message to the queue
     static void sendToQueue(const char* message) {
-        if (!initialized) begin(); // Initialize if not already initialized
-        if (!initialized) return; // Abort if initialization failed
+        if (state != STATE_READY) begin(); // Initialize if not already initialized
+        if (state != STATE_READY) return;  // Abort if initialization failed
         
         LogMessage msg;
         strncpy(msg.msg, message, MAX_MSG_SIZE - 1);
         msg.msg[MAX_MSG_SIZE - 1] = '\0';
         
-        // Clear empty bit when adding message
-        xEventGroupClearBits(queueEventGroup, QUEUE_EMPTY_BIT);
-        xQueueSend(logQueue, &msg, 0); // Send without waiting if queue is full
+        // Counted until written (see waitQueueFlushed())
+        pending++;
+        if (xQueueSend(logQueue, &msg, 0) != pdTRUE) pending--; // Send without waiting if queue is full
     }
     
     // Task that reads the queue and writes the logs
@@ -213,11 +218,7 @@ private:
         while (true) {
             if (xQueueReceive(logQueue, &msg, CHECK_INTERVAL_MS) == pdTRUE) {
                 writeOutput(msg.msg, strlen(msg.msg));
-                
-                // Check if queue is now empty and set bit accordingly
-                if (uxQueueMessagesWaiting(logQueue) == 0) {
-                    xEventGroupSetBits(queueEventGroup, QUEUE_EMPTY_BIT);
-                }
+                pending--;
             }
             vTaskDelay(pdMS_TO_TICKS(5));
         }

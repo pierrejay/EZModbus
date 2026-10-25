@@ -1907,10 +1907,140 @@ void test_frame_getters_large_dstlen() {
     }
 }
 
+// Regression: the PDU encoder ignored the bytes it couldn't append to a too small buffer: the TCP
+// encoder (no CRC to append after it) then returned SUCCESS on a truncated frame.
+void test_codec_encode_rejects_truncated() {
+    using namespace Modbus;
+    Frame F;
+    F.type = REQUEST;
+    F.fc = WRITE_MULTIPLE_REGISTERS;
+    F.slaveId = 1;
+    F.regAddress = 0;
+    uint16_t regs[10] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    TEST_ASSERT_TRUE(F.setRegisters(regs, 10));
+    const size_t pduLen = 1 + 2 + 2 + 1 + 20;
+
+    uint8_t _tcp[ModbusCodec::TCP::MBAP_SIZE + pduLen];
+    ByteBuffer tcpShort(_tcp, sizeof(_tcp) - 1);
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::TCP::encode(F, tcpShort, 1), "truncated TCP frame encoded");
+    ByteBuffer tcpFit(_tcp, sizeof(_tcp));
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::TCP::encode(F, tcpFit, 1), "TCP frame fitting exactly rejected");
+    TEST_ASSERT_EQUAL(sizeof(_tcp), tcpFit.size());
+
+    uint8_t _rtu[1 + pduLen + 2];
+    ByteBuffer rtuShort(_rtu, 1 + pduLen - 1); // PDU truncated
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::RTU::encode(F, rtuShort), "truncated RTU frame encoded");
+    ByteBuffer rtuFit(_rtu, sizeof(_rtu));
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::RTU::encode(F, rtuFit), "RTU frame fitting exactly rejected");
+}
+
+// Regression: a register response was decoded without bounding its byte count against the frame
+// data (125 registers): 254 bytes wrote 127 registers, past Frame::data. The TCP & RTU envelopes
+// limit it on the wire, not a direct call.
+void test_codec_register_response_bounded() {
+    using namespace Modbus;
+    uint8_t _pdu[2 + 254];
+    _pdu[0] = READ_HOLDING_REGISTERS;
+    _pdu[1] = 254;
+    for (size_t i = 2; i < sizeof(_pdu); i++) _pdu[i] = 0xAB;
+
+    Frame F;
+    ByteBuffer tooLong(static_cast<const uint8_t*>(_pdu), sizeof(_pdu));
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_BYTE_COUNT, ModbusCodec::PDU::setFromBytes(tooLong, F, RESPONSE),
+                              "register response above 125 registers decoded");
+
+    _pdu[1] = 2 * MAX_REGISTERS_READ;
+    ByteBuffer maxLen(static_cast<const uint8_t*>(_pdu), 2 + 2 * MAX_REGISTERS_READ);
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::PDU::setFromBytes(maxLen, F, RESPONSE),
+                              "register response of 125 registers rejected");
+    TEST_ASSERT_EQUAL(MAX_REGISTERS_READ, F.regCount);
+}
+
+// Regression: the PDU encoder looped over regCount without bounding it to the frame data: a direct
+// call with 130 registers read past Frame::data (the TCP & RTU encoders validate it first).
+void test_codec_pdu_encoder_bounds_reg_count() {
+    using namespace Modbus;
+    Frame F;
+    F.type = RESPONSE;
+    F.fc = READ_HOLDING_REGISTERS;
+    F.slaveId = 1;
+    F.regCount = 130;
+    uint8_t _buf[300];
+    ByteBuffer buf(_buf, sizeof(_buf));
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_REG_COUNT, ModbusCodec::PDU::appendToBytes(F, RESPONSE, buf),
+                              "130 registers encoded");
+    TEST_ASSERT_EQUAL(0, buf.size());
+}
+
+// Regression: a read-only ByteBuffer (const source, slice) could still be written through
+// write_at() & pop_front()
+void test_bytebuffer_read_only_not_writable() {
+    using Modbus::ByteBuffer;
+    uint8_t _src[4] = {1, 2, 3, 4};
+    ByteBuffer ro(static_cast<const uint8_t*>(_src), sizeof(_src));
+    const uint8_t two[2] = {9, 9};
+    TEST_ASSERT_FALSE_MESSAGE(ro.write_at(0, 9), "byte written to a read-only buffer");
+    TEST_ASSERT_FALSE_MESSAGE(ro.write_at(0, two, 2), "bytes written to a read-only buffer");
+    TEST_ASSERT_FALSE_MESSAGE(ro.pop_front(1), "read-only buffer shifted");
+    TEST_ASSERT_EQUAL_UINT8(1, _src[0]);
+    TEST_ASSERT_EQUAL_UINT8(2, _src[1]);
+
+    uint8_t _rw[4];
+    ByteBuffer rw(_rw, sizeof(_rw));
+    TEST_ASSERT_TRUE(rw.push_back(two, 2));
+    ByteBuffer view = rw.slice(0, 2);
+    TEST_ASSERT_FALSE_MESSAGE(view.write_at(0, 7), "slice wrote to its source buffer");
+    TEST_ASSERT_EQUAL_UINT8(9, rw[0]);
+}
+
+// Regression: bound checks written as "index + length > limit" wrapped around for huge values and
+// let the access through. Before the fix the first two cases failed, the next ones crashed (huge
+// copy), hence this test runs last.
+void test_bounds_checks_dont_wrap() {
+    using namespace Modbus;
+    uint8_t _raw[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    ByteBuffer view(static_cast<const uint8_t*>(_raw), sizeof(_raw));
+    TEST_ASSERT_EQUAL_MESSAGE(sizeof(_raw) - 1, view.slice(1, SIZE_MAX).size(), "slice past the end");
+
+    Frame F;
+    F.regCount = 7;
+    const uint16_t regs[2] = {0xDEAD, 0xBEEF};
+    TEST_ASSERT_FALSE_MESSAGE(F.setRegisters(regs, 2, SIZE_MAX), "registers set at a wrapped index");
+    TEST_ASSERT_EQUAL(7, F.regCount);
+    const bool coils[2] = {true, true};
+    TEST_ASSERT_FALSE_MESSAGE(F.setCoils(coils, 2, SIZE_MAX), "coils set at a wrapped index");
+
+    uint8_t _buf[8];
+    ByteBuffer buf(_buf, sizeof(_buf));
+    TEST_ASSERT_TRUE(buf.push_back(0x00));
+    TEST_ASSERT_FALSE_MESSAGE(buf.push_back(_raw, SIZE_MAX), "push_back of a wrapped length");
+    TEST_ASSERT_FALSE_MESSAGE(buf.write_at(1, _raw, SIZE_MAX), "write_at of a wrapped length");
+    TEST_ASSERT_EQUAL(1, buf.size());
+
+    // Typed accessors & vector coils: getters first (they read past data and returned true before
+    // the fix), setters then (they crashed)
+    Frame G;
+    const uint16_t five[5] = {1, 2, 3, 4, 5};
+    TEST_ASSERT_TRUE(G.setRegisters(five, 5));
+    uint32_t u32 = 0;
+    float f32 = 0;
+    uint16_t u16 = 0;
+    TEST_ASSERT_FALSE_MESSAGE(G.getUint32(u32, SIZE_MAX), "getUint32 at a wrapped index");
+    TEST_ASSERT_FALSE_MESSAGE(G.getFloat(f32, SIZE_MAX), "getFloat at a wrapped index");
+    TEST_ASSERT_FALSE_MESSAGE(G.getUint16(u16, SIZE_MAX), "getUint16 at a wrapped index");
+    TEST_ASSERT_EQUAL_MESSAGE(0, G.setUint32(42, SIZE_MAX), "setUint32 at a wrapped index");
+    TEST_ASSERT_EQUAL_MESSAGE(0, G.setFloat(1.0f, SIZE_MAX), "setFloat at a wrapped index");
+    TEST_ASSERT_EQUAL_MESSAGE(0, G.setUint16(42, SIZE_MAX), "setUint16 at a wrapped index");
+    TEST_ASSERT_FALSE_MESSAGE(G.setCoils(std::vector<bool>{true, true}, SIZE_MAX), "vector coils set at a wrapped index");
+    TEST_ASSERT_EQUAL(5, G.regCount);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_codec_rtu);
     RUN_TEST(test_codec_tcp);
+    RUN_TEST(test_codec_encode_rejects_truncated);
+    RUN_TEST(test_codec_register_response_bounded);
     RUN_TEST(test_codec_read_coils_bytecount_overflow);
     RUN_TEST(test_codec_write_multiple_regcount_validation);
     RUN_TEST(test_codec_exception_edge_cases);
@@ -1930,5 +2060,8 @@ int main(void) {
     RUN_TEST(test_conversion_capacity_limits);
     RUN_TEST(test_conversion_insufficient_data);
     RUN_TEST(test_conversion_mixed_with_raw_api);
+    RUN_TEST(test_codec_pdu_encoder_bounds_reg_count);
+    RUN_TEST(test_bytebuffer_read_only_not_writable);
+    RUN_TEST(test_bounds_checks_dont_wrap); // Last: crashed before the fix
     UNITY_END();
 }

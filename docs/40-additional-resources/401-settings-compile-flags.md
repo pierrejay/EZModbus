@@ -142,7 +142,7 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
     * Default: undefined = no logs (no value, just a flag)
 * **`EZMODBUS_MAX_DEBUG_MSG_SIZE`**
     * Max length of debug message including null terminator (char)
-    * Default: 256
+    * Default: 256 (minimum: 32)
 
 ### ModbusLogger.hpp
 
@@ -151,7 +151,7 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
     * Default: 16
 * **`EZMODBUS_LOG_MAX_MSG_SIZE`**
     * Maximum length for a formatted message (char)
-    * Default: 256
+    * Default: 256 (minimum: 16)
 * **`EZMODBUS_LOG_TASK_PRIORITY`**
     * Priority of Log task
     * Default: 1

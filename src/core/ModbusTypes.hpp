@@ -150,23 +150,24 @@ private:
 class ByteBuffer {
 public:
     ByteBuffer() noexcept
-    : _data(nullptr), _size(0), _cap(0) {}
+    : _data(nullptr), _size(0), _cap(0), _readOnly(false) {}
 
     /* @brief Construct a read/write ByteBuffer.
      * @param ptr The pointer to the buffer.
      * @param capacity The capacity of the buffer.
      */
     ByteBuffer(uint8_t* ptr, size_t capacity) noexcept
-        : _data(ptr), _size(0), _cap(capacity) {
+        : _data(ptr), _size(0), _cap(capacity), _readOnly(false) {
         memset(_data, 0, _cap);
     }
 
     /* @brief Construct a READ-ONLY ByteBuffer.
      * @param ptr The pointer to the buffer.
      * @param size The size of the buffer.
+     * @note The writing methods fail on it (don't write through the non-const iterators either)
      */
     ByteBuffer(const uint8_t* ptr, size_t size) noexcept
-        : _data(const_cast<uint8_t*>(ptr)), _size(size), _cap(size) {
+        : _data(const_cast<uint8_t*>(ptr)), _size(size), _cap(size), _readOnly(true) {
     }
 
     // No copy allowed
@@ -211,7 +212,7 @@ public:
 
     ByteBuffer slice(size_t offset, size_t length) const {
         if (!_data || offset > _size) return ByteBuffer();
-        if (offset + length > _size) length = _size - offset;
+        if (length > _size - offset) length = _size - offset; // Not offset + length: could wrap
         return ByteBuffer(static_cast<const uint8_t*>(_data + offset), length);  // <- read-only ctor!
     }
 
@@ -239,7 +240,7 @@ public:
         return true;
     }
     bool push_back(const uint8_t* buf, size_t len) { // Atomic operation: all bytes in buf will be written or none
-        if (_size + len > _cap || !_data) return false;
+        if (len > _cap - _size || !_data) return false;
         memcpy(_data + _size, buf, len);
         _size += len;
         return true;
@@ -248,14 +249,14 @@ public:
     // ARBITRARY POSITION WRITING
 
     bool write_at(size_t pos, uint8_t b) {
-        if (pos >= _cap || !_data) return false;
+        if (pos >= _cap || !_data || _readOnly) return false;
         _data[pos] = b;
         if (pos >= _size) _size = pos + 1;
         return true;
     }
 
     bool write_at(size_t pos, const uint8_t* buf, size_t len) {
-        if (pos + len > _cap || !_data) return false;
+        if (pos > _cap || len > _cap - pos || !_data || _readOnly) return false;
         memcpy(_data + pos, buf, len);
         if (pos + len > _size) _size = pos + len;
         return true;
@@ -264,7 +265,7 @@ public:
     // CONSUME THE FIRST/LAST N BYTES WHILE KEEPING THE CAPACITY
 
     bool pop_front(size_t n) {
-        if (n > _size) return false;
+        if (n > _size || _readOnly) return false;
         if (n) {
             memmove(_data, _data + n, _size - n);
             _size -= n;
@@ -282,6 +283,7 @@ private:
     uint8_t* _data;
     size_t   _size;
     size_t   _cap;
+    bool     _readOnly; // Built on a const source: the data can't be written (size changes only)
 };
 
 } // namespace ModbusTypeDef

@@ -550,7 +550,7 @@ inline bool Modbus::Frame::setCoils(const uint16_t* src, size_t len) {
     * @return true if successful, false if position is out of bounds
     */
 inline bool Modbus::Frame::setRegisters(const uint16_t* src, size_t len, size_t startRegIndex) {
-    if (!src || len == 0 || startRegIndex + len > FRAME_DATASIZE) return false;
+    if (!src || len == 0 || startRegIndex > FRAME_DATASIZE || len > FRAME_DATASIZE - startRegIndex) return false;
     
     // Copy registers directly to specified position
     memcpy(&data[startRegIndex], src, len * sizeof(uint16_t));
@@ -564,7 +564,7 @@ inline bool Modbus::Frame::setRegisters(const uint16_t* src, size_t len, size_t 
     * @return true if successful, false if position is out of bounds
     */
 inline bool Modbus::Frame::setCoils(const std::vector<bool>& src, size_t startCoilIndex) {
-    if (src.empty() || startCoilIndex + src.size() > FRAME_DATASIZE * 16) return false;
+    if (src.empty() || startCoilIndex > FRAME_DATASIZE * 16 || src.size() > FRAME_DATASIZE * 16 - startCoilIndex) return false;
     
     // Set each coil bit individually at specified position
     for (size_t i = 0; i < src.size(); ++i) {
@@ -589,7 +589,7 @@ inline bool Modbus::Frame::setCoils(const std::vector<bool>& src, size_t startCo
     * @return true if successful, false if position is out of bounds
     */
 inline bool Modbus::Frame::setCoils(const bool* src, size_t len, size_t startCoilIndex) {
-    if (!src || len == 0 || startCoilIndex + len > FRAME_DATASIZE * 16) return false;
+    if (!src || len == 0 || startCoilIndex > FRAME_DATASIZE * 16 || len > FRAME_DATASIZE * 16 - startCoilIndex) return false;
     
     // Set each coil bit individually at specified position
     for (size_t i = 0; i < len; ++i) {
@@ -617,7 +617,7 @@ inline bool Modbus::Frame::setCoils(const bool* src, size_t len, size_t startCoi
     * @return true if range is within bounds, false otherwise
     */
 inline bool Modbus::Frame::checkDataBounds(size_t startIdx, size_t count) const {
-    return startIdx + count <= FRAME_DATASIZE;
+    return startIdx <= FRAME_DATASIZE && count <= FRAME_DATASIZE - startIdx; // Not startIdx + count: could wrap
 }
 
 /* @brief Set a float value at specified register index with endianness support

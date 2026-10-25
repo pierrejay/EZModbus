@@ -451,8 +451,10 @@ RTU::Result RTU::handleUartEvent(const uart_event_t& event) {
                 }
 
                 if (bytesActuallyRead == 0) {
-                    // This case (expected data but read 0 bytes without error) should be rare with 
-                    // event-driven reads. Just print a log and skip the event.
+                    // This case (expected data but read 0 bytes without error) should be rare with
+                    // event-driven reads (e.g. driver buffer flushed meanwhile). Drop the space
+                    // reserved for the event, print a log and skip the event.
+                    _rxBuffer.trim(currentSize);
                     Modbus::Debug::LOG_MSGF("Warning: read no bytes from UART, expected %d", toReadFromEvent);
                 }
             }

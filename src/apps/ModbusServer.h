@@ -150,11 +150,11 @@ public:
     Result addWord(const Word& word);
     Result addWords(const std::vector<Word>& words);
     Result addWords(const Word* words, size_t count);
-    Word getWord(Modbus::RegisterType type, uint16_t startAddr);
+    Word getWord(Modbus::RegisterType type, uint16_t address); // Word holding this address
     
     bool isBusy();
 
-    uint8_t getSlaveId() const { return _serverId; }
+    uint8_t getSlaveId() const { return (uint8_t)_serverId; }
     void setSlaveId(uint8_t id);
 
 private:
@@ -178,7 +178,7 @@ private:
     size_t _interfaceCount = 0;
 
     // Server configuration
-    uint8_t _serverId;
+    std::atomic<uint32_t> _serverId; // Written under the mutex, read before taking it (see handleRequest())
     bool _rejectUndefined; // If false, undefined registers will be silently ignored (no exception returned)
     bool _isInitialized = false;
     uint32_t _reqMutexTimeoutMs; // Request mutex timeout in milliseconds
@@ -196,6 +196,7 @@ private:
 
     // Request handlers
     Result handleRequest(const Modbus::Frame& request, ModbusInterface::IInterface& sourceInterface);
+    bool isAddressedToUs(const Modbus::Frame& request, ModbusInterface::IInterface& sourceInterface) const;
     Result handleRead(const Modbus::Frame& request, Modbus::Frame& response);
     Result handleWrite(const Modbus::Frame& request, Modbus::Frame& response);
     Result sendResponse(const Modbus::Frame& response, ModbusInterface::IInterface& targetInterface);

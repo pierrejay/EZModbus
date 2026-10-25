@@ -142,8 +142,8 @@ namespace ModbusHAL {
 
         ~UART();
 
-        // Lifecycle
-        esp_err_t begin();
+        // Lifecycle (a failed begin() leaves the object unchanged)
+        esp_err_t begin(QueueHandle_t* outEventQueue = nullptr, int intrAllocFlags = 0); // Optionally returns the driver's event queue
         void end();
 
         // Runtime configuration
@@ -396,7 +396,7 @@ namespace Modbus {
         Result addWords(const std::vector<Word>& words);
         Result addWords(const Word* words, size_t count);
         Result clearAllWords();
-        Word getWord(RegisterType type, uint16_t startAddr);
+        Word getWord(RegisterType type, uint16_t address); // Word holding this address
 
         bool isBusy();
         uint8_t getSlaveId() const;

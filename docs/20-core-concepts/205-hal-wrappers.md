@@ -156,7 +156,7 @@ uart.setDataBits(UART_DATA_7_BITS);
 uart.setConfig(ModbusHAL::UART::makeConfig(UART_DATA_8_BITS, UART_PARITY_ODD, UART_STOP_BITS_1));
 ```
 
-If the driver is already running, changes are applied immediately via `uart_param_config()` without requiring a restart. If called before `begin()`, the values are stored and applied at startup.
+If the driver is already running, changes are applied immediately via `uart_param_config()` without requiring a restart. If called before `begin()`, the values are stored and applied at startup. A setting refused by the running driver (e.g. an unachievable baud rate) returns an error and leaves the previous one in place.
 
 !!! warning
     Reconfiguring the UART while a frame is in transit will corrupt it - `uart_param_config()` resets the hardware FIFOs internally. In practice this is harmless: the corrupted frame will fail its CRC check and be silently discarded, just like any other bus glitch. However, if both sides of the bus need to change config (e.g. switching from 9600 8N1 to 19200 8E1), make sure to reconfigure **all** peers before sending the next request, otherwise the mismatch will cause repeated CRC failures.

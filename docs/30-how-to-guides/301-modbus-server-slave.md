@@ -86,7 +86,7 @@ The default behaviour ensures 100% request hit rate but may be prone to deadlock
 
 ### Changing the Slave ID at runtime
 
-The server's Slave ID can be changed at runtime using `setSlaveId()`. This is thread-safe: the method acquires the server mutex, so it will block until any in-flight request completes before updating the ID.
+The server's Slave ID can be changed at runtime using `setSlaveId()`. This is thread-safe: the method acquires the server mutex, so it will block until any in-flight request completes before updating the ID. Once it returns, requests for the old ID are ignored, even those already waiting.
 
 ```cpp
 server.setSlaveId(newId);
@@ -121,6 +121,7 @@ The following process is observed to optimize computation overhead:
 
     * Ideally do all `Word` additions to the store **before calling** `Server::begin()` (especially on servers exposing a large number of Words).
     * **Always monitor** the return value of `Server::addWord` especially if you add Words while the `Server` is running to be sure to catch any detect conflicts.
+    * `getWord()` isn't synchronized with `addWord()` / `addWords()` / `clearAllWords()`: if you change the store while the `Server` is running, call them from the same task.
 
 ### Capacity limit
 
@@ -139,7 +140,7 @@ On ESP32, the `DynamicWordStore` will be automatically added to PSRAM (if enable
 To ease the initialization process, the `addWords(Word* words, size_t count)` method will add several words from a buffer to the server.
 
 !!! note
-    This method is atomic, which means all Words will be added or none. If there's a validation issue with **any** of the Words you submit, it will return an error (`ERR_WORD_...`) and no Word will be stored consequently. The log trace will display which invalid Word returned the error first:
+    This method is atomic, which means all Words will be added or none. If there's a validation issue with **any** of the Words you submit (including an overlap, checked even before `begin()`), it will return an error (`ERR_WORD_...`) and no Word will be stored consequently. The log trace will display which invalid Word returned the error first:
 
     ```
     [ModbusServer.cpp::addWords:110] Error: Malformed handlers (holding register 23-24)

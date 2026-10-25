@@ -95,7 +95,7 @@ private:
     uint64_t _silenceTimeUs = 0;   // Sets the silence time to observe between consecutive frames (RX + TX)
     uint64_t _lastTxTimeUs = 0; // Last time a frame was sent (used to enforce the silence time for TX)
     uint64_t _lastRxByteTimeUs = 0; // Last time bytes were pulled into _rxBuffer (frame-gap backstop, see rxTxTask)
-    bool _isInitialized = false;
+    std::atomic<uint32_t> _isInitialized{0}; // Read by the rxTxTask & the API callers
 
     // Data buffers & protection
     std::array<uint8_t, ModbusCodec::RTU::MAX_FRAME_SIZE> _rxBuf;

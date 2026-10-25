@@ -1439,35 +1439,21 @@ void test_broadcast() {
 
 
 // TEST_CONCURRENT_CALLS DATA STRUCTURES & TASKS
+// Two tasks (one per core when there are two) send a synchronous request at the same time: the
+// client has a single request slot, so one gets SUCCESS and the other ERR_BUSY.
 
-// Second task's core affinity: on single-core targets (e.g. ESP32-C6) there is no core 1,
-// so both tasks run on core 0 (pinning to 1 would trip a configASSERT).
-#ifdef CONFIG_FREERTOS_UNICORE
-    #define TEST_SECOND_CORE 0
-#else
-    #define TEST_SECOND_CORE 1
-#endif
-
-// Synchronization data structure
 struct SyncData {
     SemaphoreHandle_t startSignal;
     SemaphoreHandle_t resultsMutex;
-    SemaphoreHandle_t doneSignal;
-    int nextSlot;                        // Next result slot to claim (0 then 1), by task not by core
-    Modbus::Client::Result core0Result;  // Result of the 1st task (slot 0)
-    Modbus::Client::Result core1Result;  // Result of the 2nd task (slot 1)
+    SemaphoreHandle_t doneSignal;  // Counting: given once by each task
+    int nextSlot;                  // Next result slot to claim (per task, not per core)
+    Modbus::Client::Result results[2];
 };
 
-// Task executed by each concurrent worker (may share a core on single-core targets)
-auto concurrentTask = [](void* pv) {
+static void concurrentTask(void* pv) {
     auto sd = static_cast<SyncData*>(pv);
-    int core = xPortGetCoreID();
-    Modbus::Logger::logf("[Core %d] Ready, waiting for start\n", core);
-
-    // Wait for the start signal
     xSemaphoreTake(sd->startSignal, portMAX_DELAY);
 
-    // Build the Modbus request
     Modbus::Frame req {
         .type         = Modbus::REQUEST,
         .fc           = Modbus::READ_HOLDING_REGISTERS,
@@ -1478,75 +1464,54 @@ auto concurrentTask = [](void* pv) {
         .exceptionCode= Modbus::NULL_EXCEPTION
     };
     Modbus::Frame resp;
+    auto result = client.sendRequest(req, resp, nullptr);
 
-    // In blocking mode for simplicity
-    auto result = client.sendRequest(req, resp, nullptr); // Corrected: removed 'true', third arg is tracker*
-    Modbus::Logger::logf("[Core %d] sendRequest -> %s\n", core,
-            result == Modbus::Client::SUCCESS ? "SUCCESS" : 
-            (result == Modbus::Client::ERR_BUSY ? "ERR_BUSY" : Modbus::Client::toString(result)) ); // More detailed error
-
-    // Store the result in the next free slot (claimed atomically). Slots are per-task, not
-    // per-core, so this stays correct when both tasks share core 0 on single-core targets.
     xSemaphoreTake(sd->resultsMutex, portMAX_DELAY);
-    if (sd->nextSlot++ == 0) sd->core0Result = result;
-    else                     sd->core1Result = result;
+    sd->results[sd->nextSlot++] = result;
     xSemaphoreGive(sd->resultsMutex);
-
-    // Signal the end
     xSemaphoreGive(sd->doneSignal);
     vTaskDelete(NULL);
-};
+}
 
 void test_concurrent_calls() {
     Modbus::Logger::logln();
-    Modbus::Logger::logln("TEST_CONCURRENT_CALLS: STRICT THREAD SAFETY WITH 2 SYNCHRONIZED CALLS");
+    Modbus::Logger::logln("TEST_CONCURRENT_CALLS: 2 SYNCHRONIZED CALLS, ONE GETS ERR_BUSY");
 
     static SyncData sync = {};
-    sync.startSignal   = xSemaphoreCreateCounting(2, 0);
-    sync.resultsMutex  = xSemaphoreCreateMutex();
-    sync.doneSignal    = xSemaphoreCreateCounting(2, 0);
-    sync.nextSlot      = 0;
-    sync.core0Result   = Modbus::Client::ERR_BUSY;
-    sync.core1Result   = Modbus::Client::ERR_BUSY;
+    sync.startSignal  = xSemaphoreCreateCounting(2, 0);
+    sync.resultsMutex = xSemaphoreCreateMutex();
+    sync.doneSignal   = xSemaphoreCreateCounting(2, 0);
+    sync.nextSlot     = 0;
+    sync.results[0]   = Modbus::Client::NODATA;
+    sync.results[1]   = Modbus::Client::NODATA;
+    TEST_ASSERT_NOT_NULL(sync.startSignal);
+    TEST_ASSERT_NOT_NULL(sync.resultsMutex);
+    TEST_ASSERT_NOT_NULL(sync.doneSignal);
 
-    // Launch the first task on core 0
-    xTaskCreatePinnedToCore(
-        [](void* p){ concurrentTask(p); },
-        "Task0", 8192, &sync, 5, nullptr, 0
-    );
-    // … and the second on core 1 (or core 0 on single-core targets like the ESP32-C6)
-    xTaskCreatePinnedToCore(
-        [](void* p){ concurrentTask(p); },
-        "Task1", 8192, &sync, 5, nullptr, TEST_SECOND_CORE
-    );
+    const BaseType_t secondCore = (portNUM_PROCESSORS > 1) ? 1 : 0;
+    int started = 0;
+    started += xTaskCreatePinnedToCore(concurrentTask, "Task0", 4096, &sync, 5, nullptr, 0) == pdPASS;
+    started += xTaskCreatePinnedToCore(concurrentTask, "Task1", 4096, &sync, 5, nullptr, secondCore) == pdPASS;
+    vTaskDelay(pdMS_TO_TICKS(100)); // Both tasks waiting for the start signal
 
-    // Small delay to ensure the tasks are ready
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    // Launch the two tasks simultaneously
-    xSemaphoreGive(sync.startSignal);
-    xSemaphoreGive(sync.startSignal);
-
-    // Wait for the two tasks to finish
-    xSemaphoreTake(sync.doneSignal, portMAX_DELAY);
-    xSemaphoreTake(sync.doneSignal, portMAX_DELAY);
-
-    // Check the results
-    Modbus::Logger::logln("=== TEST_CONCURRENT_CALLS Results ===");
-    Modbus::Logger::logf("Task 0: %s\n", sync.core0Result == Modbus::Client::SUCCESS ? "SUCCESS" : "ERR_BUSY");
-    Modbus::Logger::logf("Task 1: %s\n", sync.core1Result == Modbus::Client::SUCCESS ? "SUCCESS" : "ERR_BUSY");
+    for (int i = 0; i < started; i++) xSemaphoreGive(sync.startSignal);
+    int done = 0;
+    for (int i = 0; i < started; i++) {
+        done += xSemaphoreTake(sync.doneSignal, pdMS_TO_TICKS(3 * Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS)) == pdTRUE;
+    }
+    Modbus::Logger::logf("Results: %s / %s\n", Modbus::Client::toString(sync.results[0]),
+                         Modbus::Client::toString(sync.results[1]));
 
     TEST_ASSERT_START();
-    TEST_ASSERT_TRUE(
-        (sync.core0Result == Modbus::Client::SUCCESS && sync.core1Result == Modbus::Client::ERR_BUSY) ||
-        (sync.core0Result == Modbus::Client::ERR_BUSY  && sync.core1Result == Modbus::Client::SUCCESS)
-    );
+    TEST_ASSERT_EQUAL_MESSAGE(2, started, "concurrent task creation failed");
+    TEST_ASSERT_EQUAL_MESSAGE(2, done, "concurrent task didn't return");
+    bool oneEach = (sync.results[0] == Modbus::Client::SUCCESS && sync.results[1] == Modbus::Client::ERR_BUSY) ||
+                   (sync.results[0] == Modbus::Client::ERR_BUSY && sync.results[1] == Modbus::Client::SUCCESS);
+    TEST_ASSERT_TRUE_MESSAGE(oneEach, "expected one SUCCESS and one ERR_BUSY");
 
-    // Cleanup
     vSemaphoreDelete(sync.startSignal);
     vSemaphoreDelete(sync.resultsMutex);
     vSemaphoreDelete(sync.doneSignal);
-
     vTaskDelay(pdMS_TO_TICKS(50));
 }
 
@@ -1655,6 +1620,114 @@ void test_callback_timeout() {
     mbt_uart.flush_input();
     vTaskResume(serverRxTask);
     vTaskDelay(pdMS_TO_TICKS(100));
+}
+
+// ===================================================================================
+// RX ROBUSTNESS TESTS
+// ===================================================================================
+
+// Regression: a UART data event whose bytes were no longer in the driver (0-byte read) still grew
+// the RX buffer: the stale bytes were counted as received and corrupted the next frame. The server
+// task handles that event on an empty driver buffer, then is held before its frame-gap backstop
+// (next tick) can discard the stale bytes, so that the request's event is handled right after.
+void test_rx_zero_byte_read_keeps_buffer() {
+    TaskHandle_t serverRxTask = mbt.getRxTxTaskHandle();
+    QueueHandle_t serverEvents = mbt_uart.getRegisteredEventQueue();
+    uart_event_t ghost = {};
+    ghost.type = UART_DATA;
+    ghost.size = 5;
+    vTaskDelay(1); // Start of a tick
+    bool injected = xQueueSend(serverEvents, &ghost, 0) == pdTRUE;
+    while (uxQueueMessagesWaiting(serverEvents) > 0) { }
+    delayMicroseconds(100); // Ghost event handled, server task back waiting on its queue
+    vTaskSuspend(serverRxTask);
+
+    serverHoldingRegisters[100] = 0x1234;
+    Modbus::Frame req = {
+        .type = Modbus::REQUEST,
+        .fc = Modbus::READ_HOLDING_REGISTERS,
+        .slaveId = TEST_SLAVE_ID,
+        .regAddress = 100,
+        .regCount = 1,
+        .data = {},
+        .exceptionCode = Modbus::NULL_EXCEPTION
+    };
+    Modbus::Frame resp;
+    Modbus::Client::Result tracker = Modbus::Client::NODATA;
+    auto sendRes = client.sendRequest(req, resp, &tracker);
+    vTaskDelay(pdMS_TO_TICKS(20)); // Request on the wire, queued behind the ghost event
+    vTaskResume(serverRxTask);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (tracker == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS + 500) {
+        vTaskDelay(1);
+    }
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(injected, "ghost event not injected");
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, sendRes);
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, tracker, "request after a 0-byte read not answered");
+    TEST_ASSERT_EQUAL_UINT16(0x1234, resp.data[0]);
+}
+
+// Regression: setTimeoutMicroseconds() cast the symbol count to uint8_t before saturating it: a
+// long timeout wrapped around to a short one (264 symbols -> 8 instead of the maximum). The applied
+// threshold is read back from the frame-gap backstop, which includes it.
+void test_uart_long_timeout_saturates() {
+    const uint64_t usPerSymbol = (11ULL * 1000000ULL) / ezm_uart.getBaudrate();
+    const uint64_t originalGapUs = ezm_uart.getRxFrameGapTimeoutUs();
+    esp_err_t baseErr = ezm_uart.setTimeoutThreshold(1);
+    const uint64_t baseGapUs = ezm_uart.getRxFrameGapTimeoutUs(); // Threshold of 1 symbol
+    esp_err_t longErr = ezm_uart.setTimeoutMicroseconds(264 * usPerSymbol);
+    const uint64_t appliedSymbols = (ezm_uart.getRxFrameGapTimeoutUs() - baseGapUs) / usPerSymbol + 1;
+    // Restore the interface's threshold
+    ezm_uart.setTimeoutThreshold((originalGapUs - baseGapUs) / usPerSymbol + 1);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(ESP_OK, baseErr);
+    TEST_ASSERT_EQUAL(ESP_OK, longErr);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(ModbusHAL::UART::MAX_TOUT_THRESH - 1, appliedSymbols, "long timeout not saturated");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(originalGapUs, ezm_uart.getRxFrameGapTimeoutUs(), "threshold not restored");
+}
+
+// Regression: begin(&queue) never wrote the driver's event queue to its parameter. Spare HAL on
+// UART0 (console on USB), pins left unchanged.
+void test_uart_begin_returns_event_queue() {
+    ModbusHAL::UART::IDFConfig cfg;
+    cfg.uartNum = UART_NUM_0;
+    ModbusHAL::UART spare(cfg);
+    QueueHandle_t queue = nullptr;
+    esp_err_t err = spare.begin(&queue);
+    QueueHandle_t registered = spare.getRegisteredEventQueue();
+    spare.end();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(ESP_OK, err);
+    TEST_ASSERT_NOT_NULL(registered);
+    TEST_ASSERT_EQUAL_PTR_MESSAGE(registered, queue, "event queue not returned");
+}
+
+// Regression: setBaudrate() / setConfig() stored the new value before applying it: when the
+// driver refused it, getBaudrate() / getConfig() reported it anyway (used for the RTU timings).
+// Spare HAL on UART0, as above.
+void test_uart_rejected_setting_keeps_previous() {
+    ModbusHAL::UART::IDFConfig cfg;
+    cfg.uartNum = UART_NUM_0;
+    ModbusHAL::UART spare(cfg);
+    esp_err_t beginErr = spare.begin();
+    const uint32_t baudBefore = spare.getBaudrate();
+    const uint32_t configBefore = spare.getConfig();
+    esp_err_t baudErr = spare.setBaudrate(1);
+    uint32_t baudAfter = spare.getBaudrate();
+    esp_err_t configErr = spare.setConfig(0x00FF00FF); // Invalid data bits
+    uint32_t configAfter = spare.getConfig();
+    spare.end();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(ESP_OK, beginErr);
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(ESP_OK, baudErr, "1 baud accepted by the driver");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(baudBefore, baudAfter, "rejected baud rate kept");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(ESP_OK, configErr, "invalid config accepted by the driver");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(configBefore, configAfter, "rejected config kept");
 }
 
 // ===================================================================================
@@ -1958,7 +2031,7 @@ void setup() {
     RUN_TEST(test_broadcast);
     RUN_TEST(test_callback_success);
     RUN_TEST(test_callback_timeout);
-    // RUN_TEST(test_concurrent_calls);
+    RUN_TEST(test_concurrent_calls);
 
     // Helper template tests
     RUN_TEST(test_helper_read_uint16_holding_registers);
@@ -1981,6 +2054,14 @@ void setup() {
     RUN_TEST(test_helper_null_buffer);
     RUN_TEST(test_helper_qty_zero);
     RUN_TEST(test_helper_write_readonly_regtype);
+    RUN_TEST(test_helper_write_oversized_qty);
+    RUN_TEST(test_helper_write_nan_rejected);
+
+    // RX robustness tests
+    RUN_TEST(test_rx_zero_byte_read_keeps_buffer);
+    RUN_TEST(test_uart_long_timeout_saturates);
+    RUN_TEST(test_uart_begin_returns_event_queue);
+    RUN_TEST(test_uart_rejected_setting_keeps_previous);
 
     // Runtime reconfiguration tests
     RUN_TEST(test_runtime_uart_reconfig);
