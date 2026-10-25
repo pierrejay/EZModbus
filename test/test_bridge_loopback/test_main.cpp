@@ -1372,7 +1372,8 @@ void tearDown() {
 
 // Regression: the Logger's first use wasn't serialized: two tasks logging for the first time at
 // once could both initialize it (two log tasks, a leaked queue). Probed at the start of setup(),
-// before anything logs: two tasks, one per core, log at the same time.
+// before anything logs: two tasks, one per core, log at the same time. Log tasks are counted by
+// name: other tasks may end meanwhile (e.g. Arduino's main task on the C6).
 static int loggerTasksCreated = -1;
 static StaticEventGroup_t loggerRaceStartBuf;
 static EventGroupHandle_t loggerRaceStart;
@@ -1388,9 +1389,17 @@ static void loggerRacer(void* arg) {
     vTaskDelete(nullptr);
 }
 
+static int countLogTasks() {
+    static TaskStatus_t tasks[32];
+    UBaseType_t n = uxTaskGetSystemState(tasks, 32, nullptr);
+    int count = 0;
+    for (UBaseType_t i = 0; i < n; i++) count += strcmp(tasks[i].pcTaskName, "LogTask") == 0;
+    return count;
+}
+
 static void probeLoggerFirstUse() {
     loggerRaceStart = xEventGroupCreateStatic(&loggerRaceStartBuf);
-    UBaseType_t tasksBefore = uxTaskGetNumberOfTasks();
+    int tasksBefore = countLogTasks();
     for (int i = 0; i < 2; i++) {
         xTaskCreateStaticPinnedToCore(loggerRacer, "loggerRacer", sizeof(loggerRacerStack[i]) / sizeof(StackType_t),
                                       (void*)(intptr_t)i, 2, loggerRacerStack[i], &loggerRacerTcb[i],
@@ -1401,7 +1410,7 @@ static void probeLoggerFirstUse() {
     uint32_t t0 = Modbus::TIME_MS();
     while (!(loggerRacerDone[0] && loggerRacerDone[1]) && Modbus::TIME_MS() - t0 < 1000) vTaskDelay(1);
     vTaskDelay(pdMS_TO_TICKS(50)); // Racers deleted
-    loggerTasksCreated = (int)uxTaskGetNumberOfTasks() - (int)tasksBefore;
+    loggerTasksCreated = countLogTasks() - tasksBefore;
 }
 
 void test_logger_first_use_starts_one_task() {

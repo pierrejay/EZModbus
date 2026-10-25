@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include <WiFi.h>
+#include "esp_netif.h"
 #include <unity.h>
 #include <EZModbus.h>
 #include <drivers/ModbusHAL_TCP.h>
@@ -14,12 +14,7 @@
     #define TEST_ASSERT_START() { vTaskDelay(pdMS_TO_TICKS(50)); }
 #endif
 
-// WiFi configuration
-// Configuration WiFi
-static constexpr char     WIFI_SSID[]   = "ESP32-LOOP";
-static constexpr char     WIFI_PASS[]   = "loopesp32";
-// SoftAP default IP
-static IPAddress SOFTAP_IP    = IPAddress(192, 168, 4, 1);
+// Network: every test runs over the lwIP loopback (127.0.0.1), no Wi-Fi needed
 static constexpr uint16_t  MODBUS_PORT  = 502;
 static constexpr char LOOPBACK_IP_STR[] = "127.0.0.1";
 static IPAddress LOOPBACK_IP = IPAddress(127, 0, 0, 1);
@@ -2239,9 +2234,13 @@ void test_server_rx_reused_socket_mid_frame() {
     const int serverSockA = rawServerSideSocket(ISOLATED_SERVER_TEST_PORT, sockA);
     TEST_ASSERT_TRUE_MESSAGE(serverSockA >= 0, "client A not accepted");
 
-    // Hold the interface task while it waits for the rest (blocked, so not holding a HAL lock)
+    // Hold the interface task while it waits for the rest (blocked, so not holding a HAL lock).
+    // Polled below its priority: on a single core, it runs (and blocks again) before each check
     TaskHandle_t ifTask = isolatedServerIf.getRxTxTaskHandle();
+    const UBaseType_t testPriority = uxTaskPriorityGet(nullptr);
+    vTaskPrioritySet(nullptr, tskIDLE_PRIORITY);
     for (int i = 0; i < 100 && eTaskGetState(ifTask) != eBlocked; i++) vTaskDelay(1);
+    vTaskPrioritySet(nullptr, testPriority);
     TEST_ASSERT_EQUAL_MESSAGE(eBlocked, eTaskGetState(ifTask), "interface task not waiting");
     vTaskSuspend(ifTask);
 
@@ -3583,13 +3582,8 @@ void setup() {
     Serial.setRxBufferSize(2048);
     Serial.begin(115200);
 
-    // Initialize ModbusTestServer TCP server
-    // WiFi.setSleep(WIFI_PS_NONE);
-    // 1) Démarrage du SoftAP
-    WiFi.mode(WIFI_AP);
-    WiFi.softAPConfig(SOFTAP_IP, SOFTAP_IP, IPAddress(255,255,255,0));
-    WiFi.softAP(WIFI_SSID, WIFI_PASS);
-    Modbus::Logger::logf("[setup] SoftAP IP : %s\n", WiFi.softAPIP().toString().c_str());
+    // lwIP stack only (loopback): a Wi-Fi SoftAP would take the heap the test server task needs on the C6
+    ESP_ERROR_CHECK(esp_netif_init());
 
     vTaskDelay(pdMS_TO_TICKS(1000));
 
