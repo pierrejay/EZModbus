@@ -93,6 +93,8 @@ void Client::PendingRequest::onTxResult(ModbusInterface::IInterface::Result resu
 
 /* @brief Response received from the interface
  * @return True if it matched the active request & completed it
+ * @note A request whose TX result isn't back hasn't been sent: the frame answers an earlier one
+ *       (e.g. a request started while that response is delivered to the interface's consumers)
  * @note Responses are matched by slave ID & FC (TCP responses are already paired by transaction ID).
  *       Over RTU, a response arriving after its request timed out can't be told apart from the
  *       answer to the next request: the timeout must exceed the slave's worst-case response time.
@@ -103,7 +105,7 @@ bool Client::PendingRequest::onResponse(const Modbus::Frame& response) {
     Completion completion;
     {
         Lock guard(_mutex);
-        if (!_active || response.type != Modbus::RESPONSE) return false;
+        if (!_active || _txPending || response.type != Modbus::RESPONSE) return false;
         if (Modbus::isBroadcastId(_meta.slaveId)) return false; // No response to a broadcast
         if (!_client->_interface.checkCatchAllSlaveIds() && response.slaveId != _meta.slaveId) return false;
         if (response.fc != _meta.fc) return false;
