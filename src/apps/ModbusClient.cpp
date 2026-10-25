@@ -5,6 +5,11 @@
 
 #include "ModbusClient.h"
 
+// Request timeouts are handled on the FreeRTOS timer task: with debug traces, it needs ~2.5 KB
+#if defined(EZMODBUS_DEBUG) && defined(CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH) && CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH < 3072
+    #warning "EZMODBUS_DEBUG: set CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH to 4096 (timer task stack too small for debug traces)"
+#endif
+
 namespace Modbus {
 
 // ===================================================================================
