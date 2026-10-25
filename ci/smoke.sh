@@ -27,9 +27,10 @@ BUILD="build"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -p) PORT="${2:-}"; shift 2 ;;
-        -i) IDF="${2:-}"; shift 2 ;;
-        -t) TARGET="${2:-}"; shift 2 ;;
+        -p|-i|-t)
+            if [[ $# -lt 2 ]]; then echo "ERROR: $1 needs a value" >&2; exit 2; fi
+            case "$1" in -p) PORT="$2" ;; -i) IDF="$2" ;; -t) TARGET="$2" ;; esac
+            shift 2 ;;
         --debug) BUILD="build-debug"; shift ;;
         *) echo "Unknown argument: $1" >&2; exit 2 ;;
     esac

@@ -408,14 +408,18 @@ static void burstTask(void* arg) {
 
 static void testBurst() {
     section("concurrent burst (both interfaces)");
-    BurstCtx a = { &tcpDirect, 100, 0, xTaskGetCurrentTaskHandle(), "" };
-    BurstCtx b = { &tcpGw, 101, 0, xTaskGetCurrentTaskHandle(), "" };
+    // Static: a task still running after the wait gave up keeps valid contexts
+    static BurstCtx a, b;
+    a = { &tcpDirect, 100, 0, xTaskGetCurrentTaskHandle(), "" };
+    b = { &tcpGw, 101, 0, xTaskGetCurrentTaskHandle(), "" };
     const TickType_t start = xTaskGetTickCount();
-    xTaskCreate(burstTask, "burstA", 4096, &a, 5, nullptr);
-    xTaskCreate(burstTask, "burstB", 4096, &b, 5, nullptr);
+    int started = 0;
+    started += xTaskCreate(burstTask, "burstA", 4096, &a, 5, nullptr) == pdPASS;
+    started += xTaskCreate(burstTask, "burstB", 4096, &b, 5, nullptr) == pdPASS;
+    CHECK(started == 2, "burst task creation failed");
     int done = 0;
-    while (done < 2 && ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(30000)) > 0) done++;
-    CHECK(done == 2, "burst tasks didn't finish");
+    while (done < started && ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(30000)) > 0) done++;
+    CHECK(done == started, "burst tasks didn't finish");
     CHECK(a.errors == 0, "direct: %d errors, first %s", a.errors, a.firstError);
     CHECK(b.errors == 0, "gateway: %d errors, first %s", b.errors, b.firstError);
     CHECK(hrs[100] == BURST_ITER && hrs[101] == BURST_ITER, "burst final values: %u %u", hrs[100], hrs[101]);
