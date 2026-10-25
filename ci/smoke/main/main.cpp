@@ -383,7 +383,13 @@ static void testGatewayTimeout() {
 
 // Both clients hammer the server at once (one per interface)
 #define BURST_ITER 100
-struct BurstCtx { ModbusClient* client; uint16_t addr; int errors; TaskHandle_t parent; char firstError[64]; };
+struct BurstCtx { ModbusClient* client; uint16_t addr; int errors; char firstError[64]; };
+
+// Static: a burst task still running after the wait gave up (even once app_main returned) finds
+// a valid context & completion semaphore
+static BurstCtx burstA, burstB;
+static StaticSemaphore_t burstDoneBuf;
+static SemaphoreHandle_t burstDone;
 
 static void burstError(BurstCtx* ctx, uint16_t i, const char* step, ModbusClient::Result res, Modbus::ExceptionCode exc) {
     if (ctx->errors++ == 0) {
@@ -402,23 +408,24 @@ static void burstTask(void* arg) {
         if (res != ModbusClient::SUCCESS || exc != Modbus::NULL_EXCEPTION) { burstError(ctx, i, "read", res, exc); continue; }
         if (back != i) burstError(ctx, i, "read value", res, exc);
     }
-    xTaskNotifyGive(ctx->parent);
+    xSemaphoreGive(burstDone);
     vTaskDelete(nullptr);
 }
 
 static void testBurst() {
     section("concurrent burst (both interfaces)");
-    // Static: a task still running after the wait gave up keeps valid contexts
-    static BurstCtx a, b;
-    a = { &tcpDirect, 100, 0, xTaskGetCurrentTaskHandle(), "" };
-    b = { &tcpGw, 101, 0, xTaskGetCurrentTaskHandle(), "" };
+    BurstCtx& a = burstA;
+    BurstCtx& b = burstB;
+    a = { &tcpDirect, 100, 0, "" };
+    b = { &tcpGw, 101, 0, "" };
+    burstDone = xSemaphoreCreateCountingStatic(2, 0, &burstDoneBuf);
     const TickType_t start = xTaskGetTickCount();
     int started = 0;
     started += xTaskCreate(burstTask, "burstA", 4096, &a, 5, nullptr) == pdPASS;
     started += xTaskCreate(burstTask, "burstB", 4096, &b, 5, nullptr) == pdPASS;
     CHECK(started == 2, "burst task creation failed");
     int done = 0;
-    while (done < started && ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(30000)) > 0) done++;
+    while (done < started && xSemaphoreTake(burstDone, pdMS_TO_TICKS(30000)) == pdTRUE) done++;
     CHECK(done == started, "burst tasks didn't finish");
     CHECK(a.errors == 0, "direct: %d errors, first %s", a.errors, a.firstError);
     CHECK(b.errors == 0, "gateway: %d errors, first %s", b.errors, b.firstError);
