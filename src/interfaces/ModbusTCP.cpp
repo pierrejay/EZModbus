@@ -732,12 +732,17 @@ void TCP::rxTxTask(void* tcp) {
         // ----------- Transaction timeout -----------
         if (self->_currentTransaction.active) {
             uint32_t now = TIME_MS();
-            if (now - self->_currentTransaction.startMs > TCP_TRANSACTION_SAFETY_TIMEOUT_MS
-                || cleanupTxnFlag) {
-                Modbus::Debug::LOG_MSGF("Transaction %s on socket %d TID: %d",
-                    cleanupTxnFlag ? "aborted" : "timeout",
-                    self->_currentTransaction.socketNum, self->_currentTransaction.tid);
-                self->endTransaction();
+            if (now - self->_currentTransaction.startMs > TCP_TRANSACTION_SAFETY_TIMEOUT_MS || cleanupTxnFlag) {
+                // A response waiting to be sent ends its transaction itself (sent or not): until
+                // then, another request must not take its place. Checked & closed under the lock
+                // sendFrame() queues it with.
+                Lock guard(self->_txMutex);
+                if (cleanupTxnFlag || self->_txBuffer.size() == 0) {
+                    Modbus::Debug::LOG_MSGF("Transaction %s on socket %d TID: %d",
+                        cleanupTxnFlag ? "aborted" : "timeout",
+                        self->_currentTransaction.socketNum, self->_currentTransaction.tid);
+                    self->_currentTransaction.clear();
+                }
             }
         }
         cleanupTxnFlag = false; // Always reset flag here (avoids killing the next active Txn)

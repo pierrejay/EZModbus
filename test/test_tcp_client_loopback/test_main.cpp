@@ -2439,6 +2439,74 @@ void test_server_response_not_sent_to_reused_socket() {
     Modbus::Logger::logln();
 }
 
+// Regression: the application queued A's response after the safety timeout had elapsed. The
+// timeout closed A's transaction before its response was sent: request B, received meanwhile,
+// was admitted, its response refused (TX slot taken), and sending A's response then closed B's
+// transaction: B never got an answer. A's queued response must end A's transaction itself.
+static constexpr uint32_t QUEUED_RESPONSE_HANDLER_DELAY_MS = ModbusInterface::TCP::TCP_TRANSACTION_SAFETY_TIMEOUT_MS + 300;
+
+void test_server_safety_timeout_spares_queued_response() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_SERVER_SAFETY_TIMEOUT_SPARES_QUEUED_RESPONSE");
+
+    // A (address 1) is answered after the safety timeout, the others at once
+    beginIsolatedServer([](const Modbus::Frame& request) {
+        const bool slow = (request.regAddress == 1);
+        if (slow) vTaskDelay(pdMS_TO_TICKS(QUEUED_RESPONSE_HANDLER_DELAY_MS));
+        Modbus::Frame response;
+        response.clear();
+        response.type = Modbus::RESPONSE;
+        response.fc = request.fc;
+        response.slaveId = request.slaveId;
+        response.regAddress = request.regAddress;
+        response.regCount = 1;
+        response.data[0] = slow ? 0xAAAA : 0xBBBB;
+        isolatedServerIf.sendFrame(response, nullptr, nullptr);
+    });
+
+    int sockA = rawConnect(ISOLATED_SERVER_TEST_PORT);
+    int sockB = rawConnect(ISOLATED_SERVER_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sockA >= 0 && sockB >= 0, "raw connect to server failed");
+    timeval tv = { .tv_sec = (time_t)(QUEUED_RESPONSE_HANDLER_DELAY_MS / 1000 + 2), .tv_usec = 0 };
+    setsockopt(sockA, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sockB, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    // A, then B while A is being processed
+    uint8_t req[RAW_READ_HR_REQ_SIZE];
+    rawBuildReadHrRequest(req, 0x0A01, 1);
+    TEST_ASSERT_TRUE(rawSendAll(sockA, req, sizeof(req)));
+    vTaskDelay(pdMS_TO_TICKS(100));
+    rawBuildReadHrRequest(req, 0x0B01, 2);
+    TEST_ASSERT_TRUE(rawSendAll(sockB, req, sizeof(req)));
+
+    uint8_t respA[RAW_READ_HR_RESP_SIZE];
+    size_t gotA = rawRecvExact(sockA, respA, sizeof(respA));
+    uint8_t respB[9];
+    size_t gotB = rawRecvExact(sockB, respB, sizeof(respB));
+
+    // The server is free again afterwards
+    rawBuildReadHrRequest(req, 0x0C01, 2);
+    uint8_t respC[RAW_READ_HR_RESP_SIZE];
+    size_t gotC = rawSendAll(sockB, req, sizeof(req)) ? rawRecvExact(sockB, respC, sizeof(respC)) : 0;
+    ::close(sockA);
+    ::close(sockB);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(sizeof(respA), gotA, "A not answered");
+    TEST_ASSERT_EQUAL_HEX16(0x0A01, rawTid(respA));
+    TEST_ASSERT_EQUAL_HEX16(0xAAAA, rawReadHrRespValue(respA));
+    TEST_ASSERT_EQUAL_MESSAGE(sizeof(respB), gotB, "B not answered");
+    TEST_ASSERT_EQUAL_HEX16(0x0B01, rawTid(respB));
+    TEST_ASSERT_EQUAL_HEX8(0x83, respB[7]);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(Modbus::SLAVE_DEVICE_BUSY, respB[8], "B should get SLAVE_DEVICE_BUSY");
+    TEST_ASSERT_EQUAL_MESSAGE(sizeof(respC), gotC, "C not answered");
+    TEST_ASSERT_EQUAL_HEX16(0x0C01, rawTid(respC));
+    TEST_ASSERT_EQUAL_HEX16(0xBBBB, rawReadHrRespValue(respC));
+
+    Modbus::Logger::logln("TEST_SERVER_SAFETY_TIMEOUT_SPARES_QUEUED_RESPONSE - OK");
+    Modbus::Logger::logln();
+}
+
 // Regression: while assembling a frame, the interface only checked the connection after
 // reading. When client A disconnected mid-frame and client B got the same socket number,
 // B's first bytes were read then dropped: the rest of B's frame was taken for a header,
@@ -3918,6 +3986,7 @@ void setup() {
     RUN_TEST(test_server_malformed_requests_exceptions);
     RUN_TEST(test_server_unencodable_response_exception);
     RUN_TEST(test_server_response_not_sent_to_reused_socket);
+    RUN_TEST(test_server_safety_timeout_spares_queued_response);
     RUN_TEST(test_server_rx_reused_socket_mid_frame);
     RUN_TEST(test_hal_rx_notifications_never_block_send);
     RUN_TEST(test_hal_tcp_keepalive);
