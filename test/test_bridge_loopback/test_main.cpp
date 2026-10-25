@@ -1219,11 +1219,54 @@ void tearDown() {
     Serial.flush(); // Make sure all Unity logs are printed
 }
 
+// Regression: the Logger's first use wasn't serialized: two tasks logging for the first time at
+// once could both initialize it (two log tasks, a leaked queue). Probed at the start of setup(),
+// before anything logs: two tasks, one per core, log at the same time.
+static int loggerTasksCreated = -1;
+static StaticEventGroup_t loggerRaceStartBuf;
+static EventGroupHandle_t loggerRaceStart;
+static StaticTask_t loggerRacerTcb[2];
+static StackType_t loggerRacerStack[2][4096];
+static volatile bool loggerRacerDone[2];
+
+static void loggerRacer(void* arg) {
+    int idx = (int)(intptr_t)arg;
+    xEventGroupWaitBits(loggerRaceStart, BIT0, pdFALSE, pdTRUE, portMAX_DELAY);
+    Modbus::Logger::logln("[setup] Logger first use");
+    loggerRacerDone[idx] = true;
+    vTaskDelete(nullptr);
+}
+
+static void probeLoggerFirstUse() {
+    loggerRaceStart = xEventGroupCreateStatic(&loggerRaceStartBuf);
+    UBaseType_t tasksBefore = uxTaskGetNumberOfTasks();
+    for (int i = 0; i < 2; i++) {
+        xTaskCreateStaticPinnedToCore(loggerRacer, "loggerRacer", sizeof(loggerRacerStack[i]) / sizeof(StackType_t),
+                                      (void*)(intptr_t)i, 2, loggerRacerStack[i], &loggerRacerTcb[i],
+                                      i < portNUM_PROCESSORS ? i : tskNO_AFFINITY); // Single core: no race
+    }
+    vTaskDelay(pdMS_TO_TICKS(10)); // Both racers waiting
+    xEventGroupSetBits(loggerRaceStart, BIT0);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (!(loggerRacerDone[0] && loggerRacerDone[1]) && Modbus::TIME_MS() - t0 < 1000) vTaskDelay(1);
+    vTaskDelay(pdMS_TO_TICKS(50)); // Racers deleted
+    loggerTasksCreated = (int)uxTaskGetNumberOfTasks() - (int)tasksBefore;
+}
+
+void test_logger_first_use_starts_one_task() {
+#ifdef EZMODBUS_DEBUG
+    TEST_IGNORE_MESSAGE("debug build: the library logs before setup(), the probe doesn't see the first use");
+#endif
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(1, loggerTasksCreated, "tasks created by the Logger's first use");
+}
+
 void setup() {
     // Debug port
     Serial.setTxBufferSize(2048);
     Serial.setRxBufferSize(2048);
     Serial.begin(115200);
+    probeLoggerFirstUse(); // Before anything logs
     
     // Initialize UART HAL objects first (like in working RTU client/server code)
     Modbus::Logger::logln("[setup] Initializing EZModbus UART HAL...");
@@ -1274,6 +1317,7 @@ void setup() {
     // Run tests
     UNITY_BEGIN();
     
+    RUN_TEST(test_logger_first_use_starts_one_task);
     RUN_TEST(test_read_holding_register);
     RUN_TEST(test_write_holding_register);
     RUN_TEST(test_bridge_silent_slave_gateway_exception);

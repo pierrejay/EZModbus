@@ -16,6 +16,7 @@
 #include <stdarg.h>
 #include <cstdio>
 #include <cstdarg>
+#include <atomic>
 
 // Driver includes for log output
 #ifdef ARDUINO
@@ -91,32 +92,38 @@ public:
         char msg[MAX_MSG_SIZE];
     };
 
-    // Automatic initialization
+    // Automatic initialization: the first caller does it, concurrent ones wait for it
     static void begin() {
-        if (!initialized) {
-            // Create the message queue
-            logQueue = xQueueCreate(QUEUE_SIZE, sizeof(LogMessage));
-            
-            // Create event group for queue status
-            queueEventGroup = xEventGroupCreate();
-            
-            // Create the logging task
-            BaseType_t taskCreated = xTaskCreatePinnedToCore(
-                logTask,
-                "LogTask",
-                STACK_SIZE,
-                NULL,
-                TASK_PRIORITY,
-                &logTaskHandle,
-                TASK_CORE
-            );
-            
-            if (logQueue && queueEventGroup && taskCreated == pdPASS) {
-                // Initially queue is empty
-                xEventGroupSetBits(queueEventGroup, QUEUE_EMPTY_BIT);
-                initialized = true;
-            }
+        uint32_t expected = STATE_UNINIT;
+        if (!state.compare_exchange_strong(expected, STATE_INITIALIZING)) {
+            while (state == STATE_INITIALIZING) vTaskDelay(1);
+            return;
         }
+
+        // Create the message queue & the event group for queue status, before the task using them
+        logQueue = xQueueCreate(QUEUE_SIZE, sizeof(LogMessage));
+        queueEventGroup = xEventGroupCreate();
+        if (!logQueue || !queueEventGroup) {
+            releaseResources();
+            return;
+        }
+        xEventGroupSetBits(queueEventGroup, QUEUE_EMPTY_BIT); // Initially queue is empty
+
+        // Create the logging task
+        BaseType_t taskCreated = xTaskCreatePinnedToCore(
+            logTask,
+            "LogTask",
+            STACK_SIZE,
+            NULL,
+            TASK_PRIORITY,
+            &logTaskHandle,
+            TASK_CORE
+        );
+        if (taskCreated != pdPASS) {
+            releaseResources();
+            return;
+        }
+        state = STATE_READY;
     }
 
     // Simple logging methods
@@ -172,7 +179,7 @@ public:
     
     // Wait for all messages to be flushed from the queue
     static void waitQueueFlushed() {
-        if (!initialized) return; // Consider empty if not initialized
+        if (state != STATE_READY) return; // Consider empty if not initialized
         
         // Wait for the queue to be empty
         EventBits_t bits = xEventGroupWaitBits(
@@ -188,15 +195,25 @@ public:
     }
 
 private:
-    inline static bool initialized = false;
+    static constexpr uint32_t STATE_UNINIT = 0, STATE_INITIALIZING = 1, STATE_READY = 2;
+    inline static std::atomic<uint32_t> state{STATE_UNINIT};
     inline static QueueHandle_t logQueue = nullptr;
     inline static TaskHandle_t logTaskHandle = nullptr;
     inline static EventGroupHandle_t queueEventGroup = nullptr;
 
+    // Initialization failed: release what was created, a later log retries
+    static void releaseResources() {
+        if (logQueue) vQueueDelete(logQueue);
+        if (queueEventGroup) vEventGroupDelete(queueEventGroup);
+        logQueue = nullptr;
+        queueEventGroup = nullptr;
+        state = STATE_UNINIT;
+    }
+
     // Send a message to the queue
     static void sendToQueue(const char* message) {
-        if (!initialized) begin(); // Initialize if not already initialized
-        if (!initialized) return; // Abort if initialization failed
+        if (state != STATE_READY) begin(); // Initialize if not already initialized
+        if (state != STATE_READY) return;  // Abort if initialization failed
         
         LogMessage msg;
         strncpy(msg.msg, message, MAX_MSG_SIZE - 1);
