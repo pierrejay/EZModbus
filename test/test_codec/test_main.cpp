@@ -1979,6 +1979,23 @@ void test_bounds_checks_dont_wrap() {
     TEST_ASSERT_FALSE_MESSAGE(buf.push_back(_raw, SIZE_MAX), "push_back of a wrapped length");
     TEST_ASSERT_FALSE_MESSAGE(buf.write_at(1, _raw, SIZE_MAX), "write_at of a wrapped length");
     TEST_ASSERT_EQUAL(1, buf.size());
+
+    // Typed accessors & vector coils: getters first (they read past data and returned true before
+    // the fix), setters then (they crashed)
+    Frame G;
+    const uint16_t five[5] = {1, 2, 3, 4, 5};
+    TEST_ASSERT_TRUE(G.setRegisters(five, 5));
+    uint32_t u32 = 0;
+    float f32 = 0;
+    uint16_t u16 = 0;
+    TEST_ASSERT_FALSE_MESSAGE(G.getUint32(u32, SIZE_MAX), "getUint32 at a wrapped index");
+    TEST_ASSERT_FALSE_MESSAGE(G.getFloat(f32, SIZE_MAX), "getFloat at a wrapped index");
+    TEST_ASSERT_FALSE_MESSAGE(G.getUint16(u16, SIZE_MAX), "getUint16 at a wrapped index");
+    TEST_ASSERT_EQUAL_MESSAGE(0, G.setUint32(42, SIZE_MAX), "setUint32 at a wrapped index");
+    TEST_ASSERT_EQUAL_MESSAGE(0, G.setFloat(1.0f, SIZE_MAX), "setFloat at a wrapped index");
+    TEST_ASSERT_EQUAL_MESSAGE(0, G.setUint16(42, SIZE_MAX), "setUint16 at a wrapped index");
+    TEST_ASSERT_FALSE_MESSAGE(G.setCoils(std::vector<bool>{true, true}, SIZE_MAX), "vector coils set at a wrapped index");
+    TEST_ASSERT_EQUAL(5, G.regCount);
 }
 
 int main(void) {

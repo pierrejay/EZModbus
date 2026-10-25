@@ -564,7 +564,7 @@ inline bool Modbus::Frame::setRegisters(const uint16_t* src, size_t len, size_t 
     * @return true if successful, false if position is out of bounds
     */
 inline bool Modbus::Frame::setCoils(const std::vector<bool>& src, size_t startCoilIndex) {
-    if (src.empty() || startCoilIndex + src.size() > FRAME_DATASIZE * 16) return false;
+    if (src.empty() || startCoilIndex > FRAME_DATASIZE * 16 || src.size() > FRAME_DATASIZE * 16 - startCoilIndex) return false;
     
     // Set each coil bit individually at specified position
     for (size_t i = 0; i < src.size(); ++i) {
@@ -617,7 +617,7 @@ inline bool Modbus::Frame::setCoils(const bool* src, size_t len, size_t startCoi
     * @return true if range is within bounds, false otherwise
     */
 inline bool Modbus::Frame::checkDataBounds(size_t startIdx, size_t count) const {
-    return startIdx + count <= FRAME_DATASIZE;
+    return startIdx <= FRAME_DATASIZE && count <= FRAME_DATASIZE - startIdx; // Not startIdx + count: could wrap
 }
 
 /* @brief Set a float value at specified register index with endianness support
