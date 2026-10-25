@@ -396,8 +396,10 @@ TCP::Result TCP::handleDecodedFrame(const Modbus::Frame& frame, int socketNum, u
             _currentTransaction.connId == connId &&
             _currentTransaction.tid == transactionId) {
 
-            notifyCallbacks(frame);
+            // Ready again before notifying: a higher-priority caller woken by the response
+            // may send its next request right away
             endTransaction();
+            notifyCallbacks(frame);
 
             Modbus::Debug::LOG_MSGF("Client received response for TID: %d on socket %d", transactionId, socketNum);
             return Success();

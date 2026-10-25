@@ -3030,6 +3030,53 @@ void test_concurrent_calls() {
     vTaskDelay(pdMS_TO_TICKS(50));
 }
 
+// TEST_BACK_TO_BACK_HIGH_PRIORITY
+// A task above the interface task's priority chains synchronous requests: it resumes as soon as
+// the response wakes it, so each request must be accepted right after the previous one returned.
+
+#define BACK_TO_BACK_ITER 20
+
+struct BackToBackCtx {
+    TaskHandle_t parent;
+    int errors;
+    int firstErrorIter;
+    Modbus::Client::Result firstError;
+};
+
+static void backToBackTask(void* pv) {
+    auto ctx = static_cast<BackToBackCtx*>(pv);
+    for (int i = 0; i < BACK_TO_BACK_ITER; i++) {
+        uint16_t value = 0;
+        Modbus::ExceptionCode exc = Modbus::NULL_EXCEPTION;
+        auto res = client.read(TEST_SLAVE_ID, Modbus::HOLDING_REGISTER, READ_HOLDING_ADDR, 1, &value, &exc);
+        if (res != Modbus::Client::SUCCESS || exc != Modbus::NULL_EXCEPTION) {
+            if (ctx->errors++ == 0) {
+                ctx->firstErrorIter = i;
+                ctx->firstError = res;
+            }
+        }
+    }
+    xTaskNotifyGive(ctx->parent);
+    vTaskDelete(NULL);
+}
+
+void test_back_to_back_high_priority() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_BACK_TO_BACK_HIGH_PRIORITY: CHAINED SYNC REQUESTS FROM A HIGH-PRIORITY TASK");
+
+    static BackToBackCtx ctx;
+    ctx = { xTaskGetCurrentTaskHandle(), 0, -1, Modbus::Client::SUCCESS };
+    BaseType_t created = xTaskCreate(backToBackTask, "backToBack", 4096, &ctx, 5, nullptr);
+    bool finished = created == pdPASS &&
+                    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(BACK_TO_BACK_ITER * 2 * Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS)) > 0;
+    Modbus::Logger::logf("Errors: %d (first at #%d: %s)\n", ctx.errors, ctx.firstErrorIter,
+                         Modbus::Client::toString(ctx.firstError));
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(finished, "back-to-back task didn't return");
+    TEST_ASSERT_EQUAL_MESSAGE(0, ctx.errors, "a request was refused right after the previous one returned");
+}
+
 void test_server_busy_exception() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_SERVER_BUSY_EXCEPTION");
@@ -3587,6 +3634,7 @@ void setup() {
     RUN_TEST(test_broadcast_read_rejected);
     RUN_TEST(test_broadcast);
     RUN_TEST(test_concurrent_calls);
+    RUN_TEST(test_back_to_back_high_priority);
     RUN_TEST(test_server_busy_exception);
     RUN_TEST(test_client_reconnect_on_first_request);
 
