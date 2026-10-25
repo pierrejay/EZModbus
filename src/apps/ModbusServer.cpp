@@ -78,8 +78,11 @@ Server::Result Server::begin() {
     // Validate that we have at least one interface, otherwise it means
     // the ctor aborted filling the _interfaces array because the user
     // provided more interfaces than authorized by MAX_INTERFACES
-    if (_interfaceCount == 0 || !_interfaces[0]) {
+    if (_interfaceCount == 0) {
         return Error(Server::ERR_INIT_FAILED, "no valid interface (or more than MAX_INTERFACES provided in ctor)");
+    }
+    for (size_t i = 0; i < _interfaceCount; i++) {
+        if (!_interfaces[i]) return Error(Server::ERR_INIT_FAILED, "null interface");
     }
 
     // Initialize all interfaces with proper context routing

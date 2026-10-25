@@ -604,6 +604,22 @@ void test_server_begin_retry_registers_once() {
     TEST_ASSERT_EQUAL_MESSAGE(1, secondAfterRetry, "second interface callback not registered once");
 }
 
+// Regression: begin() only checked the first interface pointer: a null one further in the list
+// was dereferenced (crash).
+void test_server_begin_rejects_null_interface() {
+    static ModbusInterface::Dummy side;
+    static Modbus::StaticWordStore<1> store;
+    alignas(Modbus::Server) static uint8_t storage[sizeof(Modbus::Server)];
+    auto* server = new (storage) Modbus::Server({&side, nullptr}, store);
+    Modbus::Server::Result res = server->begin();
+    size_t callbacksLeft = side.callbackCount();
+    server->~Server();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Server::ERR_INIT_FAILED, res, "begin() accepted a null interface");
+    TEST_ASSERT_EQUAL_MESSAGE(0, callbacksLeft, "callback left on the valid interface");
+}
+
 // Regression: begin() validated overlapping words starting its scan strictly after address 0,
 // and jumping from start address to start address: a word at address 0, or two words with the
 // same start address, were never compared. Returns true if the server accepts both words.
@@ -1463,6 +1479,7 @@ void setup() {
     RUN_TEST(test_apps_remove_rcv_callbacks_on_destruction);
     RUN_TEST(test_client_destroyed_while_timeout_runs);
     RUN_TEST(test_server_begin_retry_registers_once);
+    RUN_TEST(test_server_begin_rejects_null_interface);
     RUN_TEST(test_server_rejects_overlaps_at_zero_and_same_start);
     RUN_TEST(test_server_busy_ignores_other_slave_ids);
     RUN_TEST(test_server_slave_id_change_spares_waiting_request);
