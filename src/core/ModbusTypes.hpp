@@ -223,7 +223,7 @@ public:
         // memset(_data, 0, _cap); // No need to set the bytes to 0 as we will overwrite them anyway
     }
     bool resize(size_t newSize) {
-        if (newSize > _cap || !_data) return false;
+        if (newSize > _cap || !_data || (_readOnly && newSize > _size)) return false;
         if (newSize > _size) memset(_data + _size, 0, newSize - _size); // Set the new bytes to 0 to avoid using garbage data before overwriting them
         _size = newSize;
         return true;
@@ -235,12 +235,12 @@ public:
         return true;
     }
     bool push_back(uint8_t b) {
-        if (_size >= _cap || !_data) return false;
+        if (_size >= _cap || !_data || _readOnly) return false;
         _data[_size++] = b;
         return true;
     }
     bool push_back(const uint8_t* buf, size_t len) { // Atomic operation: all bytes in buf will be written or none
-        if (len > _cap - _size || !_data) return false;
+        if (len > _cap - _size || !_data || _readOnly) return false;
         memcpy(_data + _size, buf, len);
         _size += len;
         return true;

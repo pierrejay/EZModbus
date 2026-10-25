@@ -32,5 +32,6 @@ To enable debug, add the `EZMODBUS_DEBUG` compile flag. Refer to the section [Se
 - **Arduino/PlatformIO:** logs go to `Serial` by default (i.e. USB CDC on most ESP32 boards). You can redirect to another `HardwareSerial` with `EZMODBUS_LOG_OUTPUT`.
 
 - **ESP-IDF:** logs go to the IDF console (`printf` to stdout). The console destination is configured in menuconfig: `ESP System Settings → Channel for console output` (USB CDC/JTAG or UART). No direct UART driver handling is performed by EZModbus anymore since v1.1.5.
+    Request timeouts are handled on the FreeRTOS timer task, which needs more stack with debug traces: set `CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096` (`Component config → FreeRTOS → Kernel → configTIMER_TASK_STACK_DEPTH`; the default 2048 overflows, the build warns about it).
 
 Other debug settings are explained in the [Settings (compile flags)](../40-additional-resources/401-settings-compile-flags.md) section.

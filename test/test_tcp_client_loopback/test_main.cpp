@@ -3030,6 +3030,116 @@ void test_concurrent_calls() {
     vTaskDelay(pdMS_TO_TICKS(50));
 }
 
+// TEST_BACK_TO_BACK_HIGH_PRIORITY
+// A task above the interface task's priority chains synchronous requests: it resumes as soon as
+// the response wakes it, so each request must be accepted right after the previous one returned.
+
+#define BACK_TO_BACK_ITER 20
+
+struct BackToBackCtx {
+    TaskHandle_t parent;
+    int errors;
+    int firstErrorIter;
+    Modbus::Client::Result firstError;
+};
+
+static void backToBackTask(void* pv) {
+    auto ctx = static_cast<BackToBackCtx*>(pv);
+    for (int i = 0; i < BACK_TO_BACK_ITER; i++) {
+        uint16_t value = 0;
+        Modbus::ExceptionCode exc = Modbus::NULL_EXCEPTION;
+        auto res = client.read(TEST_SLAVE_ID, Modbus::HOLDING_REGISTER, READ_HOLDING_ADDR, 1, &value, &exc);
+        if (res != Modbus::Client::SUCCESS || exc != Modbus::NULL_EXCEPTION) {
+            if (ctx->errors++ == 0) {
+                ctx->firstErrorIter = i;
+                ctx->firstError = res;
+            }
+        }
+    }
+    xTaskNotifyGive(ctx->parent);
+    vTaskDelete(NULL);
+}
+
+void test_back_to_back_high_priority() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_BACK_TO_BACK_HIGH_PRIORITY: CHAINED SYNC REQUESTS FROM A HIGH-PRIORITY TASK");
+
+    static BackToBackCtx ctx;
+    ctx = { xTaskGetCurrentTaskHandle(), 0, -1, Modbus::Client::SUCCESS };
+    BaseType_t created = xTaskCreate(backToBackTask, "backToBack", 4096, &ctx, 5, nullptr);
+    bool finished = created == pdPASS &&
+                    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(BACK_TO_BACK_ITER * 2 * Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS)) > 0;
+    Modbus::Logger::logf("Errors: %d (first at #%d: %s)\n", ctx.errors, ctx.firstErrorIter,
+                         Modbus::Client::toString(ctx.firstError));
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(finished, "back-to-back task didn't return");
+    TEST_ASSERT_EQUAL_MESSAGE(0, ctx.errors, "a request was refused right after the previous one returned");
+}
+
+// TEST_RESPONSE_NOT_TAKEN_BY_REQUEST_STARTED_DURING_DELIVERY
+// Two Clients on the same interface: A's completion callback starts a request on B while A's
+// response is still being delivered to the interface's consumers. B must not take A's response
+// (same slave & FC): it gets its own, read from another register.
+
+#define CHAINED_A_ADDR READ_HOLDING_ADDR
+#define CHAINED_B_ADDR MULTI_START_ADDR
+
+Modbus::Client chainedClientB(ezm);
+
+struct ChainedCtx {
+    Modbus::Frame requestB;
+    Modbus::Frame responseB;
+    Modbus::Client::Result trackerB;
+    Modbus::Client::Result startB;
+    Modbus::Client::Result resultA;
+};
+
+static void chainedCallbackA(Modbus::Client::Result result, const Modbus::Frame*, void* pv) {
+    auto ctx = static_cast<ChainedCtx*>(pv);
+    ctx->resultA = result;
+    ctx->startB = chainedClientB.sendRequest(ctx->requestB, ctx->responseB, &ctx->trackerB);
+}
+
+void test_response_not_taken_by_request_started_during_delivery() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_RESPONSE_NOT_TAKEN_BY_REQUEST_STARTED_DURING_DELIVERY");
+
+    static bool clientBReady = false;
+    if (!clientBReady) clientBReady = chainedClientB.begin() == Modbus::Client::SUCCESS;
+
+    static ChainedCtx ctx;
+    ctx.requestB = { .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID,
+                     .regAddress = CHAINED_B_ADDR, .regCount = 1, .data = {}, .exceptionCode = Modbus::NULL_EXCEPTION };
+    ctx.responseB.clear();
+    ctx.trackerB = Modbus::Client::NODATA;
+    ctx.startB = Modbus::Client::NODATA;
+    ctx.resultA = Modbus::Client::NODATA;
+
+    Modbus::Frame requestA = { .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID,
+                               .regAddress = CHAINED_A_ADDR, .regCount = 1, .data = {}, .exceptionCode = Modbus::NULL_EXCEPTION };
+    auto startA = client.sendRequest(requestA, chainedCallbackA, &ctx);
+
+    // Wait for B's outcome (its own response, or A's taken by mistake)
+    const uint32_t start = Modbus::TIME_MS();
+    while (ctx.trackerB == Modbus::Client::NODATA && Modbus::TIME_MS() - start < 3 * Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    Modbus::Logger::logf("A: %s, B start: %s, B: %s, B value: %u\n", Modbus::Client::toString(ctx.resultA),
+                         Modbus::Client::toString(ctx.startB), Modbus::Client::toString(ctx.trackerB),
+                         ctx.responseB.getRegister(0));
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(clientBReady, "second client init failed");
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, startA);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, ctx.resultA);
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, ctx.startB, "B refused while A's response was delivered");
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, ctx.trackerB);
+    TEST_ASSERT_EQUAL_MESSAGE(MBT_INIT_HOLDING_REGISTER_VALUE(CHAINED_B_ADDR), ctx.responseB.getRegister(0),
+                              "B took A's response");
+    vTaskDelay(pdMS_TO_TICKS(50));
+}
+
 void test_server_busy_exception() {
     Modbus::Logger::logln();
     Modbus::Logger::logln("TEST_SERVER_BUSY_EXCEPTION");
@@ -3587,6 +3697,8 @@ void setup() {
     RUN_TEST(test_broadcast_read_rejected);
     RUN_TEST(test_broadcast);
     RUN_TEST(test_concurrent_calls);
+    RUN_TEST(test_back_to_back_high_priority);
+    RUN_TEST(test_response_not_taken_by_request_started_during_delivery);
     RUN_TEST(test_server_busy_exception);
     RUN_TEST(test_client_reconnect_on_first_request);
 

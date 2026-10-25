@@ -140,6 +140,7 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
 * **`EZMODBUS_DEBUG`**
     * Enables Debug logs
     * Default: undefined = no logs (no value, just a flag)
+    * ESP-IDF: also set `CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096` (see [Logging/debugging](404-logging-debugging.md))
 * **`EZMODBUS_MAX_DEBUG_MSG_SIZE`**
     * Max length of debug message including null terminator (char)
     * Default: 256 (minimum: 32)

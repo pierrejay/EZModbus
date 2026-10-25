@@ -3,10 +3,12 @@
 #define MODBUS_DEBUG_H
 
 #include <stdio.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace Modbus {
 namespace Debug {

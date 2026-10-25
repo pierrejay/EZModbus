@@ -292,11 +292,13 @@ private:
      * @note Matched to the pending request by slave ID & FC only (RTU has no transaction ID):
      *       a late or unsolicited response is dropped, unless a request to the same slave & FC
      *       is pending, which takes it as its answer
+     * @note Not before the TX result of the pending request was notified: until then, the frame
+     *       answers an earlier one
      */
     void forwardResponse(const Modbus::Frame& response) {
         {
             Lock guard(_pendingMutex);
-            if (!_pendingActive || response.slaveId != _pending.slaveId || response.fc != _pending.fc) {
+            if (!_pendingActive || _txPending || response.slaveId != _pending.slaveId || response.fc != _pending.fc) {
                 Modbus::Debug::LOG_MSG("Bridge: dropping unexpected or late response");
                 return;
             }

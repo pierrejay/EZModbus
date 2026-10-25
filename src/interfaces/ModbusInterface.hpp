@@ -135,6 +135,8 @@ namespace ModbusInterface {
          * @return The result of the operation
          * @note Contract: each call invokes txCallback exactly once, whatever the result (before
          *       returning when it fails at once, from the interface task otherwise)
+         * @note Contract: txCallback returns before the response to this frame is delivered to the
+         *       receive callbacks (Client & Bridge drop a response whose request's TX result isn't back)
          */
         virtual Result sendFrame(const Modbus::Frame& frame, 
                                  TxResultCallback txCallback = nullptr, void* ctx = nullptr) = 0;
