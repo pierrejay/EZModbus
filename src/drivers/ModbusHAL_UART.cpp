@@ -278,49 +278,55 @@ esp_err_t UART::flush_input(){
 }
 
 /* @brief Set the baud rate of the UART driver
- * @param baud_rate: The baud rate to set
- * @return ESP_OK on success, ESP_ERR_INVALID_STATE if the driver is not installed
+ * @param baud_rate: The baud rate to set (MIN_BAUD_RATE .. MAX_BAUD_RATE)
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG out of range, or the driver's error
+ * @note A refused baud rate leaves the previous one in place
  */
 esp_err_t UART::setBaudrate(uint32_t baud_rate) {
+    if (baud_rate < MIN_BAUD_RATE || baud_rate > MAX_BAUD_RATE) return ESP_ERR_INVALID_ARG;
     Lock guard(_driver_mutex);
-    _baud_rate = baud_rate; 
-    _current_hw_config.baud_rate = baud_rate; 
+    uart_config_t cfg = _current_hw_config;
+    cfg.baud_rate = baud_rate;
 
-    if (!_is_driver_installed) {
-        Modbus::Debug::LOG_MSGF("Info: Port %d baudrate set to %d (will be applied at begin())", _uart_num, (int)_baud_rate);
-        return ESP_OK;
+    if (_is_driver_installed) {
+        esp_err_t err = applyRuntimeConfig(cfg);
+        if (err != ESP_OK) {
+            Modbus::Debug::LOG_MSGF("Error: Port %d failed to reconfigure baudrate to %d: %s", _uart_num, (int)baud_rate, esp_err_to_name(err));
+            return err;
+        }
     }
-    esp_err_t err = applyRuntimeConfig();
-    if (err == ESP_OK) {
-        Modbus::Debug::LOG_MSGF("Info: Port %d baudrate reconfigured to %d", _uart_num, (int)_baud_rate);
-    } else {
-        Modbus::Debug::LOG_MSGF("Error: Port %d failed to reconfigure baudrate to %d: %s", _uart_num, (int)baud_rate, esp_err_to_name(err));
-    }
-    return err;
+    _baud_rate = baud_rate;
+    _current_hw_config = cfg;
+    Modbus::Debug::LOG_MSGF("Info: Port %d baudrate set to %d%s", _uart_num, (int)_baud_rate,
+                            _is_driver_installed ? "" : " (will be applied at begin())");
+    return ESP_OK;
 }
 
 /* @brief Set the serial config (data bits, parity, stop bits) of the UART driver
  * @param config_flags: Packed config flags (use CONFIG_xxx constants, e.g. CONFIG_8N1)
- * @return ESP_OK on success
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG for an invalid config, or the driver's error
  * @note If the driver is already running, the new config is applied immediately
  *       via targeted IDF setters without requiring a restart.
+ * @note A refused config leaves the previous one in place
  */
 esp_err_t UART::setConfig(uint32_t config_flags) {
+    if (!isValidConfig(config_flags)) return ESP_ERR_INVALID_ARG;
     Lock guard(_driver_mutex);
-    _config_flags = config_flags;
-    decode_config_flags(_config_flags, _current_hw_config.data_bits, _current_hw_config.parity, _current_hw_config.stop_bits);
+    uart_config_t cfg = _current_hw_config;
+    decode_config_flags(config_flags, cfg.data_bits, cfg.parity, cfg.stop_bits);
 
-    if (!_is_driver_installed) {
-        Modbus::Debug::LOG_MSGF("Info: Port %d config set to 0x%X (will be applied at begin())", _uart_num, (unsigned int)_config_flags);
-        return ESP_OK;
+    if (_is_driver_installed) {
+        esp_err_t err = applyRuntimeConfig(cfg);
+        if (err != ESP_OK) {
+            Modbus::Debug::LOG_MSGF("Error: Port %d failed to reconfigure config to 0x%X: %s", _uart_num, (unsigned int)config_flags, esp_err_to_name(err));
+            return err;
+        }
     }
-    esp_err_t err = applyRuntimeConfig();
-    if (err == ESP_OK) {
-        Modbus::Debug::LOG_MSGF("Info: Port %d config reconfigured to 0x%X", _uart_num, (unsigned int)_config_flags);
-    } else {
-        Modbus::Debug::LOG_MSGF("Error: Port %d failed to reconfigure config to 0x%X: %s", _uart_num, (unsigned int)config_flags, esp_err_to_name(err));
-    }
-    return err;
+    _config_flags = config_flags;
+    _current_hw_config = cfg;
+    Modbus::Debug::LOG_MSGF("Info: Port %d config set to 0x%X%s", _uart_num, (unsigned int)_config_flags,
+                            _is_driver_installed ? "" : " (will be applied at begin())");
+    return ESP_OK;
 }
 
 /* @brief Set only the parity of the UART driver
@@ -497,7 +503,7 @@ uint64_t UART::getRxFrameGapTimeoutUs() const {
     return (uint64_t)(fifoLen + rxTimeoutSym + RX_FRAME_GAP_MARGIN_SYMBOLS) * usPerSymbol;
 }
 
-esp_err_t UART::applyRuntimeConfig() {
+esp_err_t UART::applyRuntimeConfig(const uart_config_t& cfg) {
     if (!_is_driver_installed) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -507,16 +513,17 @@ esp_err_t UART::applyRuntimeConfig() {
         return err;
     }
 
-    err = uart_set_baudrate(_uart_num, _current_hw_config.baud_rate);
+    // Only the baud rate can be refused (the fields are validated): first, nothing changed yet
+    err = uart_set_baudrate(_uart_num, cfg.baud_rate);
     if (err != ESP_OK) return err;
 
-    err = uart_set_word_length(_uart_num, _current_hw_config.data_bits);
+    err = uart_set_word_length(_uart_num, cfg.data_bits);
     if (err != ESP_OK) return err;
 
-    err = uart_set_parity(_uart_num, _current_hw_config.parity);
+    err = uart_set_parity(_uart_num, cfg.parity);
     if (err != ESP_OK) return err;
 
-    err = uart_set_stop_bits(_uart_num, _current_hw_config.stop_bits);
+    err = uart_set_stop_bits(_uart_num, cfg.stop_bits);
     if (err != ESP_OK) return err;
 
     // Re-assert hardware RS485 mode after a reconfig 
@@ -528,6 +535,20 @@ esp_err_t UART::applyRuntimeConfig() {
 
     restoreRxTimeout();
     return ESP_OK;
+}
+
+/* @brief Check packed config flags against the IDF values
+ * @param flags: Packed config flags (see CONFIG_xxx constants)
+ * @return true if data bits, parity & stop bits are all valid
+ */
+bool UART::isValidConfig(uint32_t flags) {
+    uart_word_length_t dataBits;
+    uart_parity_t parity;
+    uart_stop_bits_t stopBits;
+    decode_config_flags(flags, dataBits, parity, stopBits);
+    return dataBits <= UART_DATA_8_BITS &&
+           (parity == UART_PARITY_DISABLE || parity == UART_PARITY_EVEN || parity == UART_PARITY_ODD) &&
+           stopBits >= UART_STOP_BITS_1 && stopBits <= UART_STOP_BITS_2;
 }
 
 void UART::restoreRxTimeout() {

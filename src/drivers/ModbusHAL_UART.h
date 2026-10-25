@@ -55,6 +55,10 @@ public:
     static constexpr int WRITE_TIMEOUT_MS = 1000;
     static constexpr int READ_TIMEOUT_MS = 10;
 
+    // Accepted baud rate range (the driver may still refuse a rate its clock can't achieve)
+    static constexpr uint32_t MIN_BAUD_RATE = 300;
+    static constexpr uint32_t MAX_BAUD_RATE = 5000000;
+
     // Safety margin (symbols) on the RX frame-gap backstop for ISR/scheduler latency
     static constexpr uint32_t RX_FRAME_GAP_MARGIN_SYMBOLS = 4;
 
@@ -220,7 +224,8 @@ private:
 // PRIVATE METHODS
 // ===================================================================================
 
-    esp_err_t applyRuntimeConfig();
+    esp_err_t applyRuntimeConfig(const uart_config_t& cfg);
+    static bool isValidConfig(uint32_t flags);
     esp_err_t setRS485ModeUnsafe(bool enable);
     esp_err_t setupSoftDEUnsafe(); // Configure the DE pin as a GPIO output, idle in RX mode
     void restoreRxTimeout();

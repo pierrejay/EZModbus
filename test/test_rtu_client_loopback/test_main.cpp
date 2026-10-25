@@ -1706,6 +1706,30 @@ void test_uart_begin_returns_event_queue() {
     TEST_ASSERT_EQUAL_PTR_MESSAGE(registered, queue, "event queue not returned");
 }
 
+// Regression: setBaudrate() / setConfig() stored the new value before applying it: when the
+// driver refused it, getBaudrate() / getConfig() reported it anyway (used for the RTU timings).
+// Spare HAL on UART0, as above.
+void test_uart_rejected_setting_keeps_previous() {
+    ModbusHAL::UART::IDFConfig cfg;
+    cfg.uartNum = UART_NUM_0;
+    ModbusHAL::UART spare(cfg);
+    esp_err_t beginErr = spare.begin();
+    const uint32_t baudBefore = spare.getBaudrate();
+    const uint32_t configBefore = spare.getConfig();
+    esp_err_t baudErr = spare.setBaudrate(1);
+    uint32_t baudAfter = spare.getBaudrate();
+    esp_err_t configErr = spare.setConfig(0x00FF00FF); // Invalid data bits
+    uint32_t configAfter = spare.getConfig();
+    spare.end();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(ESP_OK, beginErr);
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(ESP_OK, baudErr, "1 baud accepted by the driver");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(baudBefore, baudAfter, "rejected baud rate kept");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(ESP_OK, configErr, "invalid config accepted by the driver");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(configBefore, configAfter, "rejected config kept");
+}
+
 // ===================================================================================
 // RUNTIME UART RECONFIGURATION TESTS
 // ===================================================================================
@@ -2037,6 +2061,7 @@ void setup() {
     RUN_TEST(test_rx_zero_byte_read_keeps_buffer);
     RUN_TEST(test_uart_long_timeout_saturates);
     RUN_TEST(test_uart_begin_returns_event_queue);
+    RUN_TEST(test_uart_rejected_setting_keeps_previous);
 
     // Runtime reconfiguration tests
     RUN_TEST(test_runtime_uart_reconfig);
