@@ -93,8 +93,8 @@ void Client::PendingRequest::onTxResult(ModbusInterface::IInterface::Result resu
 
 /* @brief Response received from the interface
  * @return True if it matched the active request & completed it
- * @note A request whose TX result isn't back hasn't been sent: the frame answers an earlier one
- *       (e.g. a request started while that response is delivered to the interface's consumers)
+ * @note Not before the TX result of the request was notified: until then, the frame answers an
+ *       earlier one (e.g. a request started while that response is delivered to the interface's consumers)
  * @note Responses are matched by slave ID & FC (TCP responses are already paired by transaction ID).
  *       Over RTU, a response arriving after its request timed out can't be told apart from the
  *       answer to the next request: the timeout must exceed the slave's worst-case response time.
