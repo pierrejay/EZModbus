@@ -502,7 +502,7 @@ TCP::Result TCP::fetchSocketData(int socketNum, ByteBuffer& rcvBuf, uint16_t& rc
                 _tcpHAL.closeConnection(socketNum, connId);
                 return Error(ERR_RX_FAILED, "incomplete frame, connection closed");
             }
-            WAIT_MS(1); // Wait for the rest of the frame
+            vTaskDelay(1); // Wait for the rest of the frame (1 tick: WAIT_MS(1) is 0 tick below 1 kHz)
             continue;
         }
 
