@@ -211,7 +211,7 @@ public:
 
     ByteBuffer slice(size_t offset, size_t length) const {
         if (!_data || offset > _size) return ByteBuffer();
-        if (offset + length > _size) length = _size - offset;
+        if (length > _size - offset) length = _size - offset; // Not offset + length: could wrap
         return ByteBuffer(static_cast<const uint8_t*>(_data + offset), length);  // <- read-only ctor!
     }
 
@@ -239,7 +239,7 @@ public:
         return true;
     }
     bool push_back(const uint8_t* buf, size_t len) { // Atomic operation: all bytes in buf will be written or none
-        if (_size + len > _cap || !_data) return false;
+        if (len > _cap - _size || !_data) return false;
         memcpy(_data + _size, buf, len);
         _size += len;
         return true;
@@ -255,7 +255,7 @@ public:
     }
 
     bool write_at(size_t pos, const uint8_t* buf, size_t len) {
-        if (pos + len > _cap || !_data) return false;
+        if (pos > _cap || len > _cap - pos || !_data) return false;
         memcpy(_data + pos, buf, len);
         if (pos + len > _size) _size = pos + len;
         return true;

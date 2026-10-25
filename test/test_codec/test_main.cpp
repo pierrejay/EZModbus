@@ -1956,6 +1956,31 @@ void test_codec_register_response_bounded() {
     TEST_ASSERT_EQUAL(MAX_REGISTERS_READ, F.regCount);
 }
 
+// Regression: bound checks written as "index + length > limit" wrapped around for huge values and
+// let the access through. Before the fix the first two cases failed, the next ones crashed (huge
+// copy), hence this test runs last.
+void test_bounds_checks_dont_wrap() {
+    using namespace Modbus;
+    uint8_t _raw[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    ByteBuffer view(static_cast<const uint8_t*>(_raw), sizeof(_raw));
+    TEST_ASSERT_EQUAL_MESSAGE(sizeof(_raw) - 1, view.slice(1, SIZE_MAX).size(), "slice past the end");
+
+    Frame F;
+    F.regCount = 7;
+    const uint16_t regs[2] = {0xDEAD, 0xBEEF};
+    TEST_ASSERT_FALSE_MESSAGE(F.setRegisters(regs, 2, SIZE_MAX), "registers set at a wrapped index");
+    TEST_ASSERT_EQUAL(7, F.regCount);
+    const bool coils[2] = {true, true};
+    TEST_ASSERT_FALSE_MESSAGE(F.setCoils(coils, 2, SIZE_MAX), "coils set at a wrapped index");
+
+    uint8_t _buf[8];
+    ByteBuffer buf(_buf, sizeof(_buf));
+    TEST_ASSERT_TRUE(buf.push_back(0x00));
+    TEST_ASSERT_FALSE_MESSAGE(buf.push_back(_raw, SIZE_MAX), "push_back of a wrapped length");
+    TEST_ASSERT_FALSE_MESSAGE(buf.write_at(1, _raw, SIZE_MAX), "write_at of a wrapped length");
+    TEST_ASSERT_EQUAL(1, buf.size());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_codec_rtu);
@@ -1981,5 +2006,6 @@ int main(void) {
     RUN_TEST(test_conversion_capacity_limits);
     RUN_TEST(test_conversion_insufficient_data);
     RUN_TEST(test_conversion_mixed_with_raw_api);
+    RUN_TEST(test_bounds_checks_dont_wrap); // Last: crashed before the fix
     UNITY_END();
 }

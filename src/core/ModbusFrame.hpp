@@ -550,7 +550,7 @@ inline bool Modbus::Frame::setCoils(const uint16_t* src, size_t len) {
     * @return true if successful, false if position is out of bounds
     */
 inline bool Modbus::Frame::setRegisters(const uint16_t* src, size_t len, size_t startRegIndex) {
-    if (!src || len == 0 || startRegIndex + len > FRAME_DATASIZE) return false;
+    if (!src || len == 0 || startRegIndex > FRAME_DATASIZE || len > FRAME_DATASIZE - startRegIndex) return false;
     
     // Copy registers directly to specified position
     memcpy(&data[startRegIndex], src, len * sizeof(uint16_t));
@@ -589,7 +589,7 @@ inline bool Modbus::Frame::setCoils(const std::vector<bool>& src, size_t startCo
     * @return true if successful, false if position is out of bounds
     */
 inline bool Modbus::Frame::setCoils(const bool* src, size_t len, size_t startCoilIndex) {
-    if (!src || len == 0 || startCoilIndex + len > FRAME_DATASIZE * 16) return false;
+    if (!src || len == 0 || startCoilIndex > FRAME_DATASIZE * 16 || len > FRAME_DATASIZE * 16 - startCoilIndex) return false;
     
     // Set each coil bit individually at specified position
     for (size_t i = 0; i < len; ++i) {
