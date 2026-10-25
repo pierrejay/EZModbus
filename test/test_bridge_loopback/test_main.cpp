@@ -1204,6 +1204,59 @@ void test_bridge_timer_command_failure() {
     TEST_ASSERT_EQUAL(Modbus::SLAVE_DEVICE_BUSY, answer.exceptionCode);
 }
 
+// Regression: the TX result of a request that already timed out closed the request forwarded
+// meanwhile (it closed "the pending request", whichever it was): B was sent, then answered
+// GATEWAY_PATH_UNAVAILABLE because of A, and B's response was dropped. A request arriving while
+// the previous TX result is missing is now answered SLAVE_DEVICE_BUSY, like a requester the
+// bridge can't serve yet.
+void test_bridge_late_tx_result_spares_next() {
+    static ModbusInterface::Dummy slaveSide;
+    controlledMaster.reset();
+    Modbus::Frame frame;
+    while (controlledMaster.getReceivedFrame(frame)) {} // Frames left by the previous tests
+    alignas(Modbus::Bridge) static uint8_t storage[sizeof(Modbus::Bridge)];
+    auto* bridge = new (storage) Modbus::Bridge(controlledMaster, slaveSide, LOCAL_BRIDGE_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Bridge::SUCCESS, bridge->begin());
+
+    // A forwarded, its TX result held, then it times out
+    controlledMaster.holdTx = true;
+    slaveSide.transmitFrame(LOCAL_BRIDGE_REQUEST);
+    vTaskDelay(pdMS_TO_TICKS(LOCAL_BRIDGE_TIMEOUT_MS + 50));
+    bool aTimedOut = slaveSide.getReceivedFrame(frame) && frame.exceptionCode == Modbus::GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND;
+
+    // B (another address) while A's TX result is missing
+    controlledMaster.holdTx = false;
+    Modbus::Frame requestB = LOCAL_BRIDGE_REQUEST;
+    requestB.regAddress = LOCAL_BRIDGE_REQUEST.regAddress + 1;
+    slaveSide.transmitFrame(requestB);
+    bool bForwardedEarly = controlledMaster.getReceivedFrame(frame);
+    bool bBusy = slaveSide.getReceivedFrame(frame) && frame.exceptionCode == Modbus::SLAVE_DEVICE_BUSY;
+
+    // A's late TX failure: nothing left to close
+    controlledMaster.deliverTxResult(ModbusInterface::IInterface::ERR_SEND_FAILED);
+    bool lateAnswer = slaveSide.getReceivedFrame(frame);
+
+    // B again: forwarded & answered
+    slaveSide.transmitFrame(requestB);
+    bool bForwarded = controlledMaster.getReceivedFrame(frame);
+    Modbus::Frame responseB = requestB;
+    responseB.type = Modbus::RESPONSE;
+    responseB.data[0] = 0x1234;
+    controlledMaster.transmitFrame(responseB);
+    bool bAnswered = slaveSide.getReceivedFrame(frame) && frame.exceptionCode == Modbus::NULL_EXCEPTION && frame.data[0] == 0x1234;
+
+    bridge->~Bridge();
+    controlledMaster.reset();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(aTimedOut, "A didn't time out");
+    TEST_ASSERT_FALSE_MESSAGE(bForwardedEarly, "B forwarded while A's TX result was missing");
+    TEST_ASSERT_TRUE_MESSAGE(bBusy, "B not answered SLAVE_DEVICE_BUSY");
+    TEST_ASSERT_FALSE_MESSAGE(lateAnswer, "A's late TX result answered the slave side");
+    TEST_ASSERT_TRUE_MESSAGE(bForwarded, "B not forwarded once A's TX result came back");
+    TEST_ASSERT_TRUE_MESSAGE(bAnswered, "B's response not forwarded");
+}
+
 void setUp() {
     // Clear both RX buffers before each test
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -1341,6 +1394,7 @@ void setup() {
     RUN_TEST(test_client_timer_rearm_failure);
     RUN_TEST(test_client_zero_timeout); // Last: crashed (assert) before the fix
     RUN_TEST(test_bridge_timer_command_failure);
+    RUN_TEST(test_bridge_late_tx_result_spares_next);
     UNITY_END();
 }
 
