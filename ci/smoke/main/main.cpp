@@ -427,6 +427,7 @@ static void testBurst() {
     int done = 0;
     while (done < started && xSemaphoreTake(burstDone, pdMS_TO_TICKS(30000)) == pdTRUE) done++;
     CHECK(done == started, "burst tasks didn't finish");
+    if (done < started) return; // A task still running may write its results
     CHECK(a.errors == 0, "direct: %d errors, first %s", a.errors, a.firstError);
     CHECK(b.errors == 0, "gateway: %d errors, first %s", b.errors, b.firstError);
     CHECK(hrs[100] == BURST_ITER && hrs[101] == BURST_ITER, "burst final values: %u %u", hrs[100], hrs[101]);
