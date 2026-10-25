@@ -714,6 +714,88 @@ void test_server_busy_ignores_other_slave_ids() {
     TEST_ASSERT_TRUE_MESSAGE(heldAnswered, "held request not answered once released");
 }
 
+// Regression: the slave ID was only checked before taking the mutex: a request waiting for it
+// with the old ID was handled after setSlaveId() returned. A first request (other interface) holds
+// the mutex; setSlaveId(), from a higher priority task, takes it before the waiting request.
+struct SlaveIdSetter {
+    Modbus::Server* server;
+    volatile bool done;
+};
+static StaticTask_t waitingRequestTcb, slaveIdSetterTcb;
+static StackType_t waitingRequestStack[4096], slaveIdSetterStack[4096];
+
+static void slaveIdSetterTask(void* arg) {
+    auto* setter = static_cast<SlaveIdSetter*>(arg);
+    setter->server->setSlaveId(2);
+    setter->done = true;
+    vTaskDelete(nullptr);
+}
+
+static bool waitBlocked(TaskHandle_t task) {
+    uint32_t t0 = Modbus::TIME_MS();
+    while (eTaskGetState(task) != eBlocked && Modbus::TIME_MS() - t0 < 500) vTaskDelay(1);
+    return eTaskGetState(task) == eBlocked;
+}
+
+void test_server_slave_id_change_spares_waiting_request() {
+    static ModbusInterface::Dummy busySide, side;
+    static Modbus::StaticWordStore<1> store;
+    static HeldHandler handler;
+    alignas(Modbus::Server) static uint8_t storage[sizeof(Modbus::Server)];
+    auto* server = new (storage) Modbus::Server({&busySide, &side}, store, 1, true, 2000);
+    Modbus::Word word;
+    word.type = Modbus::HOLDING_REGISTER;
+    word.nbRegs = 1;
+    word.readHandler = [](const Modbus::Word&, uint16_t* outVals, void* userCtx) -> Modbus::ExceptionCode {
+        auto* held = static_cast<HeldHandler*>(userCtx);
+        if (!held->entered) { // Only the first request is held
+            held->entered = true;
+            xSemaphoreTake(held->release, portMAX_DELAY);
+        }
+        outVals[0] = 0;
+        return Modbus::NULL_EXCEPTION;
+    };
+    word.writeHandler = serverWriteHandler;
+    word.userCtx = &handler;
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, server->addWord(word));
+    TEST_ASSERT_EQUAL(Modbus::Server::SUCCESS, server->begin());
+
+    Modbus::Frame request = {
+        .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = 1,
+        .regAddress = 0, .regCount = 1, .data = {}
+    };
+    // First request holds the mutex
+    HeldRequest held = { &busySide, request, false };
+    xTaskCreateStatic(heldRequestTask, "heldRequest", sizeof(heldRequestStack) / sizeof(StackType_t),
+                      &held, 1, heldRequestStack, &heldRequestTcb);
+    uint32_t t0 = Modbus::TIME_MS();
+    while (!handler.entered && Modbus::TIME_MS() - t0 < 500) vTaskDelay(1);
+    bool busy = handler.entered;
+
+    // Request for slave 1 waiting for the mutex, then setSlaveId(2) waiting with a higher priority
+    HeldRequest waiting = { &side, request, false };
+    TaskHandle_t waitingTask = xTaskCreateStatic(heldRequestTask, "waitingRequest",
+        sizeof(waitingRequestStack) / sizeof(StackType_t), &waiting, 1, waitingRequestStack, &waitingRequestTcb);
+    bool waitingBlocked = waitBlocked(waitingTask);
+    SlaveIdSetter setter = { server, false };
+    TaskHandle_t setterTask = xTaskCreateStatic(slaveIdSetterTask, "slaveIdSetter",
+        sizeof(slaveIdSetterStack) / sizeof(StackType_t), &setter, 3, slaveIdSetterStack, &slaveIdSetterTcb);
+    bool setterBlocked = waitBlocked(setterTask);
+
+    xSemaphoreGive(handler.release);
+    t0 = Modbus::TIME_MS();
+    while (!(held.done && waiting.done && setter.done) && Modbus::TIME_MS() - t0 < 3000) vTaskDelay(1);
+    Modbus::Frame frame;
+    bool waitingAnswered = side.getReceivedFrame(frame);
+    bool allDone = held.done && waiting.done && setter.done;
+    if (allDone) server->~Server();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(busy && waitingBlocked && setterBlocked, "requests / setSlaveId() not waiting for the mutex");
+    TEST_ASSERT_TRUE_MESSAGE(allDone, "a task didn't return");
+    TEST_ASSERT_FALSE_MESSAGE(waitingAnswered, "request for the old slave ID answered after setSlaveId() returned");
+}
+
 // Regression: with rejectUndefined = false, a request starting inside a multi-register Word was
 // handled as a gap (zeros read, write dropped) instead of a partial Word access. And looking up the
 // Word holding an address gave up on the first Word of another type before it (the store keeps all
@@ -1383,6 +1465,7 @@ void setup() {
     RUN_TEST(test_server_begin_retry_registers_once);
     RUN_TEST(test_server_rejects_overlaps_at_zero_and_same_start);
     RUN_TEST(test_server_busy_ignores_other_slave_ids);
+    RUN_TEST(test_server_slave_id_change_spares_waiting_request);
     RUN_TEST(test_server_rejects_start_inside_word);
     RUN_TEST(test_server_add_words_all_or_nothing);
     RUN_TEST(test_bridge_begin_registers_once);

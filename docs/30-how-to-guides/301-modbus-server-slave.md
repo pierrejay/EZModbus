@@ -86,7 +86,7 @@ The default behaviour ensures 100% request hit rate but may be prone to deadlock
 
 ### Changing the Slave ID at runtime
 
-The server's Slave ID can be changed at runtime using `setSlaveId()`. This is thread-safe: the method acquires the server mutex, so it will block until any in-flight request completes before updating the ID.
+The server's Slave ID can be changed at runtime using `setSlaveId()`. This is thread-safe: the method acquires the server mutex, so it will block until any in-flight request completes before updating the ID. Once it returns, requests for the old ID are ignored, even those already waiting.
 
 ```cpp
 server.setSlaveId(newId);

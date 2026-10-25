@@ -157,7 +157,8 @@ Server::Result Server::clearAllWords() {
 /* @brief Change the server's Slave/Unit ID at runtime
  * @param id New Slave/Unit ID
  * @note Thread-safe: acquires the server mutex to prevent concurrent access
- *       with request processing. Blocks until any in-flight request completes.
+ *       with request processing. Blocks until any in-flight request completes;
+ *       once it returns, requests for the old ID are ignored.
  *       -> Do NOT call inside a handler or it will deadlock!
  */
 void Server::setSlaveId(uint8_t id) {
@@ -196,8 +197,7 @@ Server::Result Server::handleRequest(const Modbus::Frame& request,
 
     // Filter before taking the mutex: a busy server stays silent for frames it would ignore
     // (on a shared RTU bus, requests addressed to other devices)
-    const bool catchAll = Modbus::isBroadcastId(_serverId) || sourceInterface.checkCatchAllSlaveIds();
-    if (!catchAll && (request.slaveId != _serverId) && !isBroadcast) {
+    if (!isAddressedToUs(request, sourceInterface)) {
         return Error(Server::ERR_RCV_WRONG_SLAVE_ID);
     }
     // Ignore unsolicited responses from clients
@@ -221,6 +221,12 @@ Server::Result Server::handleRequest(const Modbus::Frame& request,
                     Modbus::makeException(request, response, Modbus::SLAVE_DEVICE_BUSY);
                     shouldReply = true;
                 }
+                break;
+            }
+
+            // Checked again: setSlaveId() may have changed the ID while we waited for the mutex
+            if (!isAddressedToUs(request, sourceInterface)) {
+                finalRes = Error(Server::ERR_RCV_WRONG_SLAVE_ID);
                 break;
             }
 
@@ -597,6 +603,18 @@ Server::Result Server::sendResponse(const Modbus::Frame& response, ModbusInterfa
     return Success();
 }
 
+
+/* @brief Check if a request is addressed to this server (own ID, broadcast, or catch-all)
+ * @param request The request to check
+ * @param sourceInterface The interface the request came from
+ * @return true if the server must handle the request
+ */
+bool Server::isAddressedToUs(const Modbus::Frame& request, ModbusInterface::IInterface& sourceInterface) const {
+    const uint32_t serverId = _serverId;
+    if (Modbus::isBroadcastId(request.slaveId)) return true;
+    if (Modbus::isBroadcastId(serverId) || sourceInterface.checkCatchAllSlaveIds()) return true;
+    return request.slaveId == serverId;
+}
 
 /* @brief Check if a function code is a write request
  * @param fc The function code to check
