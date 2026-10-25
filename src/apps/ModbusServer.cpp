@@ -217,6 +217,13 @@ Server::Result Server::handleRequest(const Modbus::Frame& request,
         // Single while(0) loop: check all guard clauses and exit at each step if needed
         // Set finalRes with Error() helper to log the exact location where it failed
         do {
+            // Checked again: setSlaveId() may have changed the ID while we waited for the mutex
+            // (before the busy exception too: a request for the old ID gets no answer at all)
+            if (!isAddressedToUs(request, sourceInterface)) {
+                finalRes = Error(Server::ERR_RCV_WRONG_SLAVE_ID);
+                break;
+            }
+
             // Send busy exception if we couldn't lock the mutex
             if (!guard.isLocked()) {
                 finalRes = Error(Server::ERR_RCV_BUSY, "server busy");
@@ -224,12 +231,6 @@ Server::Result Server::handleRequest(const Modbus::Frame& request,
                     Modbus::makeException(request, response, Modbus::SLAVE_DEVICE_BUSY);
                     shouldReply = true;
                 }
-                break;
-            }
-
-            // Checked again: setSlaveId() may have changed the ID while we waited for the mutex
-            if (!isAddressedToUs(request, sourceInterface)) {
-                finalRes = Error(Server::ERR_RCV_WRONG_SLAVE_ID);
                 break;
             }
 
