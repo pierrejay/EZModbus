@@ -494,7 +494,7 @@ namespace Modbus {
 
         Bridge(ModbusInterface::IInterface& interface1,
                ModbusInterface::IInterface& interface2,
-               uint32_t timeoutMs = DEFAULT_TIMEOUT_MS); // 1000 ms by default
+               uint32_t timeoutMs = DEFAULT_TIMEOUT_MS); // 1000 ms by default, below the TCP safety timeout
 
         Result begin();
     };

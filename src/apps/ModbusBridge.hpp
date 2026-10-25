@@ -7,6 +7,7 @@
 
 #include "core/ModbusCore.h"
 #include "interfaces/ModbusInterface.hpp"
+#include "interfaces/ModbusTCP.h" // TCP server transaction safety timeout
 #include "utils/ModbusDebug.hpp"
 #include "freertos/timers.h"
 
@@ -25,6 +26,9 @@ public:
     // Max time for the device behind the bridge to answer, before replying a
     // GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND exception to the requester
     static constexpr uint32_t DEFAULT_TIMEOUT_MS = (uint32_t)EZMODBUS_BRIDGE_TIMEOUT_MS;
+    // A TCP server side closes a request's transaction after its safety timeout: the bridge must
+    // answer before, or its late answer would go to the next request
+    static constexpr uint32_t MAX_TIMEOUT_MS = ModbusInterface::TCP::TCP_TRANSACTION_SAFETY_TIMEOUT_MS - 1;
     static constexpr TickType_t TIMER_CMD_TOUT_TICKS = pdMS_TO_TICKS(5) > 0 ? pdMS_TO_TICKS(5) : 1; // Bounded wait for FreeRTOS timer commands
 
 // ===================================================================================
@@ -131,6 +135,10 @@ public:
      * @return The result of the initialization
      */
     Result begin() {
+        if (_timeoutMs > MAX_TIMEOUT_MS) {
+            return Error(ERR_INIT_FAILED, "timeout must be below EZMODBUS_TCP_TXN_SAFETY_TIMEOUT");
+        }
+
         // Both interfaces must have a different role
         if (interface1.getRole() == interface2.getRole()) {
             return Error(ERR_INIT_FAILED, "both interfaces must not have the same role");

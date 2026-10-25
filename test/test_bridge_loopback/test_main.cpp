@@ -1553,6 +1553,26 @@ void test_owner_bridge_timeout_before_send() {
     TEST_ASSERT_NULL_MESSAGE(ownerAtEnd, "transaction not released after the forwarded response");
 }
 
+// The bridge timeout must stay below the TCP server's transaction safety timeout: otherwise the
+// server side could close a request's transaction while the bridge still waits for its device,
+// and the late answer would go to the next request (with its transaction ID)
+void test_bridge_timeout_below_tcp_safety_timeout() {
+    static ModbusInterface::Dummy slaveSide;
+    static DummyMaster masterSide;
+    constexpr uint32_t safetyMs = ModbusInterface::TCP::TCP_TRANSACTION_SAFETY_TIMEOUT_MS;
+
+    auto* bridge = new (ownerBridgeStorage) Modbus::Bridge(masterSide, slaveSide, safetyMs);
+    Modbus::Bridge::Result tooLong = bridge->begin();
+    bridge->~Bridge();
+    bridge = new (ownerBridgeStorage) Modbus::Bridge(masterSide, slaveSide, safetyMs - 1);
+    Modbus::Bridge::Result below = bridge->begin();
+    bridge->~Bridge();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Bridge::ERR_INIT_FAILED, tooLong, "bridge timeout not below the TCP safety timeout accepted");
+    TEST_ASSERT_EQUAL(Modbus::Bridge::SUCCESS, below);
+}
+
 // Interfaces without owners keep their abort calls: on timeout & on destruction while active
 // only (not after a response, nor on destruction while idle), Client & Bridge alike.
 void test_custom_interface_abort_calls() {
@@ -1864,6 +1884,7 @@ void setup() {
     RUN_TEST(test_owner_released_before_completion_callback);
     RUN_TEST(test_owner_response_before_tx_result_dropped);
     RUN_TEST(test_owner_bridge_timeout_before_send);
+    RUN_TEST(test_bridge_timeout_below_tcp_safety_timeout);
     RUN_TEST(test_custom_interface_abort_calls);
     RUN_TEST(test_client_timer_rearm_failure);
     RUN_TEST(test_client_zero_timeout); // Last: crashed (assert) before the fix
