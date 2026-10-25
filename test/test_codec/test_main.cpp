@@ -1934,11 +1934,34 @@ void test_codec_encode_rejects_truncated() {
     TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::RTU::encode(F, rtuFit), "RTU frame fitting exactly rejected");
 }
 
+// Regression: a register response was decoded without bounding its byte count against the frame
+// data (125 registers): 254 bytes wrote 127 registers, past Frame::data. The TCP & RTU envelopes
+// limit it on the wire, not a direct call.
+void test_codec_register_response_bounded() {
+    using namespace Modbus;
+    uint8_t _pdu[2 + 254];
+    _pdu[0] = READ_HOLDING_REGISTERS;
+    _pdu[1] = 254;
+    for (size_t i = 2; i < sizeof(_pdu); i++) _pdu[i] = 0xAB;
+
+    Frame F;
+    ByteBuffer tooLong(static_cast<const uint8_t*>(_pdu), sizeof(_pdu));
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_BYTE_COUNT, ModbusCodec::PDU::setFromBytes(tooLong, F, RESPONSE),
+                              "register response above 125 registers decoded");
+
+    _pdu[1] = 2 * MAX_REGISTERS_READ;
+    ByteBuffer maxLen(static_cast<const uint8_t*>(_pdu), 2 + 2 * MAX_REGISTERS_READ);
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, ModbusCodec::PDU::setFromBytes(maxLen, F, RESPONSE),
+                              "register response of 125 registers rejected");
+    TEST_ASSERT_EQUAL(MAX_REGISTERS_READ, F.regCount);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_codec_rtu);
     RUN_TEST(test_codec_tcp);
     RUN_TEST(test_codec_encode_rejects_truncated);
+    RUN_TEST(test_codec_register_response_bounded);
     RUN_TEST(test_codec_read_coils_bytecount_overflow);
     RUN_TEST(test_codec_write_multiple_regcount_validation);
     RUN_TEST(test_codec_exception_edge_cases);
