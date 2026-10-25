@@ -33,8 +33,13 @@ UART::UART(uart_port_t uart_num,
             _config_valid = false;
             Modbus::Debug::LOG_MSGF("Invalid UART port %d, interface will fail to begin()", (int)_uart_num);
         }
-        // Initialize _current_hw_config with the provided parameters
-        decode_config_flags(_config_flags, _current_hw_config.data_bits, _current_hw_config.parity, _current_hw_config.stop_bits);
+        // Initialize _current_hw_config with the provided parameters (an invalid config fails begin() too)
+        if (isValidConfig(_config_flags)) {
+            decode_config_flags(_config_flags, _current_hw_config.data_bits, _current_hw_config.parity, _current_hw_config.stop_bits);
+        } else {
+            _config_valid = false;
+            Modbus::Debug::LOG_MSGF("Invalid UART config 0x%X, interface will fail to begin()", (unsigned int)_config_flags);
+        }
         _current_hw_config.baud_rate = _baud_rate;
         _current_hw_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
         // Use LP source clock for UART_LP ports
@@ -105,7 +110,7 @@ UART::~UART() {
 esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
     Lock guard(_driver_mutex);
     if (!_config_valid) {
-        Modbus::Debug::LOG_MSGF("Port %d invalid (unrecognized Serial or out-of-range port), cannot begin", (int)_uart_num);
+        Modbus::Debug::LOG_MSGF("Port %d invalid (unrecognized Serial, out-of-range port or invalid config), cannot begin", (int)_uart_num);
         return ESP_ERR_INVALID_ARG;
     }
     if (_is_driver_installed) {
@@ -542,13 +547,13 @@ esp_err_t UART::applyRuntimeConfig(const uart_config_t& cfg) {
  * @return true if data bits, parity & stop bits are all valid
  */
 bool UART::isValidConfig(uint32_t flags) {
-    uart_word_length_t dataBits;
-    uart_parity_t parity;
-    uart_stop_bits_t stopBits;
-    decode_config_flags(flags, dataBits, parity, stopBits);
-    return dataBits <= UART_DATA_8_BITS &&
-           (parity == UART_PARITY_DISABLE || parity == UART_PARITY_EVEN || parity == UART_PARITY_ODD) &&
-           stopBits >= UART_STOP_BITS_1 && stopBits <= UART_STOP_BITS_2;
+    // Checked as integers: an out of range value can't be converted to the IDF enums
+    const uint32_t dataBits = flags & 0xFF;
+    const uint32_t parity = (flags >> 8) & 0xFF;
+    const uint32_t stopBits = (flags >> 16) & 0xFF;
+    return dataBits <= (uint32_t)UART_DATA_8_BITS &&
+           (parity == (uint32_t)UART_PARITY_DISABLE || parity == (uint32_t)UART_PARITY_EVEN || parity == (uint32_t)UART_PARITY_ODD) &&
+           stopBits >= (uint32_t)UART_STOP_BITS_1 && stopBits <= (uint32_t)UART_STOP_BITS_2;
 }
 
 void UART::restoreRxTimeout() {
