@@ -27,7 +27,7 @@ ESP-IDF 6.x is supported starting with EZModbus 1.1.9.
 
     ```yaml
     dependencies:
-      pierrejay/ezmodbus: "^1.1.9"
+      pierrejay/ezmodbus: "^1.2.0"
     ```
 
 * Build your project - the component will be downloaded automatically:
