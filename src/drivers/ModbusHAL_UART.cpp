@@ -116,11 +116,12 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
     // DE pin management:
     //  - HP UART -> hardware RS485 half-duplex mode
     //  - LP UART -> soft GPIO toggling (RS485 mode unavailable)
+    // A failed begin() leaves the object as it was: the members change once everything succeeded
     const bool has_de = (_pin_rts_de != GPIO_NUM_NC);
-    _soft_de = false;
+    bool soft_de = false;
     #if (SOC_UART_LP_NUM >= 1)
     if (has_de && (int)_uart_num >= SOC_UART_HP_NUM) {
-        _soft_de = true;
+        soft_de = true;
     }
     #endif
 
@@ -130,7 +131,7 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
         return err;
     }
 
-    int rts_pin_to_set = (has_de && !_soft_de) ? (int)_pin_rts_de : UART_PIN_NO_CHANGE;
+    int rts_pin_to_set = (has_de && !soft_de) ? (int)_pin_rts_de : UART_PIN_NO_CHANGE;
     err = uart_set_pin(_uart_num, _pin_tx, _pin_rx, rts_pin_to_set, UART_PIN_NO_CHANGE /*CTS*/);
     if (err != ESP_OK) {
         Modbus::Debug::LOG_MSGF("Error: uart_set_pin FAILED for port %d with TX:%d RX:%d RTS:%d Error: %s", _uart_num, _pin_tx, _pin_rx, rts_pin_to_set, esp_err_to_name(err));
@@ -147,23 +148,28 @@ esp_err_t UART::begin(QueueHandle_t* out_event_queue, int intr_alloc_flags) {
         return err;
     }
     
+    // From here, a failure uninstalls the driver
+    auto failInstalled = [this](esp_err_t e) {
+        uart_driver_delete(_uart_num);
+        _internal_event_queue_handle = nullptr;
+        return e;
+    };
+
     if (!_internal_event_queue_handle && DRIVER_EVENT_QUEUE_SIZE > 0) {
          Modbus::Debug::LOG_MSGF("Error: uart_driver_install succeeded but queue handle is null for port %d", _uart_num);
-         return ESP_FAIL;
+         return failInstalled(ESP_FAIL);
     }
 
     if (has_de) {
-        err = _soft_de ? setupSoftDEUnsafe() : setRS485ModeUnsafe(true);
+        err = soft_de ? setupSoftDEUnsafe() : setRS485ModeUnsafe(true);
         if (err != ESP_OK) {
             Modbus::Debug::LOG_MSGF("Error: Failed to set up RS485 direction control for port %d: %s", _uart_num, esp_err_to_name(err));
-            uart_driver_delete(_uart_num);
-            _internal_event_queue_handle = nullptr;
-            _is_driver_installed = false;
-            return err;
+            return failInstalled(err);
         }
-        Modbus::Debug::LOG_MSGF("Port %d configured for RS485 Half-Duplex with %s DE on pin %d", _uart_num, _soft_de ? "soft" : "hw", (int)_pin_rts_de);
+        Modbus::Debug::LOG_MSGF("Port %d configured for RS485 Half-Duplex with %s DE on pin %d", _uart_num, soft_de ? "soft" : "hw", (int)_pin_rts_de);
     }
 
+    _soft_de = soft_de;
     _is_driver_installed = true;
     if (out_event_queue) *out_event_queue = _internal_event_queue_handle;
 
