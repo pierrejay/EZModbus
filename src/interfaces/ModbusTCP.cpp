@@ -657,6 +657,7 @@ uint16_t TCP::getNextOutgoingTransactionId() {
  * @note IMPORTANT: must ONLY be called from rxTxTask context!
  */
 bool TCP::beginTransaction(int socketNum, uint32_t connId, uint16_t transactionId) {
+    Lock guard(_txMutex); // sendFrame() reads the transaction under it
     if (_currentTransaction.active) {
         Modbus::Debug::LOG_MSG("Transaction already in progress");
         return false;
@@ -670,6 +671,7 @@ bool TCP::beginTransaction(int socketNum, uint32_t connId, uint16_t transactionI
  * @note IMPORTANT: must ONLY be called from rxTxTask context!
  */
 void TCP::endTransaction() {
+    Lock guard(_txMutex); // sendFrame() reads the transaction under it
     if (_currentTransaction.active) {
         Modbus::Debug::LOG_MSGF("Transaction ended on socket: %d with TID: %d", _currentTransaction.socketNum, _currentTransaction.tid);
         _currentTransaction.clear();

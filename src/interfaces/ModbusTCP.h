@@ -48,7 +48,9 @@ public:
     // DATA STRUCTURES
     // ===================================================================================
 
-    /* @brief Stores the current transaction context */
+    /* @brief Stores the current transaction context
+     * @note Written by the interface task under _txMutex: sendFrame() reads it under the same lock
+     */
     struct TransactionCtx {
         std::atomic<uint32_t> active{0}; // Also read by other tasks (isReady())
         uint32_t startMs = 0;
