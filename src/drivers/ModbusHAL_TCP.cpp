@@ -28,7 +28,6 @@ TCP::TCP()
       _listenSocket(-1),
       _clientSocket(-1),
       _isServer(false),
-      _isRunning(false),
       _cfgMode(CfgMode::UNINIT),
       _cfgPort(0) {
     _activeSocketCount = 0;

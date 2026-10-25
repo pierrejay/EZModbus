@@ -142,7 +142,7 @@ private:
     int _listenSocket;              // Server listen socket
     int _clientSocket;              // Client mode connected socket
     bool _isServer;                 // True if running in server mode
-    volatile bool _isRunning;       // Task control flag
+    std::atomic<uint32_t> _isRunning{0}; // Task control flag (read by the task)
     
     // Mutex for protecting shared resources like _activeSockets
     Mutex _socketsMutex; 
