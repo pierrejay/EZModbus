@@ -482,6 +482,10 @@ class PDU {
 
         // Otherwise, build the rest of the frame, doing further checks on register count & data size
         else {
+            // The data loops follow regCount: bounded first (the TCP & RTU encoders check it too)
+            if (isValidFunctionCode((uint8_t)pdu.fc) && !isValidRegisterCount((uint16_t)pdu.regCount, (uint8_t)pdu.fc, type)) {
+                return HandleError(bytes, ERR_INVALID_REG_COUNT);
+            }
             switch (pdu.fc) {
                 case Modbus::READ_COILS:
                 case Modbus::READ_DISCRETE_INPUTS:

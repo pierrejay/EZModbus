@@ -1956,6 +1956,22 @@ void test_codec_register_response_bounded() {
     TEST_ASSERT_EQUAL(MAX_REGISTERS_READ, F.regCount);
 }
 
+// Regression: the PDU encoder looped over regCount without bounding it to the frame data: a direct
+// call with 130 registers read past Frame::data (the TCP & RTU encoders validate it first).
+void test_codec_pdu_encoder_bounds_reg_count() {
+    using namespace Modbus;
+    Frame F;
+    F.type = RESPONSE;
+    F.fc = READ_HOLDING_REGISTERS;
+    F.slaveId = 1;
+    F.regCount = 130;
+    uint8_t _buf[300];
+    ByteBuffer buf(_buf, sizeof(_buf));
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_REG_COUNT, ModbusCodec::PDU::appendToBytes(F, RESPONSE, buf),
+                              "130 registers encoded");
+    TEST_ASSERT_EQUAL(0, buf.size());
+}
+
 // Regression: bound checks written as "index + length > limit" wrapped around for huge values and
 // let the access through. Before the fix the first two cases failed, the next ones crashed (huge
 // copy), hence this test runs last.
@@ -2023,6 +2039,7 @@ int main(void) {
     RUN_TEST(test_conversion_capacity_limits);
     RUN_TEST(test_conversion_insufficient_data);
     RUN_TEST(test_conversion_mixed_with_raw_api);
+    RUN_TEST(test_codec_pdu_encoder_bounds_reg_count);
     RUN_TEST(test_bounds_checks_dont_wrap); // Last: crashed before the fix
     UNITY_END();
 }
