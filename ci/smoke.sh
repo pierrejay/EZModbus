@@ -49,7 +49,7 @@ mkdir -p "$REPO_ROOT/ci/.logs" "$REPO_ROOT/ci/.work/ccache"
 
 echo ">> Smoke test: IDF $IDF, $TARGET${BUILD#build}, port $DEV"
 # Runs as root like the CI container (IDF writes under /opt/esp), files handed back on exit
-docker run --rm --device "$DEV" \
+docker run --rm --network host --device "$DEV" \
     -e CCACHE_DIR=/project/ci/.work/ccache \
     -e WORK_DIR="/project/$WORK" -e LOG_DIR="/project/$WORK/logs" \
     -v "$REPO_ROOT:/project" -w /project \
