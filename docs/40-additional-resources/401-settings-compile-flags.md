@@ -74,6 +74,7 @@ For now, EZModbus doesn't provide config items editable directly via IDF's `menu
 * **`EZMODBUS_BRIDGE_TIMEOUT_MS`**
     * Timeout before the bridge replies a `GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND` exception if the device behind it doesn't answer (ms)
     * Can also be set per bridge in its constructor
+    * Must be below `EZMODBUS_TCP_TXN_SAFETY_TIMEOUT`
     * Default: 1000
 
 ### ModbusRTU.h

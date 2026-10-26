@@ -20,6 +20,7 @@ TCP::TCP(ModbusHAL::TCP& hal, Modbus::Role role)
 {
     _role = role;
     _extendedSlaveIds = true; // TCP Unit IDs: 1-255
+    _tracksOwner = true;
 
     if (role == Modbus::CLIENT) {
         Modbus::Debug::LOG_MSG("ModbusInterface::TCP (Client) created – connect HAL before calling begin()");
@@ -181,6 +182,17 @@ TCP::Result TCP::sendFrame(const Modbus::Frame &frame, TxResultCallback txCallba
             return Error(ERR_NOT_INITIALIZED, "TCP interface not initialized");
         }
 
+        if (_role == Modbus::CLIENT && ownedByOther(ctx)) {
+            if (txCallback) txCallback(ERR_BUSY, ctx);
+            return Error(ERR_BUSY, "transaction owned by another requester");
+        }
+
+        // Client: one transaction at a time, whoever sends (it would be sent, then fail to begin)
+        if (_role == Modbus::CLIENT && _currentTransaction.active) {
+            if (txCallback) txCallback(ERR_BUSY, ctx);
+            return Error(ERR_BUSY, "transaction in progress");
+        }
+
         if (_role == Modbus::SERVER && (!_currentTransaction.active || _currentTransaction.socketNum == -1)) {
             if (txCallback) txCallback(ERR_SEND_FAILED, ctx);
             return Error(ERR_SEND_FAILED, "Server not in transaction");
@@ -212,11 +224,15 @@ TCP::Result TCP::sendFrame(const Modbus::Frame &frame, TxResultCallback txCallba
         _txCtx.abortCount = _abortCount;
         _txCtx.connId = (_role == Modbus::SERVER) ? _currentTransaction.connId : 0;
 
+        // The requester owns the transaction from now on, until it releases it
+        const bool claimed = (_role == Modbus::CLIENT) && claimTransaction(ctx);
+
         // Signal dans la TX queue (taille 1) pour réveiller rxTxTask
         void* signalPtr = this; // valeur bidon
         if(xQueueSend(_txRequestQueue, &signalPtr, 0) != pdTRUE) {
             _txBuffer.clear();
             _txCtx.clear();
+            if (claimed) unclaimTransaction(ctx);
             if (txCallback) txCallback(ERR_BUSY, ctx);
             return Error(ERR_BUSY, "TX queue full");
         }
@@ -238,9 +254,9 @@ bool TCP::isReady() {
     Lock guard(_txMutex, 0); // try-lock no wait
     if (!guard.isLocked() || _txBuffer.size() > 0) return false;
 
-    // If the transaction is active, the interface is busy ONLY for a client
+    // If the transaction is active or owned, the interface is busy ONLY for a client
     // (a server still accepts responses to pending client requests)
-    if (_role == Modbus::CLIENT && _currentTransaction.active) return false;
+    if (_role == Modbus::CLIENT && (_currentTransaction.active || isOwned())) return false;
 
     return _tcpHAL.isReady();
 }
@@ -502,7 +518,7 @@ TCP::Result TCP::fetchSocketData(int socketNum, ByteBuffer& rcvBuf, uint16_t& rc
                 _tcpHAL.closeConnection(socketNum, connId);
                 return Error(ERR_RX_FAILED, "incomplete frame, connection closed");
             }
-            WAIT_MS(1); // Wait for the rest of the frame
+            vTaskDelay(1); // Wait for the rest of the frame (1 tick: WAIT_MS(1) is 0 tick below 1 kHz)
             continue;
         }
 
@@ -641,6 +657,7 @@ uint16_t TCP::getNextOutgoingTransactionId() {
  * @note IMPORTANT: must ONLY be called from rxTxTask context!
  */
 bool TCP::beginTransaction(int socketNum, uint32_t connId, uint16_t transactionId) {
+    Lock guard(_txMutex); // sendFrame() reads the transaction under it
     if (_currentTransaction.active) {
         Modbus::Debug::LOG_MSG("Transaction already in progress");
         return false;
@@ -654,6 +671,7 @@ bool TCP::beginTransaction(int socketNum, uint32_t connId, uint16_t transactionI
  * @note IMPORTANT: must ONLY be called from rxTxTask context!
  */
 void TCP::endTransaction() {
+    Lock guard(_txMutex); // sendFrame() reads the transaction under it
     if (_currentTransaction.active) {
         Modbus::Debug::LOG_MSGF("Transaction ended on socket: %d with TID: %d", _currentTransaction.socketNum, _currentTransaction.tid);
         _currentTransaction.clear();
@@ -716,12 +734,17 @@ void TCP::rxTxTask(void* tcp) {
         // ----------- Transaction timeout -----------
         if (self->_currentTransaction.active) {
             uint32_t now = TIME_MS();
-            if (now - self->_currentTransaction.startMs > TCP_TRANSACTION_SAFETY_TIMEOUT_MS
-                || cleanupTxnFlag) {
-                Modbus::Debug::LOG_MSGF("Transaction %s on socket %d TID: %d",
-                    cleanupTxnFlag ? "aborted" : "timeout",
-                    self->_currentTransaction.socketNum, self->_currentTransaction.tid);
-                self->endTransaction();
+            if (now - self->_currentTransaction.startMs > TCP_TRANSACTION_SAFETY_TIMEOUT_MS || cleanupTxnFlag) {
+                // A response waiting to be sent ends its transaction itself (sent or not): until
+                // then, another request must not take its place. Checked & closed under the lock
+                // sendFrame() queues it with.
+                Lock guard(self->_txMutex);
+                if (cleanupTxnFlag || self->_txBuffer.size() == 0) {
+                    Modbus::Debug::LOG_MSGF("Transaction %s on socket %d TID: %d",
+                        cleanupTxnFlag ? "aborted" : "timeout",
+                        self->_currentTransaction.socketNum, self->_currentTransaction.tid);
+                    self->_currentTransaction.clear();
+                }
             }
         }
         cleanupTxnFlag = false; // Always reset flag here (avoids killing the next active Txn)

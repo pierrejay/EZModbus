@@ -71,7 +71,12 @@ void Client::PendingRequest::onTxResult(ModbusInterface::IInterface::Result resu
     {
         Lock guard(_mutex);
         _txPending = false;
-        if (!_active) return; // Already ended (e.g. timeout while the interface was reconnecting)
+        if (!_active) {
+            // Already ended (e.g. timeout while the interface was reconnecting, or before the frame
+            // was queued): the transaction its frame claimed meanwhile is released here
+            _client->_interface.releaseLateClaim(_client);
+            return;
+        }
         if (result != ModbusInterface::IInterface::SUCCESS) {
             completion = finishLocked(ERR_TX_FAILED, nullptr);
         } else if (Modbus::isBroadcastId(_meta.slaveId)) {
@@ -130,8 +135,7 @@ void Client::PendingRequest::timeoutCallback(TimerHandle_t timer) {
     {
         Lock guard(self->_mutex);
         if (!self->_active || !self->deadlineReachedLocked()) return;
-        self->_client->_interface.abortCurrentTransaction(); // Before a newer request can start
-        completion = self->finishLocked(ERR_TIMEOUT, nullptr);
+        completion = self->finishLocked(ERR_TIMEOUT, nullptr); // Releases & aborts the transaction
     }
     completion.deliver();
     Modbus::Debug::LOG_MSG("Request timed out");
@@ -145,14 +149,16 @@ void Client::PendingRequest::timeoutCallback(TimerHandle_t timer) {
 void Client::PendingRequest::finishSyncWait(EventGroupHandle_t waiter) {
     Lock guard(_mutex);
     if (!_active || _waiterEventGroup != waiter) return;
-    _client->_interface.abortCurrentTransaction(); // Before a newer request can start
-    (void)finishLocked(ERR_TIMEOUT, nullptr); // Nothing to deliver: no callback in sync mode
+    (void)finishLocked(ERR_TIMEOUT, nullptr); // Releases & aborts the transaction; nothing to deliver in sync mode
 }
 
 /* @brief End the active request (under _mutex)
  * @return The completion to deliver once _mutex is released
+ * @note The interface is released first (what's left of a timed out request aborted): the caller
+ *       woken below can send its next request right away
  */
 Client::PendingRequest::Completion Client::PendingRequest::finishLocked(Result result, const Modbus::Frame* response) {
+    _client->_interface.releaseTransaction(_client, result == ERR_TIMEOUT);
     if (response && _pResponse) *_pResponse = *response;
     if (_tracker) *_tracker = result; // After the response: whoever sees the result reads a complete response
     if (_waiterEventGroup) xEventGroupSetBits(_waiterEventGroup, SYNC_COMPLETION_BIT);
@@ -243,7 +249,7 @@ Client::~Client() {
     // The interface & the timeout timer must not call this object anymore: a request still
     // held by the interface is aborted (best effort), and its TX result waited for
     _interface.removeRcvCallbacks(this);
-    if (_pendingRequest.isActive()) _interface.abortCurrentTransaction();
+    _interface.releaseTransaction(this, _pendingRequest.isActive());
     _interface.waitTxCallbackDone(this);
     _pendingRequest.deleteTimer();
     _pendingRequest.detach(); // A request still pending is dropped without completion

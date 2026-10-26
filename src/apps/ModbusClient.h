@@ -162,8 +162,9 @@ private:
     * Transitions: start() (calling task), onTxResult() (interface task, or calling task on a
     * synchronous sendFrame() failure), onResponse() (interface task), timeoutCallback() (timer
     * daemon), finishSyncWait() (calling task), deleteTimer() (destruction).
-    * The interface abort is posted under _mutex: before a newer request can start, so that it
-    * can't cancel it (abortCurrentTransaction() is short & never calls the application back).
+    * The interface is released (what's left aborted) under _mutex, when the request ends: the
+    * transaction is this client's until then, other requesters sharing the interface are refused
+    * (releaseTransaction() is short & never calls the application back).
     * Completion callbacks are called outside _mutex: a new request may start meanwhile.
     */
     class PendingRequest {

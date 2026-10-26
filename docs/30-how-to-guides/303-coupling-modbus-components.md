@@ -87,7 +87,7 @@ controlClient.begin();
 ```
 
 !!! note
-    **Important Note**: only one client can issue a request at a time. The others will get an `ERR_BUSY` error when calling `sendRequest()`.
+    **Important Note**: only one client can issue a request at a time. The interface belongs to it until its request ends (response, timeout or TX failure): the others get an `ERR_BUSY` error when calling `sendRequest()`, and never receive its response. This holds for the built-in TCP & RTU interfaces; a custom interface must track the owner of the transaction to give the same guarantee (see `ModbusInterface.hpp`).
 
 **✅ Supported (TCP)**
 

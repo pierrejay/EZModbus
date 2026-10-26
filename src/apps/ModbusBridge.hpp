@@ -7,6 +7,7 @@
 
 #include "core/ModbusCore.h"
 #include "interfaces/ModbusInterface.hpp"
+#include "interfaces/ModbusTCP.h" // TCP server transaction safety timeout
 #include "utils/ModbusDebug.hpp"
 #include "freertos/timers.h"
 
@@ -25,6 +26,9 @@ public:
     // Max time for the device behind the bridge to answer, before replying a
     // GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND exception to the requester
     static constexpr uint32_t DEFAULT_TIMEOUT_MS = (uint32_t)EZMODBUS_BRIDGE_TIMEOUT_MS;
+    // A TCP server side closes a request's transaction after its safety timeout: the bridge must
+    // answer before, or its late answer would go to the next request
+    static constexpr uint32_t MAX_TIMEOUT_MS = ModbusInterface::TCP::TCP_TRANSACTION_SAFETY_TIMEOUT_MS - 1;
     static constexpr TickType_t TIMER_CMD_TOUT_TICKS = pdMS_TO_TICKS(5) > 0 ? pdMS_TO_TICKS(5) : 1; // Bounded wait for FreeRTOS timer commands
 
 // ===================================================================================
@@ -108,7 +112,12 @@ public:
         // interface is aborted (best effort), and its TX result waited for
         interface1.removeRcvCallbacks(this);
         interface2.removeRcvCallbacks(this);
-        if (_pendingActive && masterInterface) masterInterface->abortCurrentTransaction();
+        if (masterInterface) {
+            // Under the mutex: a timer closing the request meanwhile releases (aborts) it first
+            Lock guard(_pendingMutex);
+            masterInterface->releaseTransaction(this, _pendingActive);
+            _pendingActive = false;
+        }
         interface1.waitTxCallbackDone(this);
         interface2.waitTxCallbackDone(this);
         if (!_timer) return;
@@ -131,6 +140,10 @@ public:
      * @return The result of the initialization
      */
     Result begin() {
+        if (_timeoutMs > MAX_TIMEOUT_MS) {
+            return Error(ERR_INIT_FAILED, "timeout must be below EZMODBUS_TCP_TXN_SAFETY_TIMEOUT");
+        }
+
         // Both interfaces must have a different role
         if (interface1.getRole() == interface2.getRole()) {
             return Error(ERR_INIT_FAILED, "both interfaces must not have the same role");
@@ -282,7 +295,13 @@ private:
         {
             Lock guard(_pendingMutex);
             _txPending = false;
-            if (result == ModbusInterface::IInterface::SUCCESS || !closePendingLocked(ec, exception)) return;
+            if (!_pendingActive) {
+                // Closed before its TX result (e.g. timeout before the frame was queued): the
+                // transaction its frame claimed meanwhile is released here
+                masterInterface->releaseLateClaim(this);
+                return;
+            }
+            if (result == ModbusInterface::IInterface::SUCCESS || !closePendingLocked(ec, exception, false)) return;
         }
         Modbus::Debug::LOG_MSGF("Bridge: replying exception %s", Modbus::toString(ec));
         slaveInterface->sendFrame(exception, nullptr, nullptr);
@@ -303,6 +322,7 @@ private:
                 return;
             }
             _pendingActive = false;
+            masterInterface->releaseTransaction(this, false);
         }
         // The timer isn't stopped: its callback finds no expired request (stopping it here could
         // cancel the timer of a request forwarded meanwhile)
@@ -317,10 +337,10 @@ private:
 
     /* @brief Close the pending request (if any) by replying an exception to the slave side
      * @param onTimeout Called by the timer: only close the request if its timeout has elapsed (a
-     *        late timer event must not expire a newer request), and abort it on the master side
+     *        late timer event must not expire a newer request)
      * @return True if a pending request was closed
-     * @note The abort is posted under the mutex: before a newer request can be forwarded, so that
-     *       it can't cancel it
+     * @note The master side is released (what's left aborted) under the mutex: before a newer
+     *       request can be forwarded
      */
     bool closePendingWithException(Modbus::ExceptionCode ec, bool onTimeout = false) {
         Modbus::Frame exception;
@@ -328,8 +348,7 @@ private:
             Lock guard(_pendingMutex);
             if (!_pendingActive) return false; // Already answered
             if (onTimeout && TIME_MS() - _pendingStartMs < _timeoutMs) return false;
-            if (onTimeout) masterInterface->abortCurrentTransaction(); // Non-blocking
-            closePendingLocked(ec, exception);
+            closePendingLocked(ec, exception, onTimeout); // Releases the transaction (aborted on timeout)
         }
         Modbus::Debug::LOG_MSGF("Bridge: replying exception %s", Modbus::toString(ec));
         slaveInterface->sendFrame(exception, nullptr, nullptr);
@@ -337,12 +356,14 @@ private:
     }
 
     /* @brief Close the pending request (if any) & build its exception response
+     * @param abort True if the request is given up (timeout): what's left of it is aborted
      * @note Caller holds _pendingMutex, and sends the exception after releasing it
      * @return True if a pending request was closed
      */
-    bool closePendingLocked(Modbus::ExceptionCode ec, Modbus::Frame& exception) {
+    bool closePendingLocked(Modbus::ExceptionCode ec, Modbus::Frame& exception, bool abort) {
         if (!_pendingActive) return false;
         _pendingActive = false;
+        masterInterface->releaseTransaction(this, abort); // Non-blocking
         exception.clear();
         exception.type = Modbus::RESPONSE;
         exception.fc = _pending.fc;

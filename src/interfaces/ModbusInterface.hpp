@@ -137,6 +137,9 @@ namespace ModbusInterface {
          *       returning when it fails at once, from the interface task otherwise)
          * @note Contract: txCallback returns before the response to this frame is delivered to the
          *       receive callbacks (Client & Bridge drop a response whose request's TX result isn't back)
+         * @note Client side, interfaces tracking the owner (TCP, RTU): a request sent with a ctx makes
+         *       it the owner of the transaction until it calls releaseTransaction(ctx); meanwhile,
+         *       other requesters get ERR_BUSY and don't receive its response
          */
         virtual Result sendFrame(const Modbus::Frame& frame, 
                                  TxResultCallback txCallback = nullptr, void* ctx = nullptr) = 0;
@@ -146,13 +149,42 @@ namespace ModbusInterface {
          */
         virtual bool isReady() = 0;
         
-        /* @brief Abort current transaction (cleanup hint from client)
-         * @note Called when client times out to allow transport cleanup
+        /* @brief Abort current transaction (transport cleanup, called by releaseTransaction())
+         * @note Called when a request is given up (timeout, destruction while active)
          * @note Default implementation is no-op for stateless transports
          * @note Contract: short & non-blocking, never calls the application back nor takes its
-         *       locks (the Client calls it under its own mutex)
+         *       locks (the Client releases under its own mutex)
          */
         virtual void abortCurrentTransaction() {};
+
+        /* @brief Client side: end of the requester's request
+         * @param ctx The requester (ctx passed to sendFrame())
+         * @param abort True if the request is given up (timeout, destruction while active): what's
+         *        left of it (frame not sent yet, response awaited) is aborted before another
+         *        requester can claim the transaction. False once it completed (response, TX failure)
+         * @note Interfaces tracking the owner: no effect unless ctx owns the transaction (a requester
+         *       can't release nor abort another's)
+         * @note Interfaces without owners (custom ones not calling claimTransaction()): only the
+         *       abort, if requested
+         */
+        void releaseTransaction(void* ctx, bool abort) {
+            if (!_tracksOwner) {
+                if (abort) abortCurrentTransaction();
+                return;
+            }
+            releaseOwned(ctx, abort);
+        }
+
+        /* @brief Client side: TX result of a request that already ended (e.g. timed out before its
+         *        frame was queued)
+         * @param ctx The requester (ctx passed to sendFrame())
+         * @note If its frame claimed the transaction meanwhile, releases it & aborts what's left (e.g.
+         *       a TCP transaction awaiting the response). No effect otherwise, nor on interfaces without
+         *       owners (their abort came with the end of the request)
+         */
+        void releaseLateClaim(void* ctx) {
+            if (_tracksOwner) releaseOwned(ctx, true);
+        }
 
         /* @brief Wait until no TX result callback registered with a context is pending or running
          * @param ctx The context passed to sendFrame() (application destruction)
@@ -200,12 +232,14 @@ namespace ModbusInterface {
         /* @brief Notify all callbacks for a spontaneous message
          * @param frame The frame to notify
          * @return The result of the operation
+         * @note Client side: only the owner of the transaction gets the response
          */
         Result notifyCallbacks(const Modbus::Frame& frame) {
             Lock guard(_callbackMutex);  // Lock with max timeout
+            void* owner = (_role == Modbus::MASTER) ? currentOwner() : nullptr;
             bool hasCallback = false;
             for (const auto& cb : _rcvCallbacks) {
-                if (cb.fn) {
+                if (cb.fn && (!owner || cb.ctx == owner)) {
                     hasCallback = true;
                     cb.fn(frame, cb.ctx);
                     Modbus::Debug::LOG_MSG("Callback notified");
@@ -229,6 +263,55 @@ namespace ModbusInterface {
         }
 
     protected:
+
+        // Client side transaction owner, for the derived classes that track it (_tracksOwner set in
+        // their constructor). Called from sendFrame() under their TX lock: no other requester can
+        // claim meanwhile, the owner can only release. Lock order: TX lock, owner, abort's own locks.
+
+        /* @brief Check that no other requester owns the transaction
+         * @note A frame sent without ctx (e.g. a forwarded broadcast) needs a free transaction
+         */
+        bool ownedByOther(void* ctx) {
+            Lock guard(_ownerMutex);
+            return _owner && _owner != ctx;
+        }
+
+        /* @brief Claim the transaction for the requester, before queuing its frame
+         * @return True if newly claimed: undo with unclaimTransaction() if the frame isn't queued
+         */
+        bool claimTransaction(void* ctx) {
+            Lock guard(_ownerMutex);
+            if (!ctx || _owner) return false;
+            _owner = ctx;
+            return true;
+        }
+
+        void unclaimTransaction(void* ctx) {
+            Lock guard(_ownerMutex);
+            if (_owner == ctx) _owner = nullptr;
+        }
+
+        bool isOwned() {
+            Lock guard(_ownerMutex);
+            return _owner != nullptr;
+        }
+
+        void* currentOwner() {
+            if (!_tracksOwner) return nullptr;
+            Lock guard(_ownerMutex);
+            return _owner;
+        }
+
+        void releaseOwned(void* ctx, bool abort) {
+            Lock guard(_ownerMutex);
+            if (!ctx || _owner != ctx) return;
+            if (abort) abortCurrentTransaction(); // Before another requester can claim
+            _owner = nullptr;
+        }
+
+        bool _tracksOwner = false;
+        void* _owner = nullptr;
+        Mutex _ownerMutex;
 
         // Callback for spontaneous messages & lock to protect against concurrent access
         // (derived interfaces only call them through notifyCallbacks(): removeRcvCallbacks() relies on it)

@@ -86,7 +86,17 @@ namespace Modbus {
         }
     }
     static constexpr bool isValid(const FunctionCode fc) {
-        return fc >= NULL_FC && fc < NB_FC;
+        switch (fc) {
+            case READ_COILS:
+            case READ_DISCRETE_INPUTS:
+            case READ_HOLDING_REGISTERS:
+            case READ_INPUT_REGISTERS:
+            case WRITE_COIL:
+            case WRITE_REGISTER:
+            case WRITE_MULTIPLE_COILS:
+            case WRITE_MULTIPLE_REGISTERS: return true;
+            default: return false;
+        }
     }
     
     /* @brief Convert a function code to a register type

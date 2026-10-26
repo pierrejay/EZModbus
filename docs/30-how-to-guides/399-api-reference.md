@@ -236,13 +236,18 @@ namespace ModbusInterface {
         virtual ~IInterface() = default;
 
         virtual Result begin() = 0;
-        // Calls txCallback exactly once per call, whatever the result,
-        // and before delivering the response to the receive callbacks
+        // Calls txCallback exactly once, before the response is delivered.
+        // Client side: the sending Client (ctx) owns the interface until it releases
+        // it (others get ERR_BUSY & never receive its response)
         virtual Result sendFrame(const Modbus::Frame& frame,
                                  TxResultCallback txCallback = nullptr,
                                  void* ctx = nullptr) = 0;
         virtual bool isReady() = 0;
-        // Short & non-blocking, never calls the application back
+        // Owning Client: end of its request (abort = true if it gave up waiting)
+        void releaseTransaction(void* ctx, bool abort);
+        // Owning Client: TX result of a request that already timed out
+        void releaseLateClaim(void* ctx);
+        // Transport cleanup when a request is given up: short, non-blocking
         virtual void abortCurrentTransaction();
         // Waits until no TX callback with this context is pending or running
         virtual void waitTxCallbackDone(void* ctx);
@@ -489,7 +494,7 @@ namespace Modbus {
 
         Bridge(ModbusInterface::IInterface& interface1,
                ModbusInterface::IInterface& interface2,
-               uint32_t timeoutMs = DEFAULT_TIMEOUT_MS); // 1000 ms by default
+               uint32_t timeoutMs = DEFAULT_TIMEOUT_MS); // 1000 ms by default, below the TCP safety timeout
 
         Result begin();
     };

@@ -1516,6 +1516,125 @@ void test_concurrent_calls() {
 }
 
 
+// Rule: the bus belongs to the requester until it releases it. While A waits for a slave that
+// doesn't answer, a second Client sharing the interface must not transmit (on a half-duplex bus,
+// it would collide with the awaited response), nor can anyone else release the bus.
+Modbus::Client secondClient(ezm);
+
+void test_bus_kept_by_owner_until_released() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_BUS_KEPT_BY_OWNER_UNTIL_RELEASED");
+
+    static bool secondReady = false;
+    if (!secondReady) secondReady = secondClient.begin() == Modbus::Client::SUCCESS;
+
+    Modbus::Frame reqA = { .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = 99, // Silent
+                           .regAddress = 0, .regCount = 1, .data = {}, .exceptionCode = Modbus::NULL_EXCEPTION };
+    Modbus::Frame respA;
+    volatile Modbus::Client::Result trackerA = Modbus::Client::NODATA;
+    const auto startA = client.sendRequest(reqA, respA, (Modbus::Client::Result*)&trackerA);
+    vTaskDelay(pdMS_TO_TICKS(50)); // A sent, waiting for its response
+
+    Modbus::Frame reqB = { .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID,
+                           .regAddress = READ_HOLDING_ADDR, .regCount = 1, .data = {}, .exceptionCode = Modbus::NULL_EXCEPTION };
+    Modbus::Frame respB;
+    volatile Modbus::Client::Result trackerB = Modbus::Client::NODATA;
+    const auto startB = secondClient.sendRequest(reqB, respB, (Modbus::Client::Result*)&trackerB);
+    ezm.releaseTransaction(&secondClient, true);
+    const bool readyAfterForeignRelease = ezm.isReady();
+
+    // A times out & releases the bus: B gets through
+    uint32_t t0 = Modbus::TIME_MS();
+    while (trackerA == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS + 300) vTaskDelay(pdMS_TO_TICKS(5));
+    t0 = Modbus::TIME_MS();
+    while (trackerB == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < Modbus::Client::DEFAULT_REQUEST_TIMEOUT_MS + 300) vTaskDelay(pdMS_TO_TICKS(5)); // B, if it was admitted
+    const auto resB2 = secondClient.sendRequest(reqB, respB);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(secondReady, "second client init failed");
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, startA);
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_BUSY, startB, "B sent while A waits for its response");
+    TEST_ASSERT_FALSE_MESSAGE(readyAfterForeignRelease, "released by a requester that doesn't own it");
+    TEST_ASSERT_EQUAL(Modbus::Client::ERR_TIMEOUT, trackerA);
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, resB2, "B refused after A released");
+    TEST_ASSERT_EQUAL(MBT_INIT_HOLDING_REGISTER_VALUE(READ_HOLDING_ADDR), respB.getRegister(0));
+
+    Modbus::Logger::logln("TEST_BUS_KEPT_BY_OWNER_UNTIL_RELEASED - OK");
+    Modbus::Logger::logln();
+}
+
+// Rule: the frame can't be signalled to the interface task (UART event queue full, e.g. RX
+// flood): the claim of the bus is undone before the single TX callback, the request ends with a
+// TX failure, and another requester can send right after.
+static volatile uint32_t queueFailureCallbacks = 0;
+static volatile Modbus::Client::Result queueFailureResult = Modbus::Client::NODATA;
+
+void test_queue_failure_releases_bus() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_QUEUE_FAILURE_RELEASES_BUS");
+
+    static bool secondReady = false;
+    if (!secondReady) secondReady = secondClient.begin() == Modbus::Client::SUCCESS;
+    QueueHandle_t events = ezm_uart.getRegisteredEventQueue();
+    TaskHandle_t ifTask = ezm.getRxTxTaskHandle();
+
+    // Hold the interface task while it waits for events. The bus is idle and nothing is being
+    // sent: it can only wake up on its queue timeout, a path that takes no lock. Checked anyway
+    // once suspended: the interface must be free (TX slot & owner), otherwise the test gives up.
+    const UBaseType_t testPriority = uxTaskPriorityGet(nullptr);
+    vTaskPrioritySet(nullptr, tskIDLE_PRIORITY);
+    for (int i = 0; i < 100 && eTaskGetState(ifTask) != eBlocked; i++) vTaskDelay(1);
+    vTaskPrioritySet(nullptr, testPriority);
+    vTaskSuspend(ifTask);
+    if (!ezm.isReady()) {
+        vTaskResume(ifTask);
+        TEST_FAIL_MESSAGE("interface task suspended while the interface was busy");
+    }
+    uart_event_t filler = {};
+    while (xQueueSend(events, &filler, 0) == pdTRUE) {}
+
+    queueFailureCallbacks = 0;
+    queueFailureResult = Modbus::Client::NODATA;
+    Modbus::Frame req = { .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID,
+                          .regAddress = READ_HOLDING_ADDR, .regCount = 1, .data = {}, .exceptionCode = Modbus::NULL_EXCEPTION };
+    const auto sendA = client.sendRequest(req, [](Modbus::Client::Result result, const Modbus::Frame*, void*) {
+        queueFailureCallbacks = queueFailureCallbacks + 1;
+        queueFailureResult = result;
+    }, nullptr);
+    const bool readyAfter = ezm.isReady();
+
+    // Same with a requester sending directly, which doesn't release on failure: the interface
+    // itself must undo its claim
+    static int rawRequester;
+    static volatile uint32_t rawCallbacks;
+    rawCallbacks = 0;
+    const auto rawSend = ezm.sendFrame(req, [](ModbusInterface::IInterface::Result, void*) {
+        rawCallbacks = rawCallbacks + 1;
+    }, &rawRequester);
+    const bool readyAfterRaw = ezm.isReady();
+
+    xQueueReset(events);
+    vTaskResume(ifTask);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    Modbus::Frame respB;
+    const auto resB = secondClient.sendRequest(req, respB);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(secondReady, "second client init failed");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TX_FAILED, sendA, "request queued despite the full event queue");
+    TEST_ASSERT_EQUAL_MESSAGE(1, queueFailureCallbacks, "completion callback not called exactly once");
+    TEST_ASSERT_EQUAL(Modbus::Client::ERR_TX_FAILED, queueFailureResult);
+    TEST_ASSERT_TRUE_MESSAGE(readyAfter, "bus left claimed after the queuing failure");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(ModbusInterface::IInterface::SUCCESS, rawSend, "direct send queued despite the full event queue");
+    TEST_ASSERT_EQUAL_MESSAGE(1, rawCallbacks, "direct send: TX callback not called exactly once");
+    TEST_ASSERT_TRUE_MESSAGE(readyAfterRaw, "bus left claimed by a direct send that failed to queue");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, resB, "B refused after A's queuing failure");
+    TEST_ASSERT_EQUAL(MBT_INIT_HOLDING_REGISTER_VALUE(READ_HOLDING_ADDR), respB.getRegister(0));
+
+    Modbus::Logger::logln("TEST_QUEUE_FAILURE_RELEASES_BUS - OK");
+    Modbus::Logger::logln();
+}
+
 // -----------------------------------------------------------------------------
 // CALLBACK PATH TESTS (SUCCESS & TIMEOUT)
 // -----------------------------------------------------------------------------
@@ -2032,6 +2151,8 @@ void setup() {
     RUN_TEST(test_callback_success);
     RUN_TEST(test_callback_timeout);
     RUN_TEST(test_concurrent_calls);
+    RUN_TEST(test_bus_kept_by_owner_until_released);
+    RUN_TEST(test_queue_failure_releases_bus);
 
     // Helper template tests
     RUN_TEST(test_helper_read_uint16_holding_registers);

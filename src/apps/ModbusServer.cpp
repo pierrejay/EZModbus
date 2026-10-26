@@ -83,6 +83,10 @@ Server::Result Server::begin() {
     }
     for (size_t i = 0; i < _interfaceCount; i++) {
         if (!_interfaces[i]) return Error(Server::ERR_INIT_FAILED, "null interface");
+        // Registered twice, it would handle each request twice
+        for (size_t j = 0; j < i; j++) {
+            if (_interfaces[j] == _interfaces[i]) return Error(Server::ERR_INIT_FAILED, "same interface given twice");
+        }
     }
 
     // Initialize all interfaces with proper context routing

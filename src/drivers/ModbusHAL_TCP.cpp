@@ -711,7 +711,7 @@ bool TCP::sendMsg(const uint8_t* payload, const size_t len, const int destSocket
                 if (totalSent > 0) closeSocket(targetSocket); // partial frame already on wire -> drop connection
                 return false;
             }
-            WAIT_MS(1);
+            vTaskDelay(1); // 1 tick: WAIT_MS(1) is 0 tick below 1 kHz (busy loop)
             continue;
         }
 

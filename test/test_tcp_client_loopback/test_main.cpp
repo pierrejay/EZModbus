@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include <WiFi.h>
+#include "esp_netif.h"
 #include <unity.h>
 #include <EZModbus.h>
 #include <drivers/ModbusHAL_TCP.h>
@@ -14,12 +14,7 @@
     #define TEST_ASSERT_START() { vTaskDelay(pdMS_TO_TICKS(50)); }
 #endif
 
-// WiFi configuration
-// Configuration WiFi
-static constexpr char     WIFI_SSID[]   = "ESP32-LOOP";
-static constexpr char     WIFI_PASS[]   = "loopesp32";
-// SoftAP default IP
-static IPAddress SOFTAP_IP    = IPAddress(192, 168, 4, 1);
+// Network: every test runs over the lwIP loopback (127.0.0.1), no Wi-Fi needed
 static constexpr uint16_t  MODBUS_PORT  = 502;
 static constexpr char LOOPBACK_IP_STR[] = "127.0.0.1";
 static IPAddress LOOPBACK_IP = IPAddress(127, 0, 0, 1);
@@ -1474,7 +1469,24 @@ static int rawServerSideSocket(uint16_t serverPort, int clientSock) {
 static constexpr uint16_t RAW_SERVER_TEST_PORT = 511;
 static constexpr uint32_t RAW_SERVER_CLIENT_TIMEOUT_MS = 300;
 ModbusHAL::TCP rawServerClientHal(LOOPBACK_IP_STR, RAW_SERVER_TEST_PORT);
-ModbusInterface::TCP rawServerClientIfc(rawServerClientHal, Modbus::CLIENT);
+
+// The library's TCP interface, whose sendFrame() can be held at its entry (barrier)
+struct HeldTcp : public ModbusInterface::TCP {
+    using ModbusInterface::TCP::TCP;
+    StaticSemaphore_t gateBuf;
+    SemaphoreHandle_t gate = xSemaphoreCreateBinaryStatic(&gateBuf);
+    volatile bool holdNext = false;
+    volatile bool entered = false;
+    Result sendFrame(const Modbus::Frame& frame, TxResultCallback txCallback, void* ctx) override {
+        if (holdNext) {
+            holdNext = false;
+            entered = true;
+            xSemaphoreTake(gate, portMAX_DELAY);
+        }
+        return ModbusInterface::TCP::sendFrame(frame, txCallback, ctx);
+    }
+};
+HeldTcp rawServerClientIfc(rawServerClientHal, Modbus::CLIENT);
 Modbus::Client rawServerClient(rawServerClientIfc, RAW_SERVER_CLIENT_TIMEOUT_MS);
 
 static void beginRawServerClient() {
@@ -1584,6 +1596,225 @@ void test_client_rx_coalesced_responses() {
     Modbus::Logger::logln("TEST_CLIENT_RX_COALESCED_RESPONSES");
     runLateResponseScenario(true);
     Modbus::Logger::logln("TEST_CLIENT_RX_COALESCED_RESPONSES - OK");
+    Modbus::Logger::logln();
+}
+
+// Rule: a client-side transaction belongs to its requester until the requester releases it.
+// A frame carrying A's TID but another slave ID is rejected by A, which keeps waiting: the
+// interface stays A's (a second Client sharing it is refused) until A times out & releases it.
+Modbus::Client rawServerClientB(rawServerClientIfc, RAW_SERVER_CLIENT_TIMEOUT_MS);
+
+void test_transaction_kept_by_owner_until_released() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_TRANSACTION_KEPT_BY_OWNER_UNTIL_RELEASED");
+
+    int listenSock = rawListen(RAW_SERVER_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0, "raw server listen failed");
+    beginRawServerClient();
+    static bool clientBReady = false;
+    if (!clientBReady) clientBReady = rawServerClientB.begin() == Modbus::Client::SUCCESS;
+    TEST_ASSERT_TRUE_MESSAGE(clientBReady, "second client init failed");
+
+    Modbus::Frame req = { .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID,
+                          .regAddress = 0, .regCount = 1, .exceptionCode = Modbus::NULL_EXCEPTION };
+    uint8_t reqBytes[RAW_READ_HR_REQ_SIZE];
+    uint8_t respBytes[RAW_READ_HR_RESP_SIZE];
+
+    // A is sent, the server answers with A's TID but another slave ID
+    Modbus::Frame respA;
+    volatile Modbus::Client::Result trackerA = Modbus::Client::NODATA;
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, rawServerClient.sendRequest(req, respA, (Modbus::Client::Result*)&trackerA));
+    int peer = ::accept(listenSock, nullptr, nullptr);
+    TEST_ASSERT_TRUE_MESSAGE(peer >= 0, "accept() failed");
+    rawSetupPeer(peer);
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_REQ_SIZE, rawRecvExact(peer, reqBytes, sizeof(reqBytes)), "request A not received");
+    rawBuildReadHrResponse(respBytes, rawTid(reqBytes), 0xAAAA);
+    respBytes[6] = TEST_SLAVE_ID + 1; // Unit ID
+    TEST_ASSERT_TRUE(rawSendAll(peer, respBytes, sizeof(respBytes)));
+    vTaskDelay(pdMS_TO_TICKS(50)); // Handled by the interface, rejected by A
+
+    // A still waits: B is refused, and a release by someone else changes nothing
+    Modbus::Frame respB;
+    volatile Modbus::Client::Result trackerB = Modbus::Client::NODATA;
+    const auto startB = rawServerClientB.sendRequest(req, respB, (Modbus::Client::Result*)&trackerB);
+    rawServerClientIfc.releaseTransaction(&rawServerClientB, true);
+    const bool readyAfterForeignRelease = rawServerClientIfc.isReady();
+    const auto stateA = trackerA;
+
+    // A times out & releases the interface: B gets through
+    uint32_t t0 = Modbus::TIME_MS();
+    while (trackerA == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < RAW_SERVER_CLIENT_TIMEOUT_MS + 200) vTaskDelay(pdMS_TO_TICKS(5));
+    t0 = Modbus::TIME_MS();
+    while (!rawServerClientIfc.isReady() && Modbus::TIME_MS() - t0 < 200) vTaskDelay(pdMS_TO_TICKS(1));
+    req.regAddress = 1;
+    trackerB = Modbus::Client::NODATA;
+    const auto startB2 = rawServerClientB.sendRequest(req, respB, (Modbus::Client::Result*)&trackerB);
+    size_t gotB = rawRecvExact(peer, reqBytes, sizeof(reqBytes));
+    if (gotB == RAW_READ_HR_REQ_SIZE) {
+        rawBuildReadHrResponse(respBytes, rawTid(reqBytes), 0xBBBB);
+        rawSendAll(peer, respBytes, sizeof(respBytes));
+    }
+    t0 = Modbus::TIME_MS();
+    while (trackerB == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < RAW_SERVER_CLIENT_TIMEOUT_MS + 200) vTaskDelay(pdMS_TO_TICKS(5));
+    closeRawServer(peer, listenSock);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::NODATA, stateA, "A completed by a frame for another slave");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_BUSY, startB, "B admitted while A still waits");
+    TEST_ASSERT_FALSE_MESSAGE(readyAfterForeignRelease, "released by a requester that doesn't own it");
+    TEST_ASSERT_EQUAL(Modbus::Client::ERR_TIMEOUT, trackerA);
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, startB2, "B refused after A released");
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_REQ_SIZE, gotB, "request B not received");
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, trackerB);
+    TEST_ASSERT_EQUAL_HEX16(0xBBBB, respB.data[0]);
+
+    Modbus::Logger::logln("TEST_TRANSACTION_KEPT_BY_OWNER_UNTIL_RELEASED - OK");
+    Modbus::Logger::logln();
+}
+
+// Rule: A times out after its timer was armed, before its frame is queued; the frame is then sent
+// and claims the transaction. Its late TX result must release it & end the TCP transaction it
+// opened: B goes through right away, not after A's response or the 5 s safety timeout.
+struct LateClaimJob {
+    Modbus::Frame req;
+    Modbus::Frame resp;
+    volatile Modbus::Client::Result tracker;
+    volatile bool done;
+};
+static StaticTask_t lateClaimJobTcb;
+static StackType_t lateClaimJobStack[4096];
+
+void test_late_claim_released_after_timeout_before_send() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_LATE_CLAIM_RELEASED_AFTER_TIMEOUT_BEFORE_SEND");
+
+    int listenSock = rawListen(RAW_SERVER_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0, "raw server listen failed");
+    beginRawServerClient();
+    static bool clientBReady = false;
+    if (!clientBReady) clientBReady = rawServerClientB.begin() == Modbus::Client::SUCCESS;
+    TEST_ASSERT_TRUE_MESSAGE(clientBReady, "second client init failed");
+
+    static LateClaimJob a;
+    a.req = { .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID,
+              .regAddress = 0, .regCount = 1, .exceptionCode = Modbus::NULL_EXCEPTION };
+    a.tracker = Modbus::Client::NODATA;
+    a.done = false;
+    rawServerClientIfc.entered = false;
+    rawServerClientIfc.holdNext = true;
+    xTaskCreateStatic([](void* arg) {
+        auto* job = static_cast<LateClaimJob*>(arg);
+        rawServerClient.sendRequest(job->req, job->resp, (Modbus::Client::Result*)&job->tracker);
+        job->done = true;
+        vTaskDelete(nullptr);
+    }, "lateClaimJob", sizeof(lateClaimJobStack) / sizeof(StackType_t), &a, 2, lateClaimJobStack, &lateClaimJobTcb);
+
+    uint32_t t0 = Modbus::TIME_MS();
+    while (!rawServerClientIfc.entered && Modbus::TIME_MS() - t0 < 500) vTaskDelay(1);
+    vTaskDelay(pdMS_TO_TICKS(RAW_SERVER_CLIENT_TIMEOUT_MS + 50)); // A's timer fires
+    const Modbus::Client::Result aBeforeSend = a.tracker;
+    xSemaphoreGive(rawServerClientIfc.gate); // A's frame is queued, sent, claims the transaction
+
+    // A reaches the server (sent after its timeout: allowed), left unanswered
+    int peer = ::accept(listenSock, nullptr, nullptr);
+    uint8_t reqBytes[RAW_READ_HR_REQ_SIZE];
+    size_t gotA = 0;
+    if (peer >= 0) {
+        rawSetupPeer(peer);
+        gotA = rawRecvExact(peer, reqBytes, sizeof(reqBytes));
+    }
+    t0 = Modbus::TIME_MS();
+    while (!a.done && Modbus::TIME_MS() - t0 < 500) vTaskDelay(1);
+    t0 = Modbus::TIME_MS();
+    while (!rawServerClientIfc.isReady() && Modbus::TIME_MS() - t0 < 2000) vTaskDelay(pdMS_TO_TICKS(1));
+    const uint32_t readyAfterMs = Modbus::TIME_MS() - t0;
+
+    // B goes through & gets its own response
+    Modbus::Frame reqB = a.req;
+    reqB.regAddress = 1;
+    Modbus::Frame respB;
+    volatile Modbus::Client::Result trackerB = Modbus::Client::NODATA;
+    const auto startB = rawServerClientB.sendRequest(reqB, respB, (Modbus::Client::Result*)&trackerB);
+    size_t gotB = (peer >= 0) ? rawRecvExact(peer, reqBytes, sizeof(reqBytes)) : 0;
+    if (gotB == RAW_READ_HR_REQ_SIZE) {
+        uint8_t respBytes[RAW_READ_HR_RESP_SIZE];
+        rawBuildReadHrResponse(respBytes, rawTid(reqBytes), 0xBBBB);
+        rawSendAll(peer, respBytes, sizeof(respBytes));
+    }
+    t0 = Modbus::TIME_MS();
+    while (trackerB == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < RAW_SERVER_CLIENT_TIMEOUT_MS + 200) vTaskDelay(pdMS_TO_TICKS(5));
+    closeRawServer(peer, listenSock);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::ERR_TIMEOUT, aBeforeSend, "A didn't time out before its send");
+    TEST_ASSERT_TRUE_MESSAGE(a.done, "A's send didn't return");
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_REQ_SIZE, gotA, "A not sent");
+    TEST_ASSERT_TRUE_MESSAGE(readyAfterMs < 500, "interface kept busy by the transaction A's late send opened");
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, startB, "B refused");
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_REQ_SIZE, gotB, "B not sent");
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, trackerB);
+    TEST_ASSERT_EQUAL_HEX16(0xBBBB, respB.data[0]);
+
+    Modbus::Logger::logln("TEST_LATE_CLAIM_RELEASED_AFTER_TIMEOUT_BEFORE_SEND - OK");
+    Modbus::Logger::logln();
+}
+
+// Rule: a client-side interface sends nothing while a transaction is active, whoever sends (direct
+// API, same requester included): refused at once, its TX callback reports it, nothing reaches the
+// server. It used to be sent, then reported ERR_BUSY.
+static volatile uint32_t directSendCallbacks = 0;
+static volatile ModbusInterface::IInterface::Result directSendLastResult = ModbusInterface::IInterface::NODATA;
+
+void test_direct_send_refused_during_transaction() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_DIRECT_SEND_REFUSED_DURING_TRANSACTION");
+
+    int listenSock = rawListen(RAW_SERVER_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(listenSock >= 0, "raw server listen failed");
+    beginRawServerClient();
+    static int requester;
+    directSendCallbacks = 0;
+    auto txCallback = [](ModbusInterface::IInterface::Result result, void*) {
+        directSendLastResult = result;
+        directSendCallbacks = directSendCallbacks + 1;
+    };
+
+    // First frame: sent, left unanswered (transaction active)
+    Modbus::Frame req = { .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID,
+                          .regAddress = 0, .regCount = 1, .exceptionCode = Modbus::NULL_EXCEPTION };
+    const auto first = rawServerClientIfc.sendFrame(req, txCallback, &requester);
+    int peer = ::accept(listenSock, nullptr, nullptr);
+    uint8_t reqBytes[RAW_READ_HR_REQ_SIZE];
+    size_t gotFirst = 0;
+    if (peer >= 0) {
+        rawSetupPeer(peer);
+        gotFirst = rawRecvExact(peer, reqBytes, sizeof(reqBytes));
+    }
+    uint32_t t0 = Modbus::TIME_MS();
+    while (directSendCallbacks == 0 && Modbus::TIME_MS() - t0 < 500) vTaskDelay(1);
+    const uint32_t callbacksAfterFirst = directSendCallbacks;
+
+    // Second frame from the same requester
+    req.regAddress = 1;
+    const auto second = rawServerClientIfc.sendFrame(req, txCallback, &requester);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    const uint32_t secondCallbacks = directSendCallbacks - callbacksAfterFirst;
+    const auto secondResult = directSendLastResult;
+    size_t gotSecond = (peer >= 0) ? rawRecvExact(peer, reqBytes, sizeof(reqBytes)) : 0;
+
+    rawServerClientIfc.releaseTransaction(&requester, true);
+    closeRawServer(peer, listenSock);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::SUCCESS, first);
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_REQ_SIZE, gotFirst, "first frame not sent");
+    TEST_ASSERT_EQUAL_MESSAGE(1, callbacksAfterFirst, "first frame: TX callback not called once");
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusInterface::IInterface::ERR_BUSY, second, "second frame accepted during the transaction");
+    TEST_ASSERT_EQUAL_MESSAGE(1, secondCallbacks, "second frame: TX callback not called once");
+    TEST_ASSERT_EQUAL(ModbusInterface::IInterface::ERR_BUSY, secondResult);
+    TEST_ASSERT_EQUAL_MESSAGE(0, gotSecond, "second frame sent during the transaction");
+
+    Modbus::Logger::logln("TEST_DIRECT_SEND_REFUSED_DURING_TRANSACTION - OK");
     Modbus::Logger::logln();
 }
 
@@ -1755,6 +1986,7 @@ static TxCallbackProbe runTxCallbackProbe(const Modbus::Frame& frame) {
         uint32_t t0 = Modbus::TIME_MS();
         while (!probe.called && Modbus::TIME_MS() - t0 < 2000) vTaskDelay(pdMS_TO_TICKS(5));
     }
+    rawServerClientIfc.releaseTransaction(&probe, false); // The probe owns the transaction like a Client
     return probe;
 }
 
@@ -2207,6 +2439,74 @@ void test_server_response_not_sent_to_reused_socket() {
     Modbus::Logger::logln();
 }
 
+// Regression: the application queued A's response after the safety timeout had elapsed. The
+// timeout closed A's transaction before its response was sent: request B, received meanwhile,
+// was admitted, its response refused (TX slot taken), and sending A's response then closed B's
+// transaction: B never got an answer. A's queued response must end A's transaction itself.
+static constexpr uint32_t QUEUED_RESPONSE_HANDLER_DELAY_MS = ModbusInterface::TCP::TCP_TRANSACTION_SAFETY_TIMEOUT_MS + 300;
+
+void test_server_safety_timeout_spares_queued_response() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_SERVER_SAFETY_TIMEOUT_SPARES_QUEUED_RESPONSE");
+
+    // A (address 1) is answered after the safety timeout, the others at once
+    beginIsolatedServer([](const Modbus::Frame& request) {
+        const bool slow = (request.regAddress == 1);
+        if (slow) vTaskDelay(pdMS_TO_TICKS(QUEUED_RESPONSE_HANDLER_DELAY_MS));
+        Modbus::Frame response;
+        response.clear();
+        response.type = Modbus::RESPONSE;
+        response.fc = request.fc;
+        response.slaveId = request.slaveId;
+        response.regAddress = request.regAddress;
+        response.regCount = 1;
+        response.data[0] = slow ? 0xAAAA : 0xBBBB;
+        isolatedServerIf.sendFrame(response, nullptr, nullptr);
+    });
+
+    int sockA = rawConnect(ISOLATED_SERVER_TEST_PORT);
+    int sockB = rawConnect(ISOLATED_SERVER_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sockA >= 0 && sockB >= 0, "raw connect to server failed");
+    timeval tv = { .tv_sec = (time_t)(QUEUED_RESPONSE_HANDLER_DELAY_MS / 1000 + 2), .tv_usec = 0 };
+    setsockopt(sockA, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sockB, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    // A, then B while A is being processed
+    uint8_t req[RAW_READ_HR_REQ_SIZE];
+    rawBuildReadHrRequest(req, 0x0A01, 1);
+    TEST_ASSERT_TRUE(rawSendAll(sockA, req, sizeof(req)));
+    vTaskDelay(pdMS_TO_TICKS(100));
+    rawBuildReadHrRequest(req, 0x0B01, 2);
+    TEST_ASSERT_TRUE(rawSendAll(sockB, req, sizeof(req)));
+
+    uint8_t respA[RAW_READ_HR_RESP_SIZE];
+    size_t gotA = rawRecvExact(sockA, respA, sizeof(respA));
+    uint8_t respB[9];
+    size_t gotB = rawRecvExact(sockB, respB, sizeof(respB));
+
+    // The server is free again afterwards
+    rawBuildReadHrRequest(req, 0x0C01, 2);
+    uint8_t respC[RAW_READ_HR_RESP_SIZE];
+    size_t gotC = rawSendAll(sockB, req, sizeof(req)) ? rawRecvExact(sockB, respC, sizeof(respC)) : 0;
+    ::close(sockA);
+    ::close(sockB);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(sizeof(respA), gotA, "A not answered");
+    TEST_ASSERT_EQUAL_HEX16(0x0A01, rawTid(respA));
+    TEST_ASSERT_EQUAL_HEX16(0xAAAA, rawReadHrRespValue(respA));
+    TEST_ASSERT_EQUAL_MESSAGE(sizeof(respB), gotB, "B not answered");
+    TEST_ASSERT_EQUAL_HEX16(0x0B01, rawTid(respB));
+    TEST_ASSERT_EQUAL_HEX8(0x83, respB[7]);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(Modbus::SLAVE_DEVICE_BUSY, respB[8], "B should get SLAVE_DEVICE_BUSY");
+    TEST_ASSERT_EQUAL_MESSAGE(sizeof(respC), gotC, "C not answered");
+    TEST_ASSERT_EQUAL_HEX16(0x0C01, rawTid(respC));
+    TEST_ASSERT_EQUAL_HEX16(0xBBBB, rawReadHrRespValue(respC));
+
+    Modbus::Logger::logln("TEST_SERVER_SAFETY_TIMEOUT_SPARES_QUEUED_RESPONSE - OK");
+    Modbus::Logger::logln();
+}
+
 // Regression: while assembling a frame, the interface only checked the connection after
 // reading. When client A disconnected mid-frame and client B got the same socket number,
 // B's first bytes were read then dropped: the rest of B's frame was taken for a header,
@@ -2239,9 +2539,13 @@ void test_server_rx_reused_socket_mid_frame() {
     const int serverSockA = rawServerSideSocket(ISOLATED_SERVER_TEST_PORT, sockA);
     TEST_ASSERT_TRUE_MESSAGE(serverSockA >= 0, "client A not accepted");
 
-    // Hold the interface task while it waits for the rest (blocked, so not holding a HAL lock)
+    // Hold the interface task while it waits for the rest (blocked, so not holding a HAL lock).
+    // Polled below its priority: on a single core, it runs (and blocks again) before each check
     TaskHandle_t ifTask = isolatedServerIf.getRxTxTaskHandle();
+    const UBaseType_t testPriority = uxTaskPriorityGet(nullptr);
+    vTaskPrioritySet(nullptr, tskIDLE_PRIORITY);
     for (int i = 0; i < 100 && eTaskGetState(ifTask) != eBlocked; i++) vTaskDelay(1);
+    vTaskPrioritySet(nullptr, testPriority);
     TEST_ASSERT_EQUAL_MESSAGE(eBlocked, eTaskGetState(ifTask), "interface task not waiting");
     vTaskSuspend(ifTask);
 
@@ -3583,13 +3887,8 @@ void setup() {
     Serial.setRxBufferSize(2048);
     Serial.begin(115200);
 
-    // Initialize ModbusTestServer TCP server
-    // WiFi.setSleep(WIFI_PS_NONE);
-    // 1) Démarrage du SoftAP
-    WiFi.mode(WIFI_AP);
-    WiFi.softAPConfig(SOFTAP_IP, SOFTAP_IP, IPAddress(255,255,255,0));
-    WiFi.softAP(WIFI_SSID, WIFI_PASS);
-    Modbus::Logger::logf("[setup] SoftAP IP : %s\n", WiFi.softAPIP().toString().c_str());
+    // lwIP stack only (loopback): a Wi-Fi SoftAP would take the heap the test server task needs on the C6
+    ESP_ERROR_CHECK(esp_netif_init());
 
     vTaskDelay(pdMS_TO_TICKS(1000));
 
@@ -3672,6 +3971,9 @@ void setup() {
     RUN_TEST(test_server_safety_timeout_clears_idle);
     RUN_TEST(test_late_response_not_matched_to_next_request);
     RUN_TEST(test_client_rx_coalesced_responses);
+    RUN_TEST(test_transaction_kept_by_owner_until_released);
+    RUN_TEST(test_late_claim_released_after_timeout_before_send);
+    RUN_TEST(test_direct_send_refused_during_transaction);
     RUN_TEST(test_client_no_late_write_after_reconnect);
     RUN_TEST(test_client_destroyed_while_interface_holds_request);
     RUN_TEST(test_client_null_exception_response_rejected);
@@ -3684,6 +3986,7 @@ void setup() {
     RUN_TEST(test_server_malformed_requests_exceptions);
     RUN_TEST(test_server_unencodable_response_exception);
     RUN_TEST(test_server_response_not_sent_to_reused_socket);
+    RUN_TEST(test_server_safety_timeout_spares_queued_response);
     RUN_TEST(test_server_rx_reused_socket_mid_frame);
     RUN_TEST(test_hal_rx_notifications_never_block_send);
     RUN_TEST(test_hal_tcp_keepalive);

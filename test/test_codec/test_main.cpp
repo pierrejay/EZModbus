@@ -2043,8 +2043,29 @@ void test_bounds_checks_dont_wrap() {
     TEST_ASSERT_EQUAL(5, G.regCount);
 }
 
+// Regression: isValid(FunctionCode) checked a range, and accepted 0x00 & 0x07 to 0x0E, which aren't
+// supported: a frame carrying one passed the function code check (wrong error reported)
+void test_function_code_validity() {
+    using namespace Modbus;
+    const uint8_t supported[] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x0F, 0x10};
+    for (int fc = 0; fc <= 0xFF; fc++) {
+        bool expected = false;
+        for (uint8_t s : supported) expected |= (s == fc);
+        TEST_ASSERT_EQUAL_MESSAGE(expected, isValid(static_cast<FunctionCode>(fc)), "isValid(FunctionCode) wrong");
+    }
+
+    Frame F;
+    F.clear();
+    F.type = REQUEST;
+    F.slaveId = 1;
+    F.fc = static_cast<FunctionCode>(0x07);
+    F.regCount = 1;
+    TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_FC, ModbusCodec::isValidFrame(F), "FC 0x07 not reported as invalid");
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_function_code_validity);
     RUN_TEST(test_codec_rtu);
     RUN_TEST(test_codec_tcp);
     RUN_TEST(test_codec_encode_rejects_truncated);
