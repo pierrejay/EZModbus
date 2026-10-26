@@ -522,15 +522,17 @@ RTU::Result RTU::handleTxRequest() {
         // portion to the scheduler (vTaskDelay) instead of busy-waiting it, then re-measure and
         // busy-wait only the sub-millisecond remainder for precision. Re-measuring guarantees the
         // minimum silence regardless of tick granularity / vTaskDelay alignment.
+        // Read once: a setter may change it meanwhile (the subtraction would wrap)
+        const uint64_t silenceUs = _silenceTimeUs;
         uint64_t lastTxElapsedUs = TIME_US() - _lastTxTimeUs;
-        if (lastTxElapsedUs < _silenceTimeUs) {
-            uint64_t remainingUs = _silenceTimeUs - lastTxElapsedUs;
+        if (lastTxElapsedUs < silenceUs) {
+            uint64_t remainingUs = silenceUs - lastTxElapsedUs;
             if (remainingUs >= 1000) {
                 WAIT_MS(static_cast<uint32_t>(remainingUs / 1000));
             }
             lastTxElapsedUs = TIME_US() - _lastTxTimeUs;
-            if (lastTxElapsedUs < _silenceTimeUs) {
-                WAIT_US(static_cast<uint32_t>(_silenceTimeUs - lastTxElapsedUs));
+            if (lastTxElapsedUs < silenceUs) {
+                WAIT_US(static_cast<uint32_t>(silenceUs - lastTxElapsedUs));
             }
         }
 
