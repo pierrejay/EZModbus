@@ -620,6 +620,22 @@ void test_server_begin_rejects_null_interface() {
     TEST_ASSERT_EQUAL_MESSAGE(0, callbacksLeft, "callback left on the valid interface");
 }
 
+// Regression: the same interface given twice registered two callbacks: each request was handled
+// twice (a write executed twice).
+void test_server_begin_rejects_duplicate_interface() {
+    static ModbusInterface::Dummy side;
+    static Modbus::StaticWordStore<1> store;
+    alignas(Modbus::Server) static uint8_t storage[sizeof(Modbus::Server)];
+    auto* server = new (storage) Modbus::Server({&side, &side}, store);
+    Modbus::Server::Result res = server->begin();
+    size_t callbacksLeft = side.callbackCount();
+    server->~Server();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Server::ERR_INIT_FAILED, res, "begin() accepted the same interface twice");
+    TEST_ASSERT_EQUAL_MESSAGE(0, callbacksLeft, "callback left on the interface");
+}
+
 // Regression: begin() validated overlapping words starting its scan strictly after address 0,
 // and jumping from start address to start address: a word at address 0, or two words with the
 // same start address, were never compared. Returns true if the server accepts both words.
@@ -1913,6 +1929,7 @@ void setup() {
     RUN_TEST(test_client_destroyed_while_timeout_runs);
     RUN_TEST(test_server_begin_retry_registers_once);
     RUN_TEST(test_server_begin_rejects_null_interface);
+    RUN_TEST(test_server_begin_rejects_duplicate_interface);
     RUN_TEST(test_server_rejects_overlaps_at_zero_and_same_start);
     RUN_TEST(test_server_busy_ignores_other_slave_ids);
     RUN_TEST(test_server_slave_id_change_spares_waiting_request);
