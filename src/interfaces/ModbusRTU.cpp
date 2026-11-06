@@ -109,7 +109,8 @@ RTU::Result RTU::begin() {
 RTU::Result RTU::setSilenceTimeMs(uint32_t silenceTimeMs) {
     // Calculate the new silence time in microseconds
     if (silenceTimeMs < 1) silenceTimeMs = 1; 
-    uint64_t newSilenceTimeUs = static_cast<uint64_t>(silenceTimeMs) * 1000;
+    if (silenceTimeMs > UINT32_MAX / 1000) silenceTimeMs = UINT32_MAX / 1000;
+    uint32_t newSilenceTimeUs = silenceTimeMs * 1000;
     
     // Apply the new silence time only if it's different from the current one
     if (newSilenceTimeUs != _silenceTimeUs) {
@@ -123,7 +124,7 @@ RTU::Result RTU::setSilenceTimeMs(uint32_t silenceTimeMs) {
         }
     }
 
-    Modbus::Debug::LOG_MSGF("Silence time set to %d ms (%d us)", silenceTimeMs, _silenceTimeUs);
+    Modbus::Debug::LOG_MSGF("Silence time set to %u ms (%u us)", silenceTimeMs, newSilenceTimeUs);
     return Success();
 }
 
@@ -143,13 +144,13 @@ RTU::Result RTU::setSilenceTimeBaud() {
     // Calculate the silence time based on the baud rate
     // Modbus RTU specification: 3.5 character times for frame separation
     // For baud rates > 19200, use fixed 1.75 ms per specification
-    uint64_t newSilenceTimeUs;
+    uint32_t newSilenceTimeUs;
     if (baudRate > 19200) {
         newSilenceTimeUs = 1750; // 1.75 ms
     } else {
         constexpr uint32_t bitsPerChar = 11;      // 1 start + 8 data + parity + stop
-        uint64_t charTimeUs = (static_cast<uint64_t>(bitsPerChar) * 1000000ULL) / baudRate;
-        newSilenceTimeUs = (charTimeUs * 35ULL) / 10ULL; // 3.5 chars = 35/10
+        uint32_t charTimeUs = (bitsPerChar * 1000000UL) / baudRate;
+        newSilenceTimeUs = (charTimeUs * 35UL) / 10UL; // 3.5 chars = 35/10
     }
 
     // Apply the new silence time only if it's different from the current one
@@ -164,7 +165,7 @@ RTU::Result RTU::setSilenceTimeBaud() {
         }
     }
 
-    Modbus::Debug::LOG_MSGF("Silence time for baud rate %d bps set to %d us", baudRate, _silenceTimeUs);
+    Modbus::Debug::LOG_MSGF("Silence time for baud rate %u bps set to %u us", baudRate, newSilenceTimeUs);
     return Success();
 }
 

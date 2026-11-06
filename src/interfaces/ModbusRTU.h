@@ -92,7 +92,7 @@ private:
 
     // Serial communication
     ModbusHAL::UART& _uartHAL;
-    uint64_t _silenceTimeUs = 0;   // Sets the silence time to observe between consecutive frames (RX + TX)
+    std::atomic<uint32_t> _silenceTimeUs{0}; // Silence to observe between frames (RX + TX). Set by the API callers, read by the rxTxTask
     uint64_t _lastTxTimeUs = 0; // Last time a frame was sent (used to enforce the silence time for TX)
     uint64_t _lastRxByteTimeUs = 0; // Last time bytes were pulled into _rxBuffer (frame-gap backstop, see rxTxTask)
     std::atomic<uint32_t> _isInitialized{0}; // Read by the rxTxTask & the API callers
