@@ -672,6 +672,36 @@ void test_server_ready_before_interfaces_start() {
     TEST_ASSERT_TRUE_MESSAGE(answered, "request received during begin() not answered");
 }
 
+// getWord() works before begin(), while the words added aren't sorted yet
+static bool getWordBeforeBegin(Modbus::IWordStore& store) {
+    static ModbusInterface::Dummy side;
+    alignas(Modbus::Server) static uint8_t storage[sizeof(Modbus::Server)];
+    auto* server = new (storage) Modbus::Server(side, store);
+    Modbus::Word word;
+    word.type = Modbus::HOLDING_REGISTER;
+    word.readHandler = serverReadHandler;
+    word.writeHandler = serverWriteHandler;
+    word.nbRegs = 1;
+    word.startAddr = 100;
+    bool added = server->addWord(word) == Modbus::Server::SUCCESS;
+    word.startAddr = 10;
+    added = (server->addWord(word) == Modbus::Server::SUCCESS) && added;
+    Modbus::Word found = server->getWord(Modbus::HOLDING_REGISTER, 100);
+    server->~Server();
+    return added && found.startAddr == 100 && found.nbRegs == 1;
+}
+
+void test_server_get_word_before_begin() {
+    static Modbus::DynamicWordStore dynStore(4);
+    static Modbus::StaticWordStore<4> staticStore;
+    bool dynFound = getWordBeforeBegin(dynStore);
+    bool staticFound = getWordBeforeBegin(staticStore);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_TRUE_MESSAGE(dynFound, "DynamicWordStore: word not found before begin()");
+    TEST_ASSERT_TRUE_MESSAGE(staticFound, "StaticWordStore: word not found before begin()");
+}
+
 // Regression: begin() validated overlapping words starting its scan strictly after address 0,
 // and jumping from start address to start address: a word at address 0, or two words with the
 // same start address, were never compared. Returns true if the server accepts both words.
@@ -1967,6 +1997,7 @@ void setup() {
     RUN_TEST(test_server_begin_rejects_null_interface);
     RUN_TEST(test_server_begin_rejects_duplicate_interface);
     RUN_TEST(test_server_ready_before_interfaces_start);
+    RUN_TEST(test_server_get_word_before_begin);
     RUN_TEST(test_server_rejects_overlaps_at_zero_and_same_start);
     RUN_TEST(test_server_busy_ignores_other_slave_ids);
     RUN_TEST(test_server_slave_id_change_spares_waiting_request);
