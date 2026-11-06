@@ -428,26 +428,24 @@ RTU::Result RTU::handleUartEvent(const uart_event_t& event) {
         case UART_DATA: {
             // Read data from UART driver if event.size > 0
             if (event.size > 0) {
-                if (_rxBuffer.free_space() == 0) {
+                // Frame longer than a Modbus frame: drop it whole, including the bytes
+                // still in the UART driver (they'd be read as the start of the next frame)
+                if (event.size > _rxBuffer.free_space()) {
                     _rxBuffer.clear();
-                    return Error(ERR_RX_FAILED, "RX buffer full, cannot read new bytes from UART, flushing RX buffer"); // We skip the event as we cannot process it
-                } 
-                
-                // Resize buffer to fit incoming data & read data from UART driver
-                // Normally, there should always be enough space in the buffer to fit
-                // the incoming data, unless the Modbus peer is flooding us. In this case,
-                // we will take whatever fits and the loop will deal with it (i.e. reach
-                // free_space() == 0 & flush or let processReceivedFrame() fail)
-                size_t toReadFromEvent = std::min(event.size, _rxBuffer.free_space());
+                    _uartHAL.flush_input();
+                    return Error(ERR_RX_FAILED, "RX frame too long, flushing RX & UART buffers");
+                }
+
+                // Read the event's data from the UART driver
+                size_t toReadFromEvent = event.size;
                 uint8_t* writePtr = _rxBuffer.end();
                 size_t currentSize = _rxBuffer.size();
                 _rxBuffer.resize(currentSize + toReadFromEvent);
                 int bytesActuallyRead = _uartHAL.read(writePtr, toReadFromEvent, 0); // 0 ticks_to_wait as data is already in driver queue
                 
                 // If we read some bytes, adjust buffer size & print received data size
-                // Normally, bytesActuallyRead should be equal to toReadFromEvent, but if
-                // the case happens the loop will deal with it (i.e. reach free_space() == 0
-                // & flush or let processReceivedFrame() fail).
+                // Normally, bytesActuallyRead equals toReadFromEvent (the event's bytes are
+                // already in the driver buffer)
                 if (bytesActuallyRead > 0) {
                     _rxBuffer.trim(currentSize + bytesActuallyRead);
                     _lastRxByteTimeUs = TIME_US(); // Arm the software silence fallback (see rxTxTask)
