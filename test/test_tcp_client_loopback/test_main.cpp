@@ -233,6 +233,7 @@ void tearDown() {
     ht = ezm.getRxTxTaskHandle();
     if (ht && eTaskGetState(ht) == eSuspended) vTaskResume(ht);
 
+    Modbus::Logger::waitQueueFlushed(); // Queued test logs first: they'd cut Unity's result line
     Serial.flush(); // Make sure all Unity logs are printed
 }
 

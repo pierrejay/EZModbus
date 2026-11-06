@@ -95,6 +95,7 @@ void setUp() {
 
 void tearDown() {
     server.clearAllWords();
+    Modbus::Logger::waitQueueFlushed(); // Queued test logs first: they'd cut Unity's result line
     Serial.flush(); // Make sure all Unity logs are printed
 }
 
