@@ -636,6 +636,42 @@ void test_server_begin_rejects_duplicate_interface() {
     TEST_ASSERT_EQUAL_MESSAGE(0, callbacksLeft, "callback left on the interface");
 }
 
+// A request may arrive on an interface while begin() still starts the next ones: the
+// server must already be ready to answer it.
+class InjectingDummy : public ModbusInterface::Dummy {
+public:
+    ModbusInterface::Dummy* target = nullptr;
+    Modbus::Frame request;
+    Result begin() override {
+        if (target) target->transmitFrame(request);
+        return Result::SUCCESS;
+    }
+};
+
+void test_server_ready_before_interfaces_start() {
+    static ModbusInterface::Dummy first;
+    static InjectingDummy second;
+    static Modbus::StaticWordStore<1> store;
+    second.target = &first;
+    second.request.clear();
+    second.request.type = Modbus::REQUEST;
+    second.request.fc = Modbus::READ_HOLDING_REGISTERS;
+    second.request.slaveId = 1;
+    second.request.regAddress = 0;
+    second.request.regCount = 1;
+
+    alignas(Modbus::Server) static uint8_t storage[sizeof(Modbus::Server)];
+    auto* server = new (storage) Modbus::Server({&first, &second}, store);
+    Modbus::Server::Result res = server->begin();
+    Modbus::Frame response;
+    bool answered = first.getReceivedFrame(response);
+    server->~Server();
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(Modbus::Server::SUCCESS, res, "begin() failed");
+    TEST_ASSERT_TRUE_MESSAGE(answered, "request received during begin() not answered");
+}
+
 // Regression: begin() validated overlapping words starting its scan strictly after address 0,
 // and jumping from start address to start address: a word at address 0, or two words with the
 // same start address, were never compared. Returns true if the server accepts both words.
@@ -1930,6 +1966,7 @@ void setup() {
     RUN_TEST(test_server_begin_retry_registers_once);
     RUN_TEST(test_server_begin_rejects_null_interface);
     RUN_TEST(test_server_begin_rejects_duplicate_interface);
+    RUN_TEST(test_server_ready_before_interfaces_start);
     RUN_TEST(test_server_rejects_overlaps_at_zero_and_same_start);
     RUN_TEST(test_server_busy_ignores_other_slave_ids);
     RUN_TEST(test_server_slave_id_change_spares_waiting_request);
