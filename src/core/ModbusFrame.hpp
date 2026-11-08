@@ -126,6 +126,25 @@ struct FrameMeta {
     }
 };
 
+/* @brief Whether a read response carries the quantity of values its request asked for
+ * @note Coils are packed by 8: a decoded response holds whole bytes of bits, padding included
+ * @return True for other function codes & exception responses (nothing to compare)
+ */
+inline bool hasRequestedCount(const FrameMeta& request, const Frame& response) {
+    if (response.exceptionCode != NULL_EXCEPTION) return true;
+    switch (request.fc) {
+        case READ_COILS:
+        case READ_DISCRETE_INPUTS:
+            return response.regCount >= request.regCount
+                && (response.regCount + 7) / 8 == (request.regCount + 7) / 8;
+        case READ_HOLDING_REGISTERS:
+        case READ_INPUT_REGISTERS:
+            return response.regCount == request.regCount;
+        default:
+            return true;
+    }
+}
+
 // ===================================================================================
 // INLINE FUNCTIONS - IN-PLACE DATA PACKING/UNPACKING IN MODBUS::FRAME
 // ===================================================================================

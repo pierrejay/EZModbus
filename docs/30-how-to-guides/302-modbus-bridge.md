@@ -73,7 +73,7 @@ ModbusInterface::TCP tcpIface(tcpServer, Modbus::SERVER);
 
 The Bridge answers on behalf of the device behind it when that device can't, as a Modbus gateway should:
 
-* `GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND` (0x0B) if the device doesn't answer within the bridge timeout (1 second by default)
+* `GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND` (0x0B) if the device doesn't answer within the bridge timeout (1 second by default), or answers a read with another quantity of values than requested
 * `GATEWAY_PATH_UNAVAILABLE` (0x0A) if the request can't be forwarded at all (e.g. Unit ID above 247 towards RTU)
 
 The timeout can be set when creating the bridge (or globally with `EZMODBUS_BRIDGE_TIMEOUT_MS`). It must stay below the TCP transaction safety timeout (`EZMODBUS_TCP_TXN_SAFETY_TIMEOUT`, 5 s by default), otherwise `begin()` fails:

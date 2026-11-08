@@ -343,7 +343,7 @@ class PDU {
                         size_t coilsExtracted = extractCoils(bytes[2 + i], pdu.data.data(), totalCoils);
                         totalCoils += coilsExtracted;
                     }
-                    pdu.regCount = totalCoils;  // regCount = nombre exact de coils
+                    pdu.regCount = totalCoils;  // Whole bytes of bits, padding included
                 }
                 break;
             }
