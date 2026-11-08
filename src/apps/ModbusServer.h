@@ -180,7 +180,7 @@ private:
     // Server configuration
     std::atomic<uint32_t> _serverId; // Written under the mutex, read before taking it (see handleRequest())
     bool _rejectUndefined; // If false, undefined registers will be silently ignored (no exception returned)
-    bool _isInitialized = false;
+    std::atomic<uint32_t> _isInitialized{0}; // Read by the interfaces' tasks
     uint32_t _reqMutexTimeoutMs; // Request mutex timeout in milliseconds
 
     // WordStore & buffer for word operations

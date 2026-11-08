@@ -95,6 +95,7 @@ void setUp() {
 
 void tearDown() {
     server.clearAllWords();
+    Modbus::Logger::waitQueueFlushed(); // Queued test logs first: they'd cut Unity's result line
     Serial.flush(); // Make sure all Unity logs are printed
 }
 
@@ -2034,6 +2035,28 @@ void test_unencodable_response_exception() {
     TEST_ASSERT_EQUAL_HEX8_MESSAGE(Modbus::SLAVE_DEVICE_FAILURE, resp[2], "unexpected exception code");
 }
 
+// A frame longer than the RX buffer (256 bytes) is dropped whole: none of its bytes
+// may be read as the start of the next request.
+void test_oversized_frame_recovery() {
+    Modbus::Logger::logln("\nTEST_OVERSIZED_FRAME_RECOVERY");
+
+    DummyWord1Reg hr(Modbus::HOLDING_REGISTER, 500);
+    hr.value = 0x1234;
+    do_test_add_word(server, hr.word, true, "Add HR@500");
+
+    uint8_t junk[300];
+    for (size_t i = 0; i < sizeof(junk); i++) junk[i] = static_cast<uint8_t>(i);
+    agent.clear();
+    agent.send(Modbus::ByteBuffer(static_cast<const uint8_t*>(junk), sizeof(junk)));
+    vTaskDelay(pdMS_TO_TICKS(50)); // Silence: the junk frame is over
+
+    for (int i = 0; i < 2; i++) {
+        int val = testClient.holdingRegisterRead(1, 500);
+        TEST_ASSERT_START();
+        TEST_ASSERT_EQUAL_HEX16_MESSAGE(0x1234, val, "request after an oversized frame not answered");
+    }
+}
+
 void setup() {
     // Debug port
     Serial.setTxBufferSize(2048);
@@ -2133,6 +2156,7 @@ void setup() {
     // Malformed requests
     RUN_TEST(test_malformed_requests_exceptions);
     RUN_TEST(test_unencodable_response_exception);
+    RUN_TEST(test_oversized_frame_recovery);
 
     // Runtime reconfiguration tests
     RUN_TEST(test_runtime_set_slave_id);

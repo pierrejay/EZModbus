@@ -89,6 +89,15 @@ protected:
     
     // Performance optimization - sort all stores once after bulk insertion
     virtual void sortAll() = 0;
+
+    // Words added before the first sort (bulk insertion) can't be found by a binary search
+    template <typename It>
+    static Word* findContainingUnsorted(It begin, It end, Modbus::RegisterType type, uint16_t address) {
+        for (It it = begin; it != end; ++it) {
+            if (it->type == type && address >= it->startAddr && address < it->startAddr + it->nbRegs) return &(*it);
+        }
+        return nullptr;
+    }
 };
 
 
@@ -159,6 +168,7 @@ protected:
 
     Word* findContaining(Modbus::RegisterType type, uint16_t address) override {
         if (_count == 0) return nullptr;
+        if (!_isSorted) return findContainingUnsorted(_words.begin(), _words.begin() + _count, type, address);
         auto begin = _words.begin();
         auto end   = begin + _count;
         auto it = std::upper_bound(begin, end, address, [](uint16_t addr, const Word& w){
@@ -288,6 +298,7 @@ protected:
 
     Word* findContaining(Modbus::RegisterType type, uint16_t address) override {
         if (_words.empty()) return nullptr;
+        if (_needsSorting) return findContainingUnsorted(_words.begin(), _words.end(), type, address);
         auto it = std::upper_bound(_words.begin(), _words.end(), address,
             [](uint16_t addr, const Word& w){ return addr < w.startAddr; });
         while (it != _words.begin()) {

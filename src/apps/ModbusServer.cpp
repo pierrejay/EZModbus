@@ -87,18 +87,29 @@ Server::Result Server::begin() {
         for (size_t j = 0; j < i; j++) {
             if (_interfaces[j] == _interfaces[i]) return Error(Server::ERR_INIT_FAILED, "same interface given twice");
         }
+        if (_interfaces[i]->getRole() != Modbus::SERVER) return Error(Server::ERR_INIT_FAILED, "interface must be SERVER");
+    }
+
+    // Ready before the first callback is set: requests may arrive while the next interfaces start
+    {
+        Lock guard(_serverMutex);
+        // Sort WordStore for efficient lookups and validate overlaps
+        _wordStore.sortAll();
+        for (auto type : {Modbus::COIL, Modbus::DISCRETE_INPUT, 
+                         Modbus::INPUT_REGISTER, Modbus::HOLDING_REGISTER}) {
+            if (!validateNoOverlapsInStore(type)) {
+                return Error(Server::ERR_WORD_OVERLAP, "overlapping words detected after sorting");
+            }
+        }
+        _isInitialized = true;
     }
 
     // Initialize all interfaces with proper context routing
     for (size_t i = 0; i < _interfaceCount; i++) {
-        if (_interfaces[i]->getRole() != Modbus::SERVER) {
-            detachInterfaces();
-            return Error(Server::ERR_INIT_FAILED, "interface must be SERVER");
-        }
-
         if (_interfaces[i]->begin() != ModbusInterface::IInterface::SUCCESS) {
             // The user can initialize interfaces manually and retry server.begin() if desired
             detachInterfaces();
+            _isInitialized = false;
             return Error(Server::ERR_INIT_FAILED, "interface init failed");
         }
 
@@ -126,23 +137,11 @@ Server::Result Server::begin() {
         auto setRcvCbRes = _interfaces[i]->setRcvCallback(rcvCb, &_rcvCbContexts[i]);
         if (setRcvCbRes != ModbusInterface::IInterface::SUCCESS) {
             detachInterfaces();
+            _isInitialized = false;
             return Error(Server::ERR_INIT_FAILED, "cannot set receive callback on interface");
         }
     }
 
-    // Sort WordStore for efficient lookups and validate overlaps
-    _wordStore.sortAll();
-    
-    // Validate no overlaps exist after bulk insertion and sorting
-    for (auto type : {Modbus::COIL, Modbus::DISCRETE_INPUT, 
-                     Modbus::INPUT_REGISTER, Modbus::HOLDING_REGISTER}) {
-        if (!validateNoOverlapsInStore(type)) {
-            detachInterfaces();
-            return Error(Server::ERR_WORD_OVERLAP, "overlapping words detected after sorting");
-        }
-    }
-
-    _isInitialized = true;
     return Success();
 }
 

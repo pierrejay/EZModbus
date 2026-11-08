@@ -109,7 +109,8 @@ RTU::Result RTU::begin() {
 RTU::Result RTU::setSilenceTimeMs(uint32_t silenceTimeMs) {
     // Calculate the new silence time in microseconds
     if (silenceTimeMs < 1) silenceTimeMs = 1; 
-    uint64_t newSilenceTimeUs = static_cast<uint64_t>(silenceTimeMs) * 1000;
+    if (silenceTimeMs > UINT32_MAX / 1000) silenceTimeMs = UINT32_MAX / 1000;
+    uint32_t newSilenceTimeUs = silenceTimeMs * 1000;
     
     // Apply the new silence time only if it's different from the current one
     if (newSilenceTimeUs != _silenceTimeUs) {
@@ -123,7 +124,7 @@ RTU::Result RTU::setSilenceTimeMs(uint32_t silenceTimeMs) {
         }
     }
 
-    Modbus::Debug::LOG_MSGF("Silence time set to %d ms (%d us)", silenceTimeMs, _silenceTimeUs);
+    Modbus::Debug::LOG_MSGF("Silence time set to %u ms (%u us)", silenceTimeMs, newSilenceTimeUs);
     return Success();
 }
 
@@ -143,13 +144,13 @@ RTU::Result RTU::setSilenceTimeBaud() {
     // Calculate the silence time based on the baud rate
     // Modbus RTU specification: 3.5 character times for frame separation
     // For baud rates > 19200, use fixed 1.75 ms per specification
-    uint64_t newSilenceTimeUs;
+    uint32_t newSilenceTimeUs;
     if (baudRate > 19200) {
         newSilenceTimeUs = 1750; // 1.75 ms
     } else {
         constexpr uint32_t bitsPerChar = 11;      // 1 start + 8 data + parity + stop
-        uint64_t charTimeUs = (static_cast<uint64_t>(bitsPerChar) * 1000000ULL) / baudRate;
-        newSilenceTimeUs = (charTimeUs * 35ULL) / 10ULL; // 3.5 chars = 35/10
+        uint32_t charTimeUs = (bitsPerChar * 1000000UL) / baudRate;
+        newSilenceTimeUs = (charTimeUs * 35UL) / 10UL; // 3.5 chars = 35/10
     }
 
     // Apply the new silence time only if it's different from the current one
@@ -164,7 +165,7 @@ RTU::Result RTU::setSilenceTimeBaud() {
         }
     }
 
-    Modbus::Debug::LOG_MSGF("Silence time for baud rate %d bps set to %d us", baudRate, _silenceTimeUs);
+    Modbus::Debug::LOG_MSGF("Silence time for baud rate %u bps set to %u us", baudRate, newSilenceTimeUs);
     return Success();
 }
 
@@ -428,26 +429,24 @@ RTU::Result RTU::handleUartEvent(const uart_event_t& event) {
         case UART_DATA: {
             // Read data from UART driver if event.size > 0
             if (event.size > 0) {
-                if (_rxBuffer.free_space() == 0) {
+                // Frame longer than a Modbus frame: drop it whole, including the bytes
+                // still in the UART driver (they'd be read as the start of the next frame)
+                if (event.size > _rxBuffer.free_space()) {
                     _rxBuffer.clear();
-                    return Error(ERR_RX_FAILED, "RX buffer full, cannot read new bytes from UART, flushing RX buffer"); // We skip the event as we cannot process it
-                } 
-                
-                // Resize buffer to fit incoming data & read data from UART driver
-                // Normally, there should always be enough space in the buffer to fit
-                // the incoming data, unless the Modbus peer is flooding us. In this case,
-                // we will take whatever fits and the loop will deal with it (i.e. reach
-                // free_space() == 0 & flush or let processReceivedFrame() fail)
-                size_t toReadFromEvent = std::min(event.size, _rxBuffer.free_space());
+                    _uartHAL.flush_input();
+                    return Error(ERR_RX_FAILED, "RX frame too long, flushing RX & UART buffers");
+                }
+
+                // Read the event's data from the UART driver
+                size_t toReadFromEvent = event.size;
                 uint8_t* writePtr = _rxBuffer.end();
                 size_t currentSize = _rxBuffer.size();
                 _rxBuffer.resize(currentSize + toReadFromEvent);
                 int bytesActuallyRead = _uartHAL.read(writePtr, toReadFromEvent, 0); // 0 ticks_to_wait as data is already in driver queue
                 
                 // If we read some bytes, adjust buffer size & print received data size
-                // Normally, bytesActuallyRead should be equal to toReadFromEvent, but if
-                // the case happens the loop will deal with it (i.e. reach free_space() == 0
-                // & flush or let processReceivedFrame() fail).
+                // Normally, bytesActuallyRead equals toReadFromEvent (the event's bytes are
+                // already in the driver buffer)
                 if (bytesActuallyRead > 0) {
                     _rxBuffer.trim(currentSize + bytesActuallyRead);
                     _lastRxByteTimeUs = TIME_US(); // Arm the software silence fallback (see rxTxTask)
