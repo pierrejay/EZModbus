@@ -454,10 +454,15 @@ TCP::Result TCP::handleDecodedFrame(const Modbus::Frame& frame, int socketNum, u
 
         notifyCallbacks(frame);
 
-        // Handle broadcast requests: if no response is expected, end the transaction
+        // Unit ID 0 left unanswered by the application (e.g. forwarded as a broadcast by a
+        // gateway): end the transaction. A response queued meanwhile ends it once sent.
+        // Applications answer Unit ID 0 from the receive callback (Server does).
         if (Modbus::isBroadcastId(frame.slaveId) && frame.type == Modbus::REQUEST) {
-            Modbus::Debug::LOG_MSG("Server received broadcast request, ending transaction");
-            endTransaction();
+            Lock guard(_txMutex);
+            if (_currentTransaction.active && _txBuffer.size() == 0) {
+                Modbus::Debug::LOG_MSG("Unit ID 0 request left unanswered, ending transaction");
+                _currentTransaction.clear();
+            }
         }
 
         return Success();

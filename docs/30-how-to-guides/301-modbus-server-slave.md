@@ -533,13 +533,13 @@ A `Unit ID` field exists in the Modbus TCP protocol, and is used to relay Modbus
 
 To make it work correctly, TCP manages the `slaveId` field as follows:
 
-* The TCP codec accepts any Unit ID from 1 to 255 in either direction (i.e. above the Modbus RTU limit of 247), 0 being a broadcast
+* The TCP codec accepts any Unit ID from 1 to 255 in either direction (i.e. above the Modbus RTU limit of 247), and 0 in responses
 * When used with a TCP interface, the server will accept any Unit ID value (with RTU, it will discard requests that do not match its own `slaveId` except for broadcast requests)
-* Broadcast requests (`slaveId` 0) are still handled correctly (response is dropped, request is completed right after handling the frame to the application layer)
+* A TCP server doesn't handle Unit ID 0 as a broadcast: it addresses the server itself, which answers as for any other Unit ID (Modbus TCP Implementation Guide). Over RTU, `slaveId` 0 remains a broadcast (no response), and the client still sends Unit ID 0 as a broadcast over TCP (write only, no response expected)
 
 In short, you don't have to worry about the `slaveId` field when starting a Modbus TCP server:
 
 * The server will accept any Unit ID in received requests, and will echo it back in the response
 * The client will accept to send requests to hosts with any Unit ID value even above the Modbus RTU limit of 247
 
-When connecting a TCP interface to an EZModbus Bridge, the Unit ID received will become the `slaveId` on the RTU side, and vice-versa.
+When connecting a TCP interface to an EZModbus Bridge, the Unit ID received will become the `slaveId` on the RTU side, and vice-versa. A Unit ID 0 write is forwarded as an RTU broadcast, and gets no response on the TCP side.

@@ -2255,6 +2255,43 @@ void test_server_unit_id_255() {
     Modbus::Logger::logln();
 }
 
+// Regression: Unit ID 0 was handled as a broadcast by the TCP server: a read got no answer,
+// a write was executed without acknowledgement. Over TCP, 0 addresses the device itself
+// (Modbus TCP Implementation Guide V1.0b, p.23): it must answer and echo Unit ID 0.
+void test_server_unit_id_0() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_SERVER_UNIT_ID_0");
+
+    int sock = rawConnect(MODBUS_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sock >= 0, "raw connect to server failed");
+
+    // Read holding register 0
+    uint8_t req[RAW_READ_HR_REQ_SIZE];
+    rawBuildReadHrRequest(req, 0x0F11, 0, 0x00);
+    TEST_ASSERT_TRUE(rawSendAll(sock, req, sizeof(req)));
+    uint8_t resp[RAW_READ_HR_RESP_SIZE];
+    size_t gotRead = rawRecvExact(sock, resp, sizeof(resp));
+
+    // Write holding register 0 (FC06): acknowledged by the echo of the request
+    const uint8_t writeReq[12] = { 0x0F, 0x12, 0x00, 0x00, 0x00, 0x06, 0x00, 0x06, 0x00, 0x00, 0x12, 0x34 };
+    TEST_ASSERT_TRUE(rawSendAll(sock, writeReq, sizeof(writeReq)));
+    uint8_t writeResp[12];
+    size_t gotWrite = rawRecvExact(sock, writeResp, sizeof(writeResp));
+    ::close(sock);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(RAW_READ_HR_RESP_SIZE, gotRead, "no response to a read with Unit ID 0");
+    TEST_ASSERT_EQUAL_HEX16(0x0F11, rawTid(resp));
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x00, resp[6], "response should echo Unit ID 0");
+    TEST_ASSERT_EQUAL_HEX16(MBT_INIT_HOLDING_REGISTER_VALUE(0), rawReadHrRespValue(resp));
+    TEST_ASSERT_EQUAL_MESSAGE(sizeof(writeResp), gotWrite, "no acknowledgement of a write with Unit ID 0");
+    TEST_ASSERT_EQUAL_HEX8_ARRAY_MESSAGE(writeReq, writeResp, sizeof(writeResp), "write response should echo the request");
+    TEST_ASSERT_EQUAL_HEX16(0x1234, serverHoldingRegisters[0]);
+
+    Modbus::Logger::logln("TEST_SERVER_UNIT_ID_0 - OK");
+    Modbus::Logger::logln();
+}
+
 // ===================================================================================
 // MALFORMED REQUESTS
 // A request received without communication error but that can't be handled must be
@@ -2279,8 +2316,8 @@ static const MalformedCase MALFORMED_CASES[] = {
     { "FC03 truncated PDU",         TEST_SLAVE_ID, {0x03, 0x00, 0x00, 0x00}, 4,                          0x83, 0x03 },
     { "FC05 value not 0/FF00",      TEST_SLAVE_ID, {0x05, 0x00, 0x00, 0x12, 0x34}, 5,                    0x85, 0x03 },
     { "FC16 byte count mismatch",   TEST_SLAVE_ID, {0x10, 0x00, 0x00, 0x00, 0x02, 0x03, 0x00, 0x01, 0x00}, 9, 0x90, 0x03 },
-    { "broadcast, unsupported FC",  0x00,          {0x2B, 0x0E, 0x01, 0x00}, 4,                          0, 0 },
-    { "broadcast, FC16 malformed",  0x00,          {0x10, 0x00, 0x00, 0x00, 0x02, 0x03, 0x00, 0x01, 0x00}, 9, 0, 0 },
+    { "Unit ID 0, unsupported FC",  0x00,          {0x2B, 0x0E, 0x01, 0x00}, 4,                          0xAB, 0x01 },
+    { "Unit ID 0, FC16 malformed",  0x00,          {0x10, 0x00, 0x00, 0x00, 0x02, 0x03, 0x00, 0x01, 0x00}, 9, 0x90, 0x03 },
 };
 
 void test_server_malformed_requests_exceptions() {
@@ -2389,6 +2426,52 @@ void test_server_unencodable_response_exception() {
     ::close(sock);
 
     Modbus::Logger::logln("TEST_SERVER_UNENCODABLE_RESPONSE_EXCEPTION - OK");
+    Modbus::Logger::logln();
+}
+
+// An application that leaves a Unit ID 0 request unanswered (e.g. a gateway forwarding it as
+// a broadcast) ends its transaction: the next request must not get SLAVE_DEVICE_BUSY.
+void test_server_unanswered_unit_id_0_ends_transaction() {
+    Modbus::Logger::logln();
+    Modbus::Logger::logln("TEST_SERVER_UNANSWERED_UNIT_ID_0_ENDS_TRANSACTION");
+
+    beginIsolatedServer([](const Modbus::Frame& request) {
+        if (request.slaveId == 0) return; // Silent
+        Modbus::Frame response;
+        response.clear();
+        response.type = Modbus::RESPONSE;
+        response.fc = request.fc;
+        response.slaveId = request.slaveId;
+        response.regAddress = request.regAddress;
+        response.regCount = 1;
+        response.data[0] = 0xBBBB;
+        isolatedServerIf.sendFrame(response, nullptr, nullptr);
+    });
+
+    int sock = rawConnect(ISOLATED_SERVER_TEST_PORT);
+    TEST_ASSERT_TRUE_MESSAGE(sock >= 0, "raw connect to server failed");
+
+    uint8_t req[RAW_READ_HR_REQ_SIZE];
+    rawBuildReadHrRequest(req, 0x0E21, 0, 0x00);
+    TEST_ASSERT_TRUE(rawSendAll(sock, req, sizeof(req)));
+    vTaskDelay(pdMS_TO_TICKS(200));
+    uint8_t leftover[RAW_READ_HR_RESP_SIZE];
+    bool unexpected = ::recv(sock, leftover, sizeof(leftover), MSG_DONTWAIT) > 0;
+
+    rawBuildReadHrRequest(req, 0x0E22, 0);
+    TEST_ASSERT_TRUE(rawSendAll(sock, req, sizeof(req)));
+    uint8_t resp[RAW_READ_HR_RESP_SIZE];
+    size_t got = rawRecvExact(sock, resp, sizeof(resp));
+    ::close(sock);
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_FALSE_MESSAGE(unexpected, "unanswered request got a response");
+    TEST_ASSERT_EQUAL_MESSAGE(sizeof(resp), got, "next request not answered");
+    TEST_ASSERT_EQUAL_HEX16(0x0E22, rawTid(resp));
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x03, resp[7], "next request got an exception");
+    TEST_ASSERT_EQUAL_HEX16(0xBBBB, rawReadHrRespValue(resp));
+
+    Modbus::Logger::logln("TEST_SERVER_UNANSWERED_UNIT_ID_0_ENDS_TRANSACTION - OK");
     Modbus::Logger::logln();
 }
 
@@ -3984,8 +4067,10 @@ void setup() {
     RUN_TEST(test_server_rx_truncated_request_closes_connection);
     RUN_TEST(test_client_unit_id_255);
     RUN_TEST(test_server_unit_id_255);
+    RUN_TEST(test_server_unit_id_0);
     RUN_TEST(test_server_malformed_requests_exceptions);
     RUN_TEST(test_server_unencodable_response_exception);
+    RUN_TEST(test_server_unanswered_unit_id_0_ends_transaction);
     RUN_TEST(test_server_response_not_sent_to_reused_socket);
     RUN_TEST(test_server_safety_timeout_spares_queued_response);
     RUN_TEST(test_server_rx_reused_socket_mid_frame);

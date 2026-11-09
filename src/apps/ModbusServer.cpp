@@ -199,7 +199,8 @@ Server::Result Server::handleRequest(const Modbus::Frame& request,
     Modbus::Frame response;
     bool shouldReply = false;
     Server::Result finalRes = SUCCESS;
-    const bool isBroadcast = Modbus::isBroadcastId(request.slaveId);
+    // No broadcast where the slave ID isn't an address (TCP): Unit ID 0 addresses the server itself
+    const bool isBroadcast = !sourceInterface.checkCatchAllSlaveIds() && Modbus::isBroadcastId(request.slaveId);
 
     // Filter before taking the mutex: a busy server stays silent for frames it would ignore
     // (on a shared RTU bus, requests addressed to other devices)
