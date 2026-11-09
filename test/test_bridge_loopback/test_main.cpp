@@ -440,6 +440,35 @@ void test_bridge_malformed_request_exception() {
     TEST_ASSERT_EQUAL_HEX8(Modbus::ILLEGAL_FUNCTION, resp[8]);
 }
 
+// A write with Unit ID 0 is forwarded as an RTU broadcast: executed by the RTU slave, no
+// answer on TCP, and the TCP side is ready for the next request right away
+void test_bridge_unit_id_0_broadcast() {
+    Modbus::Frame request = {
+        .type = Modbus::REQUEST, .fc = Modbus::WRITE_REGISTER, .slaveId = 0,
+        .regAddress = WRITE_HOLDING_ADDR, .regCount = 1, .data = {0x5A5A}
+    };
+    TEST_ASSERT_TRUE_MESSAGE(bridgeSend(request, 0x0D11), "cannot send request to bridge");
+    vTaskDelay(pdMS_TO_TICKS(300));
+    int leftover = tcpClient.available();
+    uint16_t written = serverHoldingRegisters[WRITE_HOLDING_ADDR];
+
+    Modbus::Frame next = {
+        .type = Modbus::REQUEST, .fc = Modbus::READ_HOLDING_REGISTERS, .slaveId = TEST_SLAVE_ID,
+        .regAddress = READ_HOLDING_ADDR, .regCount = 1, .data = {}
+    };
+    bool sent = bridgeSend(next, 0x0D12);
+    uint8_t adu[ModbusCodec::TCP::MAX_FRAME_SIZE];
+    size_t len = sent ? bridgeReceive(adu, sizeof(adu), BRIDGE_TIMEOUT_MS) : 0;
+
+    TEST_ASSERT_START();
+    TEST_ASSERT_EQUAL_MESSAGE(0, leftover, "broadcast answered on the TCP side");
+    TEST_ASSERT_EQUAL_HEX16_MESSAGE(0x5A5A, written, "broadcast not executed by the RTU slave");
+    TEST_ASSERT_TRUE_MESSAGE(sent, "cannot send next request to bridge");
+    TEST_ASSERT_EQUAL_MESSAGE(11, len, "next request not answered");
+    TEST_ASSERT_EQUAL_HEX16(0x0D12, (adu[0] << 8) | adu[1]);
+    TEST_ASSERT_EQUAL(MBT_INIT_HOLDING_REGISTER_VALUE(READ_HOLDING_ADDR), (adu[9] << 8) | adu[10]);
+}
+
 // ===================================================================================
 // BRIDGE LIFECYCLE (in-memory bridges between dummy interfaces)
 // The slave side injects requests, the master side swallows them (silent device).
@@ -2077,6 +2106,7 @@ void setup() {
     RUN_TEST(test_bridge_forward_failure_gateway_exception);
     RUN_TEST(test_bridge_late_response_not_forwarded);
     RUN_TEST(test_bridge_malformed_request_exception);
+    RUN_TEST(test_bridge_unit_id_0_broadcast);
     RUN_TEST(test_bridge_destroyed_with_armed_timer);
     RUN_TEST(test_apps_remove_rcv_callbacks_on_destruction);
     RUN_TEST(test_client_destroyed_while_timeout_runs);

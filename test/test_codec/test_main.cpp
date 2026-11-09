@@ -694,11 +694,11 @@ void test_codec_tcp() {
     //     TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_SLAVEID, r, "should fail on invalid unit ID for read request");
     // }
 
-    // ==== 5) BROADCAST RESPONSES ====
+    // ==== 5) UNIT ID 0 RESPONSES ====
+    // Over TCP, Unit ID 0 addresses the server itself: its response echoes Unit ID 0
     {
-        std::cout << "\n=== TEST BROADCAST RESPONSES ===" << std::endl;
+        std::cout << "\n=== TEST UNIT ID 0 RESPONSES ===" << std::endl;
         
-        // Test avec broadcast ID en réponse
         for (uint8_t broadcastId : {0}) {
             std::cout << "\nTest avec broadcast ID: " << (int)broadcastId << std::endl;
             
@@ -714,8 +714,8 @@ void test_codec_tcp() {
             if (r != ModbusCodec::SUCCESS) {
                 std::cout << "Échec encode(): " << ModbusCodec::toString(r) << std::endl;
             }
-            TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_SLAVEID, r,
-                "should reject broadcast response at encode");
+            TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, r, "should encode a response with Unit ID 0");
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(0, raw[6], "Unit ID 0 should be echoed in the MBAP header");
         }
     }
 
@@ -902,11 +902,11 @@ void test_codec_tcp() {
         }
     }
 
-    // ==== 9) BROADCAST EXCEPTIONS ====
+    // ==== 9) UNIT ID 0 EXCEPTIONS ====
+    // Over TCP, the server answers Unit ID 0 with an exception too
     {
-        std::cout << "\n=== TEST BROADCAST EXCEPTIONS ===" << std::endl;
+        std::cout << "\n=== TEST UNIT ID 0 EXCEPTIONS ===" << std::endl;
         
-        // Test qu'une réponse exception en broadcast est bien rejetée
         for (uint8_t broadcastId : {0}) {
             std::cout << "\nTest avec broadcast ID: " << (int)broadcastId << std::endl;
             
@@ -923,11 +923,8 @@ void test_codec_tcp() {
             if (r != ModbusCodec::SUCCESS) {
                 std::cout << "Échec encode(): " << ModbusCodec::toString(r) << std::endl;
             }
-            TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::ERR_INVALID_SLAVEID, r,
-                "should reject broadcast response at encode");
-
-            // On ne teste pas le decode() car si l'encode() échoue correctement,
-            // il n'y a pas de raison de tester le décodage d'une trame invalide
+            TEST_ASSERT_EQUAL_MESSAGE(ModbusCodec::SUCCESS, r, "should encode an exception with Unit ID 0");
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(0, raw[6], "Unit ID 0 should be echoed in the MBAP header");
         }
 
         // Unit ID 255 n'est pas un broadcast en TCP : la réponse doit être encodée
