@@ -313,19 +313,33 @@ private:
      *       is pending, which takes it as its answer
      * @note Not before the TX result of the pending request was notified: until then, the frame
      *       answers an earlier one
+     * @note A read response that doesn't carry the requested quantity is replaced by a
+     *       GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND exception
      */
     void forwardResponse(const Modbus::Frame& response) {
+        Modbus::Frame exception;
+        bool valid;
         {
             Lock guard(_pendingMutex);
             if (!_pendingActive || _txPending || response.slaveId != _pending.slaveId || response.fc != _pending.fc) {
                 Modbus::Debug::LOG_MSG("Bridge: dropping unexpected or late response");
                 return;
             }
-            _pendingActive = false;
-            masterInterface->releaseTransaction(this, false);
+            valid = Modbus::hasRequestedCount(_pending, response);
+            if (valid) {
+                _pendingActive = false;
+                masterInterface->releaseTransaction(this, false);
+            } else {
+                closePendingLocked(Modbus::GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND, exception, false);
+            }
         }
         // The timer isn't stopped: its callback finds no expired request (stopping it here could
         // cancel the timer of a request forwarded meanwhile)
+        if (!valid) {
+            Modbus::Debug::LOG_MSG("Bridge: response quantity doesn't match the request, replying exception");
+            slaveInterface->sendFrame(exception, nullptr, nullptr);
+            return;
+        }
         slaveInterface->sendFrame(response, nullptr, nullptr);
     }
 

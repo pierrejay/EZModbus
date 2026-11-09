@@ -103,8 +103,9 @@ void Client::PendingRequest::onTxResult(ModbusInterface::IInterface::Result resu
  * @note Responses are matched by slave ID & FC (TCP responses are already paired by transaction ID).
  *       Over RTU, a response arriving after its request timed out can't be told apart from the
  *       answer to the next request: the timeout must exceed the slave's worst-case response time.
- *       The content isn't checked against the request (e.g. echoed address, number of values): many
- *       slaves aren't strictly compliant, and the spec wouldn't identify the request anyway.
+ * @note A read response must carry the requested quantity, or the request ends with
+ *       ERR_INVALID_RESPONSE: the values returned would be wrong. Write echoes aren't checked:
+ *       they return no value
  */
 bool Client::PendingRequest::onResponse(const Modbus::Frame& response) {
     Completion completion;
@@ -115,11 +116,15 @@ bool Client::PendingRequest::onResponse(const Modbus::Frame& response) {
         if (!_client->_interface.checkCatchAllSlaveIds() && response.slaveId != _meta.slaveId) return false;
         if (response.fc != _meta.fc) return false;
 
-        Modbus::Frame& resp = _client->_responseBuffer;
-        resp = response;
-        resp.regAddress = _meta.regAddress; // Read responses don't carry the address,
-        resp.regCount = _meta.regCount;     // nor the exact number of coils
-        completion = finishLocked(SUCCESS, &resp);
+        if (!Modbus::hasRequestedCount(_meta, response)) {
+            completion = finishLocked(ERR_INVALID_RESPONSE, nullptr);
+        } else {
+            Modbus::Frame& resp = _client->_responseBuffer;
+            resp = response;
+            resp.regAddress = _meta.regAddress; // Read responses don't carry the address,
+            resp.regCount = _meta.regCount;     // nor the exact number of coils
+            completion = finishLocked(SUCCESS, &resp);
+        }
     }
     completion.deliver();
     return true;

@@ -385,4 +385,7 @@ Modbus::Client client(rtu, 5000); // Use a 5 second timeout
     `ERR_TIMEOUT` only means that no response was received in time: the server may still have executed the request (e.g. lost response).
 
 !!! note
-    Over RTU, the protocol has no transaction ID: responses are matched by slave ID & function code only (their content isn't checked against the request, since many devices aren't strictly compliant). Keep the timeout above the worst-case response time of the slave, or a late response may be taken as the answer to the next request.
+    Over RTU, the protocol has no transaction ID: responses are matched by slave ID & function code only. Keep the timeout above the worst-case response time of the slave, or a late response may be taken as the answer to the next request.
+
+!!! note
+    A read response must carry as many values as requested, or the request ends with `ERR_INVALID_RESPONSE`: the values returned would be wrong. A write response isn't checked against the request (echoed address, value or quantity): it returns no value.

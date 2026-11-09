@@ -1062,6 +1062,92 @@ void test_bridge_answered_request_timer_spares_next() {
     TEST_ASSERT_TRUE_MESSAGE(bExpired, "request B didn't time out at its own deadline");
 }
 
+// Regression: a read response carrying another quantity than requested was accepted. The client
+// completed it with the requested quantity (values the slave never sent), the bridge forwarded it.
+// Coils come decoded by whole bytes, padding bits included (e.g. 16 for 10 requested)
+struct ReadCountCase {
+    Modbus::FunctionCode fc;
+    uint16_t requested;
+    uint16_t received;
+    bool valid;
+};
+static const ReadCountCase READ_COUNT_CASES[] = {
+    { Modbus::READ_HOLDING_REGISTERS, 3, 1, false },
+    { Modbus::READ_HOLDING_REGISTERS, 3, 4, false },
+    { Modbus::READ_HOLDING_REGISTERS, 3, 3, true },
+    { Modbus::READ_COILS, 10, 8, false },
+    { Modbus::READ_COILS, 10, 24, false },
+    { Modbus::READ_COILS, 10, 16, true },
+    { Modbus::READ_COILS, 10, 10, true }, // Exact count (custom interface)
+};
+
+void test_client_rejects_read_response_with_wrong_count() {
+    static DummyMaster side;
+    alignas(Modbus::Client) static uint8_t storage[sizeof(Modbus::Client)];
+    auto* client = new (storage) Modbus::Client(side, LOCAL_CLIENT_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Client::SUCCESS, client->begin());
+
+    char msg[96];
+    for (const auto& c : READ_COUNT_CASES) {
+        Modbus::Frame request = {
+            .type = Modbus::REQUEST, .fc = c.fc, .slaveId = TEST_SLAVE_ID,
+            .regAddress = 0, .regCount = c.requested, .data = {}
+        };
+        Modbus::Frame response;
+        Modbus::Client::Result tracker = Modbus::Client::NODATA;
+        volatile Modbus::Client::Result& result = tracker; // Written by the timer daemon on timeout
+        Modbus::Client::Result sent = client->sendRequest(request, response, &tracker);
+        Modbus::Frame frame;
+        side.getReceivedFrame(frame); // The request
+        frame = request;
+        frame.type = Modbus::RESPONSE;
+        frame.regCount = c.received;
+        side.transmitFrame(frame);
+        uint32_t t0 = Modbus::TIME_MS();
+        while (result == Modbus::Client::NODATA && Modbus::TIME_MS() - t0 < LOCAL_CLIENT_TIMEOUT_MS + 100) vTaskDelay(1);
+
+        snprintf(msg, sizeof(msg), "%s: %u requested, %u received",
+                 Modbus::toString(c.fc), (unsigned)c.requested, (unsigned)c.received);
+        TEST_ASSERT_EQUAL_MESSAGE(Modbus::Client::SUCCESS, sent, msg);
+        TEST_ASSERT_EQUAL_MESSAGE(c.valid ? Modbus::Client::SUCCESS : Modbus::Client::ERR_INVALID_RESPONSE,
+                                  tracker, msg);
+        if (c.valid) TEST_ASSERT_EQUAL_MESSAGE(c.requested, response.regCount, msg);
+    }
+    client->~Client();
+}
+
+void test_bridge_rejects_read_response_with_wrong_count() {
+    static ModbusInterface::Dummy slaveSide;
+    static DummyMaster masterSide;
+    alignas(Modbus::Bridge) static uint8_t storage[sizeof(Modbus::Bridge)];
+    auto* bridge = new (storage) Modbus::Bridge(masterSide, slaveSide, LOCAL_BRIDGE_TIMEOUT_MS);
+    TEST_ASSERT_EQUAL(Modbus::Bridge::SUCCESS, bridge->begin());
+
+    char msg[96];
+    for (const auto& c : READ_COUNT_CASES) {
+        Modbus::Frame request = {
+            .type = Modbus::REQUEST, .fc = c.fc, .slaveId = TEST_SLAVE_ID,
+            .regAddress = 0, .regCount = c.requested, .data = {}
+        };
+        slaveSide.transmitFrame(request);
+        Modbus::Frame frame;
+        bool forwarded = masterSide.getReceivedFrame(frame);
+        frame = request;
+        frame.type = Modbus::RESPONSE;
+        frame.regCount = c.received;
+        masterSide.transmitFrame(frame);
+        bool answered = slaveSide.getReceivedFrame(frame);
+
+        snprintf(msg, sizeof(msg), "%s: %u requested, %u received",
+                 Modbus::toString(c.fc), (unsigned)c.requested, (unsigned)c.received);
+        TEST_ASSERT_TRUE_MESSAGE(forwarded, msg);
+        TEST_ASSERT_TRUE_MESSAGE(answered, msg);
+        TEST_ASSERT_EQUAL_MESSAGE(c.valid ? Modbus::NULL_EXCEPTION : Modbus::GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND,
+                                  frame.exceptionCode, msg);
+    }
+    bridge->~Bridge();
+}
+
 // Regression: when sendFrame() failed at once, the failure was applied twice: by the TX callback,
 // then by sendRequest() itself. If the first completion started request B (here from the
 // completion callback), the second one ended B with A's failure.
@@ -2006,6 +2092,8 @@ void setup() {
     RUN_TEST(test_server_add_words_all_or_nothing);
     RUN_TEST(test_bridge_begin_registers_once);
     RUN_TEST(test_bridge_answered_request_timer_spares_next);
+    RUN_TEST(test_client_rejects_read_response_with_wrong_count);
+    RUN_TEST(test_bridge_rejects_read_response_with_wrong_count);
     RUN_TEST(test_client_sync_send_failure_applied_once);
     RUN_TEST(test_client_late_timeout_callback_spares_next);
     RUN_TEST(test_client_sync_fallback_spares_next);
