@@ -535,7 +535,7 @@ To make it work correctly, TCP manages the `slaveId` field as follows:
 
 * The TCP codec accepts any Unit ID from 1 to 255 in either direction (i.e. above the Modbus RTU limit of 247), and 0 in responses
 * When used with a TCP interface, the server will accept any Unit ID value (with RTU, it will discard requests that do not match its own `slaveId` except for broadcast requests)
-* Over TCP, Unit ID 0 isn't a broadcast: it addresses the server itself, which answers as for any other Unit ID (Modbus TCP Implementation Guide). Over RTU, `slaveId` 0 remains a broadcast (no response)
+* A TCP server doesn't handle Unit ID 0 as a broadcast: it addresses the server itself, which answers as for any other Unit ID (Modbus TCP Implementation Guide). Over RTU, `slaveId` 0 remains a broadcast (no response), and the client still sends Unit ID 0 as a broadcast over TCP (write only, no response expected)
 
 In short, you don't have to worry about the `slaveId` field when starting a Modbus TCP server:
 
